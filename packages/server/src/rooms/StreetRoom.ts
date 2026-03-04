@@ -62,7 +62,7 @@ interface ClientAuth {
   userId: string;
   clerkId: string;
   displayName: string;
-  avatarIndex: number;
+  avatarDefinition: AvatarDefinition;
   lastPosition: Vector3 | null;
 }
 
@@ -86,6 +86,8 @@ export class StreetRoom extends Room<StreetRoomState> {
   private playerVisits = new Map<string, PlotVisit | null>();
   private plotCache: PlotSnapshot[] = [];
   private daemonManager: DaemonManager | null = null;
+  /** Full avatar definitions keyed by sessionId (schema only stores avatarIndex) */
+  private avatarDefinitions = new Map<string, AvatarDefinition>();
 
   override maxClients = MAX_CLIENTS;
 
@@ -115,6 +117,9 @@ export class StreetRoom extends Room<StreetRoomState> {
     );
     this.onMessage("daemon_toggle_roam", (client, data) =>
       this.handleDaemonToggleRoam(client, data),
+    );
+    this.onMessage("avatar_update", (client, data) =>
+      this.handleAvatarUpdate(client, data),
     );
 
     // Initialize daemon manager
@@ -162,7 +167,7 @@ export class StreetRoom extends Room<StreetRoomState> {
         userId: "00000000-0000-0000-0000-000000000000",
         clerkId: "dev_clerk_id",
         displayName: "Dev User",
-        avatarIndex: 0,
+        avatarDefinition: { avatarIndex: 0 },
         lastPosition: null,
       };
     }
@@ -193,7 +198,7 @@ export class StreetRoom extends Room<StreetRoomState> {
       userId: user.id,
       clerkId,
       displayName: user.display_name,
-      avatarIndex: user.avatar_definition?.avatarIndex ?? 0,
+      avatarDefinition: user.avatar_definition ?? { avatarIndex: 0 },
       lastPosition: user.last_position,
     };
   }
@@ -204,22 +209,23 @@ export class StreetRoom extends Room<StreetRoomState> {
     const player = new PlayerSchema();
     player.userId = auth.userId;
     player.displayName = auth.displayName;
-    player.avatarIndex = auth.avatarIndex;
+    player.avatarIndex = auth.avatarDefinition.avatarIndex ?? 0;
     player.posX = spawn.x;
     player.posY = spawn.y;
     player.posZ = spawn.z;
     player.rotation = 0;
 
     this.state.players.set(client.sessionId, player);
+    this.avatarDefinitions.set(client.sessionId, auth.avatarDefinition);
     this.playerVisits.set(client.sessionId, null);
 
     // Send world snapshot to joining client
     const players: IPlayerState[] = [];
-    this.state.players.forEach((p: PlayerSchema) => {
+    this.state.players.forEach((p: PlayerSchema, sessionId: string) => {
       players.push({
         userId: p.userId,
         displayName: p.displayName,
-        avatarDefinition: { avatarIndex: p.avatarIndex },
+        avatarDefinition: this.avatarDefinitions.get(sessionId) || { avatarIndex: p.avatarIndex },
         position: { x: p.posX, y: p.posY, z: p.posZ },
         rotation: p.rotation,
         velocity: { x: p.velX, y: p.velY, z: p.velZ },
@@ -242,7 +248,7 @@ export class StreetRoom extends Room<StreetRoomState> {
         player: {
           userId: auth.userId,
           displayName: auth.displayName,
-          avatarDefinition: { avatarIndex: auth.avatarIndex },
+          avatarDefinition: auth.avatarDefinition,
           position: spawn,
           rotation: 0,
           velocity: { x: 0, y: 0, z: 0 },
@@ -288,6 +294,7 @@ export class StreetRoom extends Room<StreetRoomState> {
     }
 
     this.state.players.delete(client.sessionId);
+    this.avatarDefinitions.delete(client.sessionId);
     this.playerVisits.delete(client.sessionId);
   }
 
@@ -631,6 +638,25 @@ export class StreetRoom extends Room<StreetRoomState> {
     if (rows.length === 0) return;
 
     this.daemonManager.setRoaming(data.daemonId, data.enabled);
+  }
+
+  private handleAvatarUpdate(
+    client: Client,
+    data: { avatarDefinition: AvatarDefinition },
+  ): void {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || !data.avatarDefinition) return;
+
+    // Update stored definition
+    player.avatarIndex = data.avatarDefinition.avatarIndex ?? 0;
+    this.avatarDefinitions.set(client.sessionId, data.avatarDefinition);
+
+    // Broadcast to all clients (including sender, so they see confirmation)
+    this.broadcast("player_avatar_update", {
+      type: "player_avatar_update" as const,
+      userId: player.userId,
+      avatarDefinition: data.avatarDefinition,
+    });
   }
 
   private tick(): void {

@@ -91,6 +91,13 @@ async function init() {
       avatarManager.localPlayerId = yourUserId;
       for (const p of players) {
         avatarManager.addPlayer(p);
+        // Load custom avatar mesh if available
+        if (p.avatarDefinition.meshyTaskId) {
+          avatarManager.loadCustomAvatar(
+            p.userId,
+            `${import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`}/api/avatar/mesh/${p.avatarDefinition.meshyTaskId}/model`,
+          );
+        }
       }
       // Store plot data for tracking and rendering
       plotSnapshots = plots;
@@ -115,6 +122,12 @@ async function init() {
     },
     onPlayerJoin(player) {
       avatarManager.addPlayer(player);
+      if (player.avatarDefinition.meshyTaskId) {
+        avatarManager.loadCustomAvatar(
+          player.userId,
+          `${import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`}/api/avatar/mesh/${player.avatarDefinition.meshyTaskId}/model`,
+        );
+      }
     },
     onPlayerLeave(userId) {
       avatarManager.removePlayer(userId);
@@ -265,6 +278,8 @@ async function init() {
       const err = await res.json().catch(() => ({ error: "Save failed" }));
       throw new Error(err.error || "Save failed");
     }
+    // Notify server so it broadcasts the update to all clients
+    network.sendAvatarUpdate(avatarDefinition);
   };
 
   // Daemon panel wiring
@@ -717,6 +732,82 @@ async function init() {
   info.innerHTML =
     "Click to look around | WASD to move | Shift to run | Enter to chat | Tab to target | B to build | G gallery | V avatar | N daemons";
   document.body.appendChild(info);
+
+  // Location HUD (top right, discreet)
+  const locationHud = document.createElement("div");
+  locationHud.id = "location-hud";
+  locationHud.style.cssText = `
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    color: rgba(255,255,255,0.7);
+    font-family: system-ui, sans-serif;
+    font-size: 12px;
+    background: rgba(0,0,0,0.4);
+    padding: 6px 10px;
+    border-radius: 4px;
+    z-index: 50;
+    text-align: right;
+    pointer-events: none;
+    min-width: 120px;
+  `;
+  document.body.appendChild(locationHud);
+
+  // Helper to find the nearest plot to a position and compute compass info
+  function updateLocationHud(pos: THREE.Vector3): void {
+    // Compute angle on the ring (atan2 of x,z gives ring angle)
+    const ringAngle = Math.atan2(pos.z, pos.x);
+    // Normalize to 0-360 degrees
+    const degrees = ((ringAngle * 180 / Math.PI) % 360 + 360) % 360;
+    // Distance from ring center
+    const distFromCenter = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
+
+    // Find nearest plot
+    let nearestPlot: typeof plotSnapshots[0] | null = null;
+    let nearestDist = Infinity;
+    for (const plot of plotSnapshots) {
+      const dx = pos.x - plot.placement.position.x;
+      const dz = pos.z - plot.placement.position.z;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestPlot = plot;
+      }
+    }
+
+    // Are we on a plot?
+    const onPlot = currentPlotUuid ? plotSnapshots.find(p => p.uuid === currentPlotUuid) : null;
+
+    let locationText = "";
+    if (onPlot) {
+      locationText = `<span style="color:#88ddaa">${escapeHtml(onPlot.ownerName)}'s Plot</span>`;
+    } else if (nearestPlot && nearestDist < 40) {
+      locationText = `Near ${escapeHtml(nearestPlot.ownerName)}'s plot`;
+    } else {
+      locationText = "The Street";
+    }
+
+    // Ring position as compass bearing
+    const compass = Math.round(degrees);
+    locationHud.innerHTML = `${locationText}<br><span style="opacity:0.5">${compass}\u00B0 \u00B7 ${Math.round(distFromCenter)}m from center</span>`;
+  }
+
+  function escapeHtml(text: string): string {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  // Update location HUD periodically (every 0.5s to avoid spam)
+  let locationHudTimer = 0;
+  // Update location HUD via second game loop callback
+  streetScene.onUpdate((dt) => {
+    locationHudTimer += dt;
+    if (locationHudTimer >= 0.5) {
+      locationHudTimer = 0;
+      updateLocationHud(localPosition);
+    }
+  });
 
   streetScene.start();
 }

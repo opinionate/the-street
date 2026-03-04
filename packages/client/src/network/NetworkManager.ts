@@ -173,6 +173,10 @@ export class NetworkManager {
     this.room?.send("daemon_toggle_roam", { daemonId, enabled });
   }
 
+  sendAvatarUpdate(avatarDefinition: unknown): void {
+    this.room?.send("avatar_update", { avatarDefinition });
+  }
+
   getSessionId(): string | null {
     return this.room?.sessionId ?? null;
   }

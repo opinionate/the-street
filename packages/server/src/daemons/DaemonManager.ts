@@ -744,6 +744,33 @@ export class DaemonManager {
       return;
     }
 
+    // Relationship-gated interaction: wary daemons may rebuff
+    const playerRel = daemon.relationships.get(playerId);
+    if (playerRel?.sentiment === "wary") {
+      const type = daemon.behavior.type;
+      if (type === "shopkeeper" && Math.random() < 0.4) {
+        // Shopkeepers sometimes refuse service
+        const name = playerName || playerRel.targetName || "you";
+        this.broadcastDaemonChat(daemon, pick([
+          `I don't think I want to do business with ${name} right now.`,
+          `*turns away* Come back when you've learned some manners.`,
+          `Hmph. Maybe try another shop, ${name}.`,
+        ]), playerId);
+        daemon.state.mood = "annoyed";
+        this.broadcastDaemonEmote(daemon, "*crosses arms dismissively*", "annoyed");
+        return;
+      }
+      if (type === "guard" && Math.random() < 0.3) {
+        const name = playerName || playerRel.targetName || "you";
+        this.broadcastDaemonChat(daemon, pick([
+          `${name}, I have nothing to say to you. Move along.`,
+          `*blocks path* You're not welcome here.`,
+        ]), playerId);
+        daemon.state.mood = "annoyed";
+        return;
+      }
+    }
+
     // Get or create conversation memory
     let memory = daemon.conversationMemory.get(playerId);
     if (!memory) {
@@ -831,6 +858,19 @@ export class DaemonManager {
 
   private sendCannedResponse(daemon: DaemonInstance, playerId: string): void {
     const behavior = daemon.behavior;
+    const rel = daemon.relationships.get(playerId);
+
+    // Wary daemons give shorter/colder canned responses
+    if (rel?.sentiment === "wary") {
+      const coldResponses = [
+        "...",
+        "*turns away slightly*",
+        "Hmm.",
+        "I'm busy right now.",
+      ];
+      this.broadcastDaemonChat(daemon, pick(coldResponses), playerId);
+      return;
+    }
 
     if (behavior.responses) {
       const keys = Object.keys(behavior.responses);
@@ -1701,8 +1741,45 @@ export class DaemonManager {
       if (now - lastWarn < COOLDOWN_MS) continue;
 
       daemon.greetCooldowns.set(player.userId, now);
-      const message = daemon.behavior.greetingMessage || "Halt! This area is being watched.";
 
+      // Relationship-gated guard behavior
+      const rel = daemon.relationships.get(player.userId);
+      const playerName = player.displayName || "citizen";
+      let message: string;
+      let mood: DaemonMood = "neutral";
+
+      if (rel?.sentiment === "friendly") {
+        message = pick([
+          `${playerName}, all clear here. Carry on.`,
+          `Ah, ${playerName}. Safe travels.`,
+          `Good to see you, ${playerName}. Everything's in order.`,
+        ]);
+        mood = "happy";
+      } else if (rel?.sentiment === "wary") {
+        message = pick([
+          `${playerName}... I'm watching you. Don't cause trouble.`,
+          `You again, ${playerName}? Behave yourself.`,
+          `*narrows eyes* ${playerName}. Move along.`,
+        ]);
+        mood = "annoyed";
+        daemon.state.currentAction = "thinking"; // suspicious pose
+        setTimeout(() => {
+          if (daemon.state.currentAction === "thinking") {
+            daemon.state.currentAction = "idle";
+            this.broadcast("daemon_move", {
+              type: "daemon_move" as const,
+              daemonId: daemon.state.daemonId,
+              position: daemon.state.currentPosition,
+              rotation: daemon.state.currentRotation,
+              action: "idle",
+            });
+          }
+        }, 3000);
+      } else {
+        message = daemon.behavior.greetingMessage || "Halt! This area is being watched.";
+      }
+
+      daemon.state.mood = mood;
       this.broadcastDaemonChat(daemon, message, player.userId);
 
       break;

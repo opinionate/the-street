@@ -1,5 +1,6 @@
 import * as THREE from "three";
-import type { PlayerState, Vector3 as Vec3 } from "@the-street/shared";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import type { PlayerState, Vector3 as Vec3, AvatarDefinition } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
 
 const ACCENT_COLORS = [0x00ffff, 0xff00ff, 0x39ff14, 0xff6600, 0xaa44ff, 0xffff00];
@@ -47,10 +48,79 @@ interface AvatarInstance {
 export class AvatarManager {
   private avatars: Map<string, AvatarInstance> = new Map();
   private scene: THREE.Scene;
+  private gltfLoader = new GLTFLoader();
   localPlayerId: string | null = null;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
+  }
+
+  /** Load a custom GLB avatar model, replacing the procedural mesh */
+  async loadCustomAvatar(userId: string, glbUrl: string): Promise<void> {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+
+    try {
+      const gltf = await new Promise<any>((resolve, reject) => {
+        this.gltfLoader.load(glbUrl, resolve, undefined, reject);
+      });
+
+      const model = gltf.scene as THREE.Group;
+
+      // Scale model to avatar height (~1.8m)
+      const box = new THREE.Box3().setFromObject(model);
+      const height = box.max.y - box.min.y;
+      if (height > 0) {
+        const scale = 1.8 / height;
+        model.scale.setScalar(scale);
+      }
+
+      // Center the model
+      const centeredBox = new THREE.Box3().setFromObject(model);
+      model.position.y = -centeredBox.min.y;
+
+      // Remove old procedural avatar body
+      const oldBody = avatar.limbs.body;
+      if (oldBody.parent) {
+        // Preserve non-body children (name label, chat bubbles)
+        const preserveChildren: THREE.Object3D[] = [];
+        avatar.group.children.forEach((child) => {
+          if (child !== oldBody && !(child instanceof THREE.Mesh)) {
+            preserveChildren.push(child);
+          }
+        });
+
+        // Clear the group
+        while (avatar.group.children.length > 0) {
+          avatar.group.remove(avatar.group.children[0]);
+        }
+
+        // Add the GLB model
+        avatar.group.add(model);
+
+        // Re-add preserved children (name labels, sprites)
+        for (const child of preserveChildren) {
+          avatar.group.add(child);
+        }
+      }
+
+      // Mark as custom so animation doesn't try to move procedural limbs
+      (avatar as any).isCustomModel = true;
+    } catch (err) {
+      console.error(`Failed to load custom avatar for ${userId}:`, err);
+      // Keep procedural fallback — no action needed
+    }
+  }
+
+  /** Update a player's avatar (called when server broadcasts avatar change) */
+  updatePlayerAvatar(userId: string, avatarDefinition: AvatarDefinition, apiUrl: string): void {
+    if (avatarDefinition.customMeshHash) {
+      // Has a custom mesh — try to load it
+      // The mesh would be served via the avatar mesh endpoint
+      if (avatarDefinition.meshyTaskId) {
+        this.loadCustomAvatar(userId, `${apiUrl}/api/avatar/mesh/${avatarDefinition.meshyTaskId}/model`);
+      }
+    }
   }
 
   /** Notify avatar manager that the local player is moving (call from game loop) */

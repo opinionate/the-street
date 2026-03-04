@@ -18,7 +18,9 @@ import type {
   PlayerState as IPlayerState,
   PlotSnapshot,
   WorldObject,
+  AvatarDefinition,
 } from "@the-street/shared";
+import { DaemonManager } from "../daemons/DaemonManager.js";
 
 // Colyseus schema for syncing player state
 export class PlayerSchema extends Schema {
@@ -76,6 +78,7 @@ export class StreetRoom extends Room<StreetRoomState> {
   private saveInterval: ReturnType<typeof setInterval> | null = null;
   private playerVisits = new Map<string, PlotVisit | null>();
   private plotCache: PlotSnapshot[] = [];
+  private daemonManager: DaemonManager | null = null;
 
   override maxClients = MAX_CLIENTS;
 
@@ -97,6 +100,18 @@ export class StreetRoom extends Room<StreetRoomState> {
     this.onMessage("object_update_state", (client, data) =>
       this.handleObjectUpdateState(client, data),
     );
+    this.onMessage("daemon_interact", (client, data) =>
+      this.handleDaemonInteract(client, data),
+    );
+
+    // Initialize daemon manager
+    this.daemonManager = new DaemonManager(
+      (type, data) => this.broadcast(type, data),
+      (sessionId, type, data) => {
+        const client = this.clients.find((c) => c.sessionId === sessionId);
+        if (client) client.send(type, data);
+      },
+    );
 
     // Server tick at 20Hz
     this.tickInterval = setInterval(() => this.tick(), 1000 / TICK_RATE);
@@ -107,10 +122,10 @@ export class StreetRoom extends Room<StreetRoomState> {
       POSITION_SAVE_INTERVAL * 1000,
     );
 
-    // Load plot cache
-    this.loadPlots().catch((err) =>
-      console.error("Failed to load plots:", err),
-    );
+    // Load plot cache and daemons
+    this.loadPlots()
+      .then(() => this.loadDaemons())
+      .catch((err) => console.error("Failed to load plots/daemons:", err));
   }
 
   override async onAuth(
@@ -186,6 +201,7 @@ export class StreetRoom extends Room<StreetRoomState> {
       type: "world_snapshot" as const,
       players,
       plots: this.plotCache,
+      daemons: this.daemonManager?.getDaemonStates() || [],
     });
 
     // Broadcast join to others
@@ -464,9 +480,36 @@ export class StreetRoom extends Room<StreetRoomState> {
     });
   }
 
+  private async loadDaemons(): Promise<void> {
+    if (!this.daemonManager) return;
+    const plotUuids = this.plotCache.map((p) => p.uuid);
+    await this.daemonManager.loadDaemons(plotUuids);
+  }
+
+  private handleDaemonInteract(
+    client: Client,
+    data: { daemonId: string },
+  ): void {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || !this.daemonManager) return;
+    this.daemonManager.handleInteract(data.daemonId, player.userId, client.sessionId);
+  }
+
   private tick(): void {
     // Batch position updates are handled by Colyseus schema sync
-    // Additional tick logic can go here
+
+    // Tick daemons
+    if (this.daemonManager) {
+      const players: { userId: string; position: Vector3; sessionId: string }[] = [];
+      this.state.players.forEach((p: PlayerSchema, sessionId: string) => {
+        players.push({
+          userId: p.userId,
+          position: { x: p.posX, y: p.posY, z: p.posZ },
+          sessionId,
+        });
+      });
+      this.daemonManager.tick(1 / TICK_RATE, players);
+    }
   }
 
   private async loadPlots(): Promise<void> {

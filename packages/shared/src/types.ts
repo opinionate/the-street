@@ -110,8 +110,22 @@ export interface PlotSnapshot {
 
 export type AvatarAnimState = "idle" | "walk" | "run" | "turn_left" | "turn_right";
 
+export interface AvatarAppearance {
+  bodyType: "default" | "slim" | "stocky";
+  skinTone: string;       // hex color
+  hairStyle: string;      // description
+  hairColor: string;      // hex color
+  outfit: string;         // description
+  outfitColors: string[]; // hex colors
+  accessories: string[];  // descriptions
+  accentColor: string;    // hex color for glasses glow, etc.
+}
+
 export interface AvatarDefinition {
-  avatarIndex: number; // index into default avatar set (0-5 for V1)
+  avatarIndex: number;                  // fallback default avatar
+  customAppearance?: AvatarAppearance;  // AI-generated description
+  customMeshHash?: string;              // content hash of custom GLB
+  meshyTaskId?: string;                 // if mesh is still generating
 }
 
 export interface PlayerState {
@@ -121,6 +135,39 @@ export interface PlayerState {
   position: Vector3;
   rotation: number;
   velocity: Vector3;
+}
+
+// --- Daemons ---
+
+export type DaemonBehaviorType = "greeter" | "shopkeeper" | "guide" | "guard";
+
+export interface DaemonBehavior {
+  type: DaemonBehaviorType;
+  greetingMessage?: string;
+  farewellMessage?: string;
+  interactionRadius: number;
+  responses?: Record<string, string>;
+  patrolPath?: Vector3[];
+  idleMessages?: string[];
+}
+
+export interface DaemonDefinition {
+  name: string;
+  description: string;
+  appearance: AvatarAppearance;
+  behavior: DaemonBehavior;
+  plotUuid: string;
+  position: Vector3;
+  rotation: number;
+}
+
+export interface DaemonState {
+  daemonId: string;
+  definition: DaemonDefinition;
+  currentPosition: Vector3;
+  currentRotation: number;
+  currentAction: "idle" | "walking" | "talking" | "waving";
+  targetPlayerId?: string;
 }
 
 // --- Building Codes ---

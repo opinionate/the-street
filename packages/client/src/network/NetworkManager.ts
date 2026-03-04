@@ -4,10 +4,12 @@ import type {
   Vector3,
   PlotSnapshot,
   WorldObject,
+  AvatarDefinition,
+  DaemonState,
 } from "@the-street/shared";
 
 export interface NetworkCallbacks {
-  onWorldSnapshot: (players: PlayerState[], plots: PlotSnapshot[]) => void;
+  onWorldSnapshot: (players: PlayerState[], plots: PlotSnapshot[], daemons?: DaemonState[]) => void;
   onPlayerJoin: (player: PlayerState) => void;
   onPlayerLeave: (userId: string) => void;
   onPlayerMove: (userId: string, position: Vector3, rotation: number) => void;
@@ -27,6 +29,11 @@ export interface NetworkCallbacks {
     objectId: string,
     stateData: Record<string, unknown>
   ) => void;
+  onPlayerAvatarUpdate?: (userId: string, avatarDefinition: AvatarDefinition) => void;
+  onDaemonSpawn?: (daemon: DaemonState) => void;
+  onDaemonDespawn?: (daemonId: string) => void;
+  onDaemonMove?: (daemonId: string, position: Vector3, rotation: number, action: string) => void;
+  onDaemonChat?: (daemonId: string, daemonName: string, content: string, targetUserId?: string) => void;
 }
 
 export class NetworkManager {
@@ -54,7 +61,7 @@ export class NetworkManager {
     if (!this.room) return;
 
     this.room.onMessage("world_snapshot", (data) => {
-      this.callbacks.onWorldSnapshot(data.players, data.plots);
+      this.callbacks.onWorldSnapshot(data.players, data.plots, data.daemons);
     });
 
     this.room.onMessage("player_join", (data) => {
@@ -94,6 +101,26 @@ export class NetworkManager {
       this.callbacks.onObjectStateChange(data.objectId, data.stateData);
     });
 
+    this.room.onMessage("player_avatar_update", (data) => {
+      this.callbacks.onPlayerAvatarUpdate?.(data.userId, data.avatarDefinition);
+    });
+
+    this.room.onMessage("daemon_spawn", (data) => {
+      this.callbacks.onDaemonSpawn?.(data.daemon);
+    });
+
+    this.room.onMessage("daemon_despawn", (data) => {
+      this.callbacks.onDaemonDespawn?.(data.daemonId);
+    });
+
+    this.room.onMessage("daemon_move", (data) => {
+      this.callbacks.onDaemonMove?.(data.daemonId, data.position, data.rotation, data.action);
+    });
+
+    this.room.onMessage("daemon_chat", (data) => {
+      this.callbacks.onDaemonChat?.(data.daemonId, data.daemonName, data.content, data.targetUserId);
+    });
+
     this.room.onError((code, message) => {
       console.error("Room error:", code, message);
     });
@@ -121,6 +148,10 @@ export class NetworkManager {
 
   sendObjectRemove(objectId: string): void {
     this.room?.send("object_remove", { objectId });
+  }
+
+  sendDaemonInteract(daemonId: string): void {
+    this.room?.send("daemon_interact", { daemonId });
   }
 
   getSessionId(): string | null {

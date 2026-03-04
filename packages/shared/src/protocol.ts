@@ -4,6 +4,8 @@ import type {
   PlotSnapshot,
   WorldObject,
   InteractionType,
+  AvatarDefinition,
+  DaemonState,
 } from "./types.js";
 
 // Client -> Server messages
@@ -22,7 +24,8 @@ export type ClientMessage =
       objectId: string;
       stateKey: string;
       stateValue: unknown;
-    };
+    }
+  | { type: "daemon_interact"; daemonId: string };
 
 // Server -> Client messages
 export type ServerMessage =
@@ -57,7 +60,13 @@ export type ServerMessage =
       type: "world_snapshot";
       players: PlayerState[];
       plots: PlotSnapshot[];
-    };
+      daemons?: DaemonState[];
+    }
+  | { type: "player_avatar_update"; userId: string; avatarDefinition: AvatarDefinition }
+  | { type: "daemon_spawn"; daemon: DaemonState }
+  | { type: "daemon_despawn"; daemonId: string }
+  | { type: "daemon_move"; daemonId: string; position: Vector3; rotation: number; action: string }
+  | { type: "daemon_chat"; daemonId: string; daemonName: string; content: string; targetUserId?: string };
 
 // Message type constants for Colyseus
 export const MSG = {
@@ -74,6 +83,12 @@ export const MSG = {
   OBJECT_PLACED: "object_placed",
   OBJECT_REMOVED: "object_removed",
   WORLD_SNAPSHOT: "world_snapshot",
+  PLAYER_AVATAR_UPDATE: "player_avatar_update",
+  DAEMON_INTERACT: "daemon_interact",
+  DAEMON_SPAWN: "daemon_spawn",
+  DAEMON_DESPAWN: "daemon_despawn",
+  DAEMON_MOVE: "daemon_move",
+  DAEMON_CHAT: "daemon_chat",
 } as const;
 
 // Rate limits

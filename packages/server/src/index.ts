@@ -19,6 +19,8 @@ import assetRoutes from "./api/assets.js";
 import metricsRoutes from "./api/metrics.js";
 import moderationRoutes from "./api/moderation.js";
 import galleryRoutes from "./api/gallery.js";
+import avatarRoutes from "./api/avatar.js";
+import daemonRoutes from "./api/daemons.js";
 
 const API_PORT = parseInt(process.env.API_PORT || "3000", 10);
 const COLYSEUS_PORT = parseInt(process.env.COLYSEUS_PORT || "2567", 10);
@@ -47,6 +49,8 @@ async function main(): Promise<void> {
   apiApp.use("/api/assets", assetRoutes);
   apiApp.use("/api/moderation", moderationRoutes);
   apiApp.use("/api/gallery", galleryRoutes);
+  apiApp.use("/api/avatar", avatarRoutes);
+  apiApp.use("/api/daemons", daemonRoutes);
 
   apiApp.listen(API_PORT, () => {
     console.log(`REST API listening on port ${API_PORT}`);

@@ -181,6 +181,29 @@ const MIGRATIONS: { name: string; up: string }[] = [
       CREATE INDEX IF NOT EXISTS idx_generated_objects_created ON generated_objects(created_at DESC);
     `,
   },
+  {
+    name: "010_create_daemons",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemons (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        plot_uuid UUID NOT NULL REFERENCES plots(uuid),
+        owner_id UUID NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        description TEXT,
+        daemon_definition JSONB NOT NULL,
+        appearance JSONB NOT NULL,
+        behavior JSONB NOT NULL,
+        position_x FLOAT NOT NULL DEFAULT 0,
+        position_y FLOAT NOT NULL DEFAULT 0,
+        position_z FLOAT NOT NULL DEFAULT 0,
+        rotation FLOAT NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemons_plot ON daemons(plot_uuid);
+      CREATE INDEX IF NOT EXISTS idx_daemons_owner ON daemons(owner_id);
+    `,
+  },
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

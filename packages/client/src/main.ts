@@ -3,14 +3,17 @@ import { StreetGeometry } from "./scene/StreetGeometry.js";
 import { PlotRenderer } from "./scene/PlotRenderer.js";
 import { ObjectRenderer } from "./scene/ObjectRenderer.js";
 import { AvatarManager } from "./avatar/AvatarManager.js";
+import { DaemonRenderer } from "./avatar/DaemonRenderer.js";
 import { InputManager } from "./input/InputManager.js";
 import { CameraController } from "./camera/CameraController.js";
 import { NetworkManager } from "./network/NetworkManager.js";
 import { ChatUI } from "./ui/ChatUI.js";
 import { CreationPanel } from "./ui/CreationPanel.js";
 import { GalleryPanel } from "./ui/GalleryPanel.js";
+import { AvatarPanel } from "./ui/AvatarPanel.js";
+import { DaemonPanel } from "./ui/DaemonPanel.js";
 import { getDefaultSpawnPoint, getAllPlotPositions } from "@the-street/shared";
-import type { WorldObject, PlotSnapshot } from "@the-street/shared";
+import type { WorldObject, PlotSnapshot, DaemonState } from "@the-street/shared";
 import * as THREE from "three";
 
 const WALK_SPEED = 5;
@@ -27,6 +30,7 @@ async function init() {
   streetScene.scene.add(plotRenderer.plotGroup);
 
   const avatarManager = new AvatarManager(streetScene.scene);
+  const daemonRenderer = new DaemonRenderer(streetScene.scene);
   const objectRenderer = new ObjectRenderer(streetScene.scene);
   const cameraController = new CameraController(streetScene.camera);
   const inputManager = new InputManager(streetScene.renderer.domElement);
@@ -44,6 +48,8 @@ async function init() {
   const galleryPanel = new GalleryPanel(
     import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`,
   );
+  const avatarPanel = new AvatarPanel();
+  const daemonPanel = new DaemonPanel();
 
   // Build button (B key) / Gallery (G key)
   document.addEventListener("keydown", (e) => {
@@ -56,6 +62,10 @@ async function init() {
       creationPanel.toggle();
     } else if (e.key.toLowerCase() === "g") {
       galleryPanel.toggle();
+    } else if (e.key.toLowerCase() === "v") {
+      avatarPanel.toggle();
+    } else if (e.key.toLowerCase() === "n") {
+      daemonPanel.toggle();
     }
   });
 
@@ -71,7 +81,7 @@ async function init() {
     import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:2567`;
 
   const network = new NetworkManager(wsUrl, {
-    onWorldSnapshot(players, plots) {
+    onWorldSnapshot(players, plots, daemons) {
       for (const p of players) {
         avatarManager.addPlayer(p);
       }
@@ -87,6 +97,12 @@ async function init() {
             y: 0,
             z: plot.placement.position.z,
           });
+        }
+      }
+      // Spawn daemons from snapshot
+      if (daemons) {
+        for (const daemon of daemons) {
+          daemonRenderer.spawnDaemon(daemon);
         }
       }
     },
@@ -118,6 +134,21 @@ async function init() {
     onObjectStateChange(_objectId, _stateData) {
       // TODO: update object state
     },
+    onPlayerAvatarUpdate(userId, avatarDefinition) {
+      avatarManager.updatePlayerAvatar(userId, avatarDefinition, apiUrl);
+    },
+    onDaemonSpawn(daemon) {
+      daemonRenderer.spawnDaemon(daemon);
+    },
+    onDaemonDespawn(daemonId) {
+      daemonRenderer.despawnDaemon(daemonId);
+    },
+    onDaemonMove(daemonId, position, rotation, action) {
+      daemonRenderer.moveDaemon(daemonId, position, rotation, action);
+    },
+    onDaemonChat(daemonId, daemonName, content, _targetUserId) {
+      daemonRenderer.showDaemonChat(daemonId, daemonName, content);
+    },
   });
 
   // Zoom wiring
@@ -138,6 +169,92 @@ async function init() {
   // Creation panel wiring
   const apiUrl =
     import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`;
+
+  // Avatar panel wiring
+  avatarPanel.onGenerate = async (description) => {
+    const res = await fetch(`${apiUrl}/api/avatar/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Generation failed" }));
+      throw new Error(err.error || "Generation failed");
+    }
+    const result = await res.json();
+    avatarPanel.setGenerationResult(result.appearance, result.meshyTaskId || null);
+  };
+
+  avatarPanel.onSave = async (avatarDefinition) => {
+    const res = await fetch(`${apiUrl}/api/avatar/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ avatarDefinition }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Save failed" }));
+      throw new Error(err.error || "Save failed");
+    }
+  };
+
+  // Daemon panel wiring
+  daemonPanel.onGenerate = async (description) => {
+    const res = await fetch(`${apiUrl}/api/daemons/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Generation failed" }));
+      throw new Error(err.error || "Generation failed");
+    }
+    const result = await res.json();
+    daemonPanel.setGenerationResult(result.definition);
+  };
+
+  daemonPanel.onCreate = async (definition) => {
+    const plotUuid = daemonPanel.getPlotUuid();
+    if (!plotUuid) throw new Error("Not on a plot");
+
+    const fullDefinition = {
+      ...(definition as object),
+      plotUuid,
+      position: { x: localPosition.x, y: 0, z: localPosition.z },
+      rotation: localRotation,
+    };
+
+    const res = await fetch(`${apiUrl}/api/daemons/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ definition: fullDefinition }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Creation failed" }));
+      throw new Error(err.error || "Creation failed");
+    }
+    // Reload daemon list for this plot
+    loadPlotDaemons(plotUuid);
+  };
+
+  daemonPanel.onDelete = async (daemonId) => {
+    const res = await fetch(`${apiUrl}/api/daemons/${daemonId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) return;
+    const plotUuid = daemonPanel.getPlotUuid();
+    if (plotUuid) loadPlotDaemons(plotUuid);
+  };
+
+  async function loadPlotDaemons(plotUuid: string) {
+    try {
+      const res = await fetch(`${apiUrl}/api/daemons/plot/${plotUuid}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      daemonPanel.setDaemonList(data.daemons || []);
+    } catch {
+      // silent
+    }
+  }
 
   creationPanel.onGenerate = async (description) => {
     const plotUuid = creationPanel.getPlotUuid();
@@ -454,11 +571,19 @@ async function init() {
         currentPlotUuid,
         plot?.ownerName ?? null,
       );
+      daemonPanel.setPlotInfo(
+        currentPlotUuid,
+        plot?.ownerName ?? null,
+      );
+      if (currentPlotUuid) {
+        loadPlotDaemons(currentPlotUuid);
+      }
     }
 
     // Update systems
     elapsedTime += dt;
     avatarManager.update(dt);
+    daemonRenderer.update(dt);
     objectRenderer.update(elapsedTime);
     const playerPos = avatarManager.getLocalPlayerPosition();
     if (playerPos) {
@@ -481,7 +606,7 @@ async function init() {
     z-index: 50;
   `;
   info.innerHTML =
-    "Click to look around | WASD to move | Shift to run | Enter to chat | B to build | G for gallery";
+    "Click to look around | WASD to move | Shift to run | Enter to chat | B to build | G gallery | V avatar | N daemons";
   document.body.appendChild(info);
 
   streetScene.start();

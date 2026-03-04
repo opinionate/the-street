@@ -177,6 +177,7 @@ export class DaemonManager {
   private worldObjects: WorldObjectInfo[] = [];
   private eventTimer = 300 + Math.random() * 300; // first event in 5-10 min
   private lastEventDaemonId: string | null = null;
+  private challengeTimer = 180 + Math.random() * 120; // first challenge in 3-5 min
 
   constructor(
     broadcast: BroadcastFn,
@@ -1023,6 +1024,9 @@ export class DaemonManager {
 
     // Detect and animate daemon gatherings (3+ idle daemons nearby)
     this.tickGatherings(dt, players);
+
+    // Daemon challenges — fun competitions between daemons
+    this.tickChallenges(dt, players);
 
     // Scheduled mini-events
     this.tickEvents(dt, players);
@@ -3070,6 +3074,246 @@ export class DaemonManager {
         }
       }
     });
+  }
+
+  // ─── Daemon Challenges ─────────────────────────────────────────
+
+  /** Daemons challenge each other to fun competitions — creates spectacles for players */
+  private tickChallenges(dt: number, players: PlayerInfo[]): void {
+    if (this.daemons.size < 2) return;
+    if (this.processingAi) return; // Don't overlap with AI conversations
+
+    // Low frequency — check every ~3 minutes
+    this.challengeTimer -= dt;
+    if (this.challengeTimer > 0) return;
+    this.challengeTimer = 180 + Math.random() * 120;
+
+    // Need at least one player watching for the spectacle to matter
+    if (players.length === 0) return;
+
+    // Find two nearby daemons with enough relationship to challenge each other
+    const daemonList = Array.from(this.daemons.entries()).filter(
+      ([, d]) => !d.isMuted && !d.isRecalled && d.state.currentAction === "idle",
+    );
+
+    for (const [idA, daemonA] of daemonList) {
+      for (const [idB, daemonB] of daemonList) {
+        if (idA >= idB) continue; // Avoid duplicates
+        const dist = this.distance(daemonA.state.currentPosition, daemonB.state.currentPosition);
+        if (dist > 20) continue;
+
+        const relAB = daemonA.relationships.get(idB);
+        if (!relAB || relAB.interactionCount < 2) continue;
+
+        // Rivals challenge aggressively, friends challenge playfully
+        const isRival = relAB.sentiment === "wary";
+        const isFriend = relAB.sentiment === "friendly" || relAB.sentiment === "amused";
+        if (!isRival && !isFriend) continue;
+        if (Math.random() > (isRival ? 0.6 : 0.4)) continue;
+
+        const challenge = this.generateChallenge(daemonA, daemonB, isRival);
+        if (!challenge) continue;
+
+        this.runChallenge(daemonA, daemonB, challenge, isRival, players);
+        return; // Only one challenge at a time
+      }
+    }
+  }
+
+  private generateChallenge(
+    challengerDaemon: DaemonInstance,
+    targetDaemon: DaemonInstance,
+    isRival: boolean,
+  ): { type: string; setup: string; lines: string[]; winner: "challenger" | "target" | "draw" } | null {
+    const cName = challengerDaemon.state.definition.name;
+    const tName = targetDaemon.state.definition.name;
+    const cType = challengerDaemon.behavior.type;
+    const tType = targetDaemon.behavior.type;
+
+    type Challenge = { type: string; setup: string; lines: string[]; winner: "challenger" | "target" | "draw" };
+    const challenges: Challenge[] = [];
+
+    // Staring contest — universal
+    challenges.push({
+      type: "staring_contest",
+      setup: isRival
+        ? `${cName}: *stares intensely at ${tName}* You blinked last time. Staring contest. Now.`
+        : `${cName}: Hey ${tName}! Bet I can outstare you. Ready? Go!`,
+      lines: [
+        `${tName}: *stares back* You're on.`,
+        `${cName}: *eyes wide, unblinking* ...`,
+        `${tName}: *refuses to blink* ...`,
+        `${cName}: *starting to sweat* ...`,
+      ],
+      winner: Math.random() < 0.5 ? "challenger" : "target",
+    });
+
+    // Joke-off
+    if (cType === "socialite" || tType === "socialite") {
+      challenges.push({
+        type: "joke_off",
+        setup: `${cName}: ${tName}! Joke-off. Right here, right now. Whoever gets a laugh wins.`,
+        lines: [
+          `${tName}: Oh, you want to go? Fine. Why did the daemon cross the street?`,
+          `${cName}: Because it ran out of RAM! Ha! Beat that.`,
+          `${tName}: That wasn't even good... Okay, what do you call a lazy NPC?`,
+          `${cName}: ...what?`,
+          `${tName}: A default! *finger guns*`,
+        ],
+        winner: Math.random() < 0.5 ? "challenger" : "target",
+      });
+    }
+
+    // Guard inspection challenge
+    if (cType === "guard" || tType === "guard") {
+      challenges.push({
+        type: "inspection",
+        setup: `${cName}: ${tName}, pop quiz! What's the standard patrol procedure for sector 7?`,
+        lines: [
+          `${tName}: *stands at attention* Walk briskly, look stern, nod at citizens.`,
+          `${cName}: Wrong! It's look stern, walk briskly, THEN nod. Points off.`,
+          `${tName}: ...that's the same thing.`,
+          `${cName}: The ORDER matters, ${tName}!`,
+        ],
+        winner: "draw",
+      });
+    }
+
+    // Sales competition
+    if (cType === "shopkeeper" || tType === "shopkeeper") {
+      challenges.push({
+        type: "sales_pitch",
+        setup: `${cName}: ${tName}, I bet I can describe my wares better than you. Sales pitch challenge!`,
+        lines: [
+          `${cName}: *clears throat* Step right up, folks! Premium goods at unbeatable prices!`,
+          `${tName}: Please. *straightens display* Fine artisanal crafts, handpicked for discerning tastes!`,
+          `${cName}: Pfft. Mine come with a SMILE.`,
+          `${tName}: Mine come with a WARRANTY.`,
+        ],
+        winner: "draw",
+      });
+    }
+
+    // Dance battle
+    challenges.push({
+      type: "dance_battle",
+      setup: isRival
+        ? `${cName}: *blocks ${tName}'s path* Dance battle. Let's settle this.`
+        : `${cName}: ${tName}! Let's have a dance-off! For fun!`,
+      lines: [
+        `${tName}: *starts dancing* You asked for it!`,
+        `${cName}: *busts a move* Not bad... but watch THIS.`,
+        `${tName}: *spins dramatically* Top that!`,
+        `${cName}: *moonwalks* That's how it's done.`,
+      ],
+      winner: Math.random() < 0.5 ? "challenger" : "target",
+    });
+
+    // Compliment battle (friends only)
+    if (!isRival) {
+      challenges.push({
+        type: "compliment_battle",
+        setup: `${cName}: ${tName}! I bet I can say something nicer about you than you can about me.`,
+        lines: [
+          `${tName}: Challenge accepted! You have a wonderful sense of humor.`,
+          `${cName}: Please. You light up every room you're in.`,
+          `${tName}: Your dedication to this street is inspiring.`,
+          `${cName}: ...okay I can't top that. You win.`,
+        ],
+        winner: "target",
+      });
+    }
+
+    if (challenges.length === 0) return null;
+    return challenges[Math.floor(Math.random() * challenges.length)];
+  }
+
+  private runChallenge(
+    challenger: DaemonInstance,
+    target: DaemonInstance,
+    challenge: { type: string; setup: string; lines: string[]; winner: "challenger" | "target" | "draw" },
+    isRival: boolean,
+    _players: PlayerInfo[],
+  ): void {
+    // Set both to talking
+    challenger.state.currentAction = "talking";
+    target.state.currentAction = "talking";
+    challenger.state.mood = isRival ? "annoyed" : "excited";
+    target.state.mood = isRival ? "annoyed" : "excited";
+    challenger.moodDecayTimer = 0;
+    target.moodDecayTimer = 0;
+
+    // Broadcast setup line
+    this.broadcastDaemonChat(challenger, challenge.setup);
+
+    // Deliver lines with timing
+    let delay = 3000;
+    for (const line of challenge.lines) {
+      const capturedDelay = delay;
+      // Determine speaker from "Name:" prefix
+      const colonIdx = line.indexOf(":");
+      const speakerName = colonIdx > 0 ? line.slice(0, colonIdx).trim() : "";
+      const content = colonIdx > 0 ? line.slice(colonIdx + 1).trim() : line;
+      const speaker = speakerName === target.state.definition.name ? target : challenger;
+
+      setTimeout(() => {
+        this.broadcastDaemonChat(speaker, content);
+      }, capturedDelay);
+
+      delay += 2500 + Math.random() * 1000;
+    }
+
+    // Announce result
+    const endDelay = delay + 2000;
+    setTimeout(() => {
+      const cName = challenger.state.definition.name;
+      const tName = target.state.definition.name;
+
+      let result: string;
+      let winnerDaemon: DaemonInstance;
+      let loserDaemon: DaemonInstance;
+
+      if (challenge.winner === "draw") {
+        result = `*the crowd is split* It's a draw! Both ${cName} and ${tName} are winners!`;
+        winnerDaemon = challenger;
+        loserDaemon = target;
+        challenger.state.mood = "happy";
+        target.state.mood = "happy";
+      } else {
+        winnerDaemon = challenge.winner === "challenger" ? challenger : target;
+        loserDaemon = challenge.winner === "challenger" ? target : challenger;
+        const winnerName = winnerDaemon.state.definition.name;
+        result = pick([
+          `${winnerName} wins! *takes a bow*`,
+          `And the victory goes to... ${winnerName}!`,
+          `${winnerName} is the champion! Better luck next time.`,
+        ]);
+        winnerDaemon.state.mood = "excited";
+        loserDaemon.state.mood = isRival ? "annoyed" : "happy"; // Friends are good sports
+      }
+
+      this.broadcastDaemonChat(winnerDaemon, result);
+
+      // Loser's reaction
+      setTimeout(() => {
+        const loserReaction = isRival
+          ? pick(["*grumbles* Next time...", "*walks away muttering*", "This isn't over."])
+          : pick(["Good game! *high fives*", "Ha! You got me. Well played!", "*laughs* Fair enough!"]);
+        this.broadcastDaemonChat(loserDaemon, loserReaction);
+
+        // Return to idle
+        challenger.state.currentAction = "idle";
+        target.state.currentAction = "idle";
+        challenger.moodDecayTimer = 0;
+        target.moodDecayTimer = 0;
+
+        // Update relationship — friendly challenges warm things up, rival challenges maintain tension
+        if (!isRival) {
+          this.shiftDaemonSentiment(challenger, target.state.daemonId, target.state.definition.name, 2);
+          this.shiftDaemonSentiment(target, challenger.state.daemonId, challenger.state.definition.name, 2);
+        }
+      }, 2000);
+    }, endDelay);
   }
 
   // ─── Scheduled Events / Mini Happenings ──────────────────────

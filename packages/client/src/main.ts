@@ -136,10 +136,11 @@ async function init() {
       avatarManager.updatePlayerPosition(userId, position, rotation);
     },
     onChat(senderId, senderName, content, _position) {
-      // Skip server echo of own messages (already shown locally on send)
-      if (senderId === avatarManager.localPlayerId) return;
       chatUI.addMessage(senderId, senderName, content);
-      avatarManager.showChatBubble(senderId, senderName, content);
+      // Don't double-show bubble for own messages (already shown on send)
+      if (senderId !== avatarManager.localPlayerId) {
+        avatarManager.showChatBubble(senderId, senderName, content);
+      }
     },
     onObjectPlaced(objectId, plotUUID, objectDefinition) {
       const plot = plotSnapshots.find(p => p.uuid === plotUUID);
@@ -239,11 +240,13 @@ async function init() {
     }
   };
   chatUI.onSendMessage = (content) => {
-    // Show own message immediately (server echo may not arrive in offline mode)
-    const myId = avatarManager.localPlayerId || "local";
-    chatUI.addMessage(myId, "You", content, "player");
-    avatarManager.showChatBubble(myId, "You", content);
     network.sendChat(content);
+    // In offline mode (no server), show message locally since no echo will arrive
+    if (!network.getSessionId()) {
+      const myId = avatarManager.localPlayerId || "local";
+      chatUI.addMessage(myId, "You", content, "player");
+      avatarManager.showChatBubble(myId, "You", content);
+    }
   };
 
   // Creation panel wiring

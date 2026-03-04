@@ -85,6 +85,17 @@ const MOOD_DECAY_INTERVAL = 60;    // mood trends toward bored after 60s of no i
 const CONVERSATION_EXCHANGES = 3;  // lines per daemon in a conversation
 const OVERHEAR_CHANCE = 0.15;      // 15% chance a daemon reacts to nearby chat
 const OVERHEAR_COOLDOWN_MS = 30_000; // 30s cooldown per daemon for overhear reactions
+const DAY_CYCLE_SECONDS = 600;     // 10 real minutes = 1 in-game day
+
+type TimeOfDay = "morning" | "afternoon" | "evening" | "night";
+
+function getTimeOfDay(elapsedSeconds: number): TimeOfDay {
+  const dayProgress = (elapsedSeconds % DAY_CYCLE_SECONDS) / DAY_CYCLE_SECONDS;
+  if (dayProgress < 0.25) return "morning";
+  if (dayProgress < 0.50) return "afternoon";
+  if (dayProgress < 0.75) return "evening";
+  return "night";
+}
 
 export class DaemonManager {
   private daemons = new Map<string, DaemonInstance>();
@@ -94,6 +105,8 @@ export class DaemonManager {
   private lastAiCall = new Map<string, number>(); // daemonId -> timestamp
   private aiConversationQueue: Array<() => Promise<void>> = [];
   private processingAi = false;
+  private worldClock = 0;  // elapsed seconds for day/night cycle
+  private lastTimeOfDay: TimeOfDay = "morning";
 
   constructor(
     broadcast: BroadcastFn,
@@ -239,6 +252,55 @@ export class DaemonManager {
     daemon.isMuted = muted;
   }
 
+  /** Called when a world event happens near daemons (object placed, player runs past, etc.) */
+  onWorldEvent(eventType: "object_placed" | "object_removed" | "player_sprint", position: Vector3, playerName?: string): void {
+    for (const [_id, daemon] of this.daemons) {
+      if (daemon.isMuted) continue;
+      if (daemon.state.currentAction !== "idle") continue;
+
+      const dist = this.distance(daemon.state.currentPosition, position);
+      if (dist > daemon.behavior.interactionRadius * 1.5) continue;
+
+      // React with a brief emote based on event type
+      let emote: string;
+      let mood: DaemonMood;
+
+      switch (eventType) {
+        case "object_placed":
+          emote = playerName
+            ? `*watches ${playerName} build something*`
+            : "*notices something new appearing*";
+          mood = "curious";
+          break;
+        case "object_removed":
+          emote = "*notices something disappear*";
+          mood = "curious";
+          break;
+        case "player_sprint":
+          if (Math.random() > 0.3) return; // Only react sometimes to sprinters
+          emote = playerName
+            ? `*watches ${playerName} rush past*`
+            : "*watches someone rush by*";
+          mood = "curious";
+          break;
+        default:
+          return;
+      }
+
+      daemon.state.mood = mood;
+      daemon.moodDecayTimer = 0;
+
+      this.broadcast("daemon_emote", {
+        type: "daemon_emote" as const,
+        daemonId: daemon.state.daemonId,
+        emote,
+        mood,
+      });
+
+      break; // Only one daemon reacts per event
+    }
+  }
+
   /** Called when a player sends a chat message — daemons may overhear and react */
   onPlayerChat(playerId: string, playerName: string, content: string, position: Vector3): void {
     const now = Date.now();
@@ -298,9 +360,22 @@ export class DaemonManager {
   }
 
   tick(dt: number, players: PlayerInfo[]): void {
+    // Advance world clock
+    this.worldClock += dt;
+    const timeOfDay = getTimeOfDay(this.worldClock);
+    if (timeOfDay !== this.lastTimeOfDay) {
+      this.onTimeOfDayChange(this.lastTimeOfDay, timeOfDay);
+      this.lastTimeOfDay = timeOfDay;
+    }
+
     for (const [_daemonId, daemon] of this.daemons) {
       // Update mood
       this.tickMood(daemon, dt);
+
+      // Attention system — idle daemons look at nearby activity
+      if (daemon.state.currentAction === "idle" && !daemon.isReturningHome) {
+        this.tickAttention(daemon, dt, players);
+      }
 
       // Behavior-specific logic
       switch (daemon.behavior.type) {
@@ -391,6 +466,7 @@ export class DaemonManager {
           nearbyDaemons,
           relationships: this.getRelationshipContext(daemon),
           currentMood: daemon.state.mood,
+          timeOfDay: this.getTimeOfDay(),
         };
 
         const response = await generateDaemonResponse(
@@ -520,6 +596,91 @@ export class DaemonManager {
     }
     const defaults = ["*yawns*", "*looks around*", "*taps foot*", "*stretches*", "*sighs*"];
     return defaults[Math.floor(Math.random() * defaults.length)];
+  }
+
+  // ─── Daily Routines / Time of Day ────────────────────────────────
+
+  private onTimeOfDayChange(from: TimeOfDay, to: TimeOfDay): void {
+    for (const [_id, daemon] of this.daemons) {
+      if (daemon.isMuted) continue;
+
+      const behaviorType = daemon.behavior.type;
+      let emote: string | null = null;
+      let mood: DaemonMood = daemon.state.mood;
+
+      switch (to) {
+        case "morning":
+          emote = this.getMorningEmote(daemon, behaviorType);
+          mood = "happy";
+          break;
+        case "afternoon":
+          if (behaviorType === "shopkeeper") {
+            emote = "*opens shop for the afternoon rush*";
+            mood = "excited";
+          } else if (behaviorType === "guard") {
+            emote = "*stands at attention*";
+            mood = "neutral";
+          }
+          break;
+        case "evening":
+          emote = this.getEveningEmote(daemon, behaviorType);
+          mood = behaviorType === "socialite" ? "excited" : "neutral";
+          break;
+        case "night":
+          emote = this.getNightEmote(daemon, behaviorType);
+          mood = behaviorType === "guard" ? "curious" : "bored";
+          // Reduce roam speed at night
+          break;
+      }
+
+      if (emote) {
+        daemon.state.mood = mood;
+        daemon.moodDecayTimer = 0;
+
+        this.broadcast("daemon_emote", {
+          type: "daemon_emote" as const,
+          daemonId: daemon.state.daemonId,
+          emote,
+          mood,
+        });
+      }
+    }
+  }
+
+  private getMorningEmote(_daemon: DaemonInstance, type: string): string {
+    switch (type) {
+      case "shopkeeper": return "*arranges wares for the day*";
+      case "guard": return "*begins morning patrol*";
+      case "greeter": return "*stretches and smiles at the new day*";
+      case "guide": return "*reviews today's route*";
+      case "roamer": return "*sets out for a morning stroll*";
+      case "socialite": return "*checks who's around today*";
+      default: return "*greets the new day*";
+    }
+  }
+
+  private getEveningEmote(_daemon: DaemonInstance, type: string): string {
+    switch (type) {
+      case "shopkeeper": return "*begins closing up shop*";
+      case "guard": return "*lights a lantern*";
+      case "greeter": return "*settles in for the evening*";
+      case "socialite": return "*looks for evening company*";
+      default: return "*watches the evening settle in*";
+    }
+  }
+
+  private getNightEmote(_daemon: DaemonInstance, type: string): string {
+    switch (type) {
+      case "guard": return "*sharpens vigilance for the night watch*";
+      case "shopkeeper": return "*closes up for the night*";
+      case "socialite": return "*yawns but stays out anyway*";
+      default: return "*settles in for a quiet night*";
+    }
+  }
+
+  /** Get current time of day (for AI context) */
+  getTimeOfDay(): TimeOfDay {
+    return getTimeOfDay(this.worldClock);
   }
 
   // ─── Spontaneous Gestures ──────────────────────────────────────
@@ -660,6 +821,60 @@ export class DaemonManager {
     }
 
     return gestures[gestures.length - 1];
+  }
+
+  // ─── Attention System ───────────────────────────────────────────
+
+  private tickAttention(daemon: DaemonInstance, _dt: number, players: PlayerInfo[]): void {
+    const pos = daemon.state.currentPosition;
+    const radius = daemon.behavior.interactionRadius * 2;
+    let bestTarget: Vector3 | null = null;
+    let bestDist = radius;
+
+    // Priority 1: Closest player within radius
+    for (const player of players) {
+      const dist = this.distance(pos, player.position);
+      if (dist < bestDist && dist > 1.0) { // Don't track if too close (already interacting)
+        bestDist = dist;
+        bestTarget = player.position;
+      }
+    }
+
+    // Priority 2: If no players, look at nearby daemon conversations
+    if (!bestTarget) {
+      for (const [_id, other] of this.daemons) {
+        if (other === daemon) continue;
+        if (other.state.currentAction !== "talking") continue;
+        const dist = this.distance(pos, other.state.currentPosition);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestTarget = other.state.currentPosition;
+        }
+      }
+    }
+
+    if (!bestTarget) return;
+
+    // Calculate target rotation to face the point of interest
+    const dx = bestTarget.x - pos.x;
+    const dz = bestTarget.z - pos.z;
+    const targetRotation = Math.atan2(-dx, -dz);
+
+    // Only update if rotation changed significantly (avoid spamming broadcast)
+    let rotDiff = targetRotation - daemon.state.currentRotation;
+    while (rotDiff > Math.PI) rotDiff -= Math.PI * 2;
+    while (rotDiff < -Math.PI) rotDiff += Math.PI * 2;
+
+    if (Math.abs(rotDiff) > 0.15) { // ~8.5 degrees threshold
+      daemon.state.currentRotation = targetRotation;
+      this.broadcast("daemon_move", {
+        type: "daemon_move" as const,
+        daemonId: daemon.state.daemonId,
+        position: pos,
+        rotation: targetRotation,
+        action: "idle",
+      });
+    }
   }
 
   // ─── Behavior Ticks ───────────────────────────────────────────

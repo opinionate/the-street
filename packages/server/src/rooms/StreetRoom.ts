@@ -461,6 +461,13 @@ export class StreetRoom extends Room<StreetRoomState> {
       plotUUID: data.plotUUID,
       objectDefinition: obj,
     });
+
+    // Notify daemons about the building activity
+    if (this.daemonManager) {
+      this.daemonManager.onWorldEvent("object_placed", {
+        x: player.posX, y: player.posY, z: player.posZ,
+      }, player.displayName);
+    }
   }
 
   private async handleObjectRemove(
@@ -489,6 +496,13 @@ export class StreetRoom extends Room<StreetRoomState> {
       type: "object_removed" as const,
       objectId: data.objectId,
     });
+
+    // Notify daemons
+    if (this.daemonManager) {
+      this.daemonManager.onWorldEvent("object_removed", {
+        x: player.posX, y: player.posY, z: player.posZ,
+      });
+    }
   }
 
   private async handleObjectUpdateState(

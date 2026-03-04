@@ -136,6 +136,8 @@ async function init() {
       avatarManager.updatePlayerPosition(userId, position, rotation);
     },
     onChat(senderId, senderName, content, _position) {
+      // Skip server echo of own messages (already shown locally on send)
+      if (senderId === avatarManager.localPlayerId) return;
       chatUI.addMessage(senderId, senderName, content);
       avatarManager.showChatBubble(senderId, senderName, content);
     },
@@ -237,6 +239,10 @@ async function init() {
     }
   };
   chatUI.onSendMessage = (content) => {
+    // Show own message immediately (server echo may not arrive in offline mode)
+    const myId = avatarManager.localPlayerId || "local";
+    chatUI.addMessage(myId, "You", content, "player");
+    avatarManager.showChatBubble(myId, "You", content);
     network.sendChat(content);
   };
 

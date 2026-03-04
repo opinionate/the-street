@@ -917,6 +917,9 @@ export class DaemonManager {
       // Proactive engagement — unsolicited remarks to nearby players
       this.tickProactiveEngagement(daemon, dt, players);
 
+      // Reputation announcements — gossip about players to other players
+      this.tickReputationAnnouncements(daemon, dt, players);
+
       // Spontaneous personality-based gestures
       this.tickSpontaneousGestures(daemon, dt, players);
 
@@ -1680,6 +1683,98 @@ export class DaemonManager {
       case "afternoon": return "Afternoon! Fine day.";
       case "evening": return "Getting late... enjoy the evening.";
       case "night": return "*nods quietly*";
+    }
+  }
+
+  // ─── Reputation Announcements ────────────────────────────────
+
+  /** Daemons gossip about players to nearby players/daemons, creating social consequences */
+  private tickReputationAnnouncements(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
+    if (daemon.isMuted) return;
+    if (daemon.state.currentAction !== "idle") return;
+    if (players.length < 2) return; // need at least 2 players for gossip to matter
+
+    // Reuse proactive timer — don't add another timer, just piggyback with low chance
+    if (Math.random() > 0.08) return; // ~8% chance per proactive tick cycle
+
+    const radius = daemon.behavior.interactionRadius * 2;
+    const nearbyPlayers = players.filter(
+      p => this.distance(daemon.state.currentPosition, p.position) <= radius,
+    );
+
+    if (nearbyPlayers.length < 2) return;
+
+    // Find a player we have a strong opinion about
+    let subjectPlayer: PlayerInfo | null = null;
+    let subjectSentiment: Sentiment | null = null;
+    let audiencePlayer: PlayerInfo | null = null;
+
+    for (const player of nearbyPlayers) {
+      const rel = daemon.relationships.get(player.userId);
+      if (!rel) continue;
+      if (rel.sentiment === "neutral" || rel.sentiment === "curious") continue;
+
+      // Find someone else nearby to gossip to
+      for (const other of nearbyPlayers) {
+        if (other.userId === player.userId) continue;
+        subjectPlayer = player;
+        subjectSentiment = rel.sentiment;
+        audiencePlayer = other;
+        break;
+      }
+      if (subjectPlayer) break;
+    }
+
+    if (!subjectPlayer || !audiencePlayer || !subjectSentiment) return;
+
+    const subjectName = subjectPlayer.displayName || "that person";
+    const audienceName = audiencePlayer.displayName || "friend";
+    const daemonName = daemon.state.definition.name;
+
+    let announcement: string;
+
+    if (subjectSentiment === "friendly") {
+      announcement = pick([
+        `Hey ${audienceName}, see ${subjectName} over there? Good people. Trust me.`,
+        `*whispers to ${audienceName}* That ${subjectName} is alright. One of the good ones.`,
+        `${audienceName}, if you haven't met ${subjectName} yet, you should. We go way back.`,
+        `*nods toward ${subjectName}* They're cool. ${daemonName}-approved.`,
+      ]);
+    } else if (subjectSentiment === "amused") {
+      announcement = pick([
+        `${audienceName}, ${subjectName} is pretty fun to be around, just so you know.`,
+        `*glances at ${subjectName}* Interesting character, that one.`,
+      ]);
+    } else if (subjectSentiment === "wary") {
+      announcement = pick([
+        `*quietly to ${audienceName}* Keep an eye on ${subjectName}. Just... trust me.`,
+        `${audienceName}, between you and me, I'd be careful around ${subjectName}.`,
+        `*glances sideways at ${subjectName}* ...I wouldn't leave anything valuable near them.`,
+        `Fair warning, ${audienceName}. ${subjectName} and I have... history.`,
+      ]);
+    } else {
+      return; // neutral/curious — nothing to say
+    }
+
+    this.broadcastDaemonChat(daemon, announcement, audiencePlayer.userId);
+
+    // Also share as gossip with any nearby daemons
+    for (const [, otherDaemon] of this.daemons) {
+      if (otherDaemon === daemon || otherDaemon.isMuted) continue;
+      const dist = this.distance(daemon.state.currentPosition, otherDaemon.state.currentPosition);
+      if (dist > radius) continue;
+
+      // Share the gossip
+      const otherRel = otherDaemon.relationships.get(subjectPlayer.userId);
+      if (otherRel) {
+        const gossipLine = subjectSentiment === "wary"
+          ? `${daemonName} warned about ${subjectName}`
+          : `${daemonName} vouched for ${subjectName}`;
+        if (!otherRel.gossip.includes(gossipLine)) {
+          otherRel.gossip.push(gossipLine);
+          if (otherRel.gossip.length > 5) otherRel.gossip.shift();
+        }
+      }
     }
   }
 

@@ -162,6 +162,8 @@ export class DaemonManager {
   private lastTimeOfDay: TimeOfDay = "morning";
   private activityLog: ActivityLogEntry[] = [];
   private worldObjects: WorldObjectInfo[] = [];
+  private eventTimer = 300 + Math.random() * 300; // first event in 5-10 min
+  private lastEventDaemonId: string | null = null;
 
   constructor(
     broadcast: BroadcastFn,
@@ -819,6 +821,9 @@ export class DaemonManager {
 
     // Detect and animate daemon gatherings (3+ idle daemons nearby)
     this.tickGatherings(dt, players);
+
+    // Scheduled mini-events
+    this.tickEvents(dt, players);
 
     // Process AI conversation queue
     this.processAiQueue();
@@ -2288,6 +2293,161 @@ export class DaemonManager {
         }
       }
     });
+  }
+
+  // ─── Scheduled Events / Mini Happenings ──────────────────────
+
+  private tickEvents(dt: number, players: PlayerInfo[]): void {
+    if (this.daemons.size < 2) return;
+
+    this.eventTimer -= dt;
+    if (this.eventTimer > 0) return;
+
+    // Next event in 5-10 minutes
+    this.eventTimer = 300 + Math.random() * 300;
+
+    // Pick a daemon to initiate an event (not the same as last time)
+    const candidates = Array.from(this.daemons.entries()).filter(
+      ([id, d]) => !d.isMuted && !d.isRecalled && d.state.currentAction === "idle" && id !== this.lastEventDaemonId,
+    );
+    if (candidates.length === 0) return;
+
+    const [eventDaemonId, eventDaemon] = candidates[Math.floor(Math.random() * candidates.length)];
+    this.lastEventDaemonId = eventDaemonId;
+
+    const event = this.pickEvent(eventDaemon, players);
+    if (!event) return;
+
+    // Announce the event
+    this.broadcastDaemonChat(eventDaemon, event.announcement);
+    this.broadcastDaemonEmote(eventDaemon, event.emote, event.mood);
+    eventDaemon.state.mood = event.mood;
+    eventDaemon.moodDecayTimer = 0;
+
+    // Nearby daemons react after a delay
+    setTimeout(() => {
+      for (const [otherId, other] of this.daemons) {
+        if (otherId === eventDaemonId) continue;
+        if (other.isMuted || other.state.currentAction !== "idle") continue;
+
+        const dist = this.distance(eventDaemon.state.currentPosition, other.state.currentPosition);
+        if (dist > 30) continue;
+
+        // Each nearby daemon reacts with a delay
+        const delay = 1000 + Math.random() * 2000;
+        setTimeout(() => {
+          const reaction = this.getEventReaction(other, event.type, eventDaemon.state.definition.name);
+          if (reaction) {
+            this.broadcastDaemonEmote(other, reaction.emote, reaction.mood);
+            if (reaction.chat) {
+              this.broadcastDaemonChat(other, reaction.chat);
+            }
+          }
+        }, delay);
+      }
+    }, 1500);
+  }
+
+  private pickEvent(
+    daemon: DaemonInstance,
+    _players: PlayerInfo[],
+  ): { type: string; announcement: string; emote: string; mood: DaemonMood } | null {
+    const type = daemon.behavior.type;
+    const name = daemon.state.definition.name;
+    const time = this.lastTimeOfDay;
+
+    switch (type) {
+      case "shopkeeper":
+        return pick([
+          { type: "flash_sale", announcement: "Flash sale! Everything half off for the next few minutes!", emote: "*rings a bell enthusiastically*", mood: "excited" as DaemonMood },
+          { type: "new_stock", announcement: "New merchandise just arrived! Come see what's fresh!", emote: "*gestures toward display proudly*", mood: "excited" as DaemonMood },
+          { type: "taste_test", announcement: "Free samples for anyone who stops by! Limited time!", emote: "*sets up a tasting station*", mood: "happy" as DaemonMood },
+        ]);
+
+      case "guard":
+        return pick([
+          { type: "patrol_drill", announcement: "Attention! Beginning security sweep of the area.", emote: "*stands tall and salutes*", mood: "neutral" as DaemonMood },
+          { type: "all_clear", announcement: "All clear, citizens! The street is safe and sound.", emote: "*gives a confident nod*", mood: "happy" as DaemonMood },
+        ]);
+
+      case "socialite":
+        return pick([
+          { type: "dance_party", announcement: "Who wants to dance? Let's liven this place up!", emote: "*starts dancing*", mood: "excited" as DaemonMood },
+          { type: "gossip_circle", announcement: "Gather round everyone! I've got some juicy stories!", emote: "*leans in conspiratorially*", mood: "excited" as DaemonMood },
+          { type: "compliments", announcement: "Everyone here looks amazing today! Just saying!", emote: "*claps enthusiastically*", mood: "happy" as DaemonMood },
+        ]);
+
+      case "greeter":
+        if (time === "morning") {
+          return { type: "morning_welcome", announcement: "Good morning everyone! What a beautiful day to be on the street!", emote: "*waves both arms high*", mood: "happy" };
+        }
+        return pick([
+          { type: "welcome_speech", announcement: "Welcome, welcome to the street! Best neighborhood in town!", emote: "*spreads arms wide*", mood: "happy" as DaemonMood },
+          { type: "cheer", announcement: "Three cheers for the street! Hip hip hooray!", emote: "*jumps with joy*", mood: "excited" as DaemonMood },
+        ]);
+
+      default:
+        return pick([
+          { type: "observation", announcement: `${name} here! Anyone else notice how nice it is today?`, emote: "*looks around appreciatively*", mood: "happy" as DaemonMood },
+          { type: "question", announcement: `Hey everyone, what's your favorite thing about the street?`, emote: "*looks around curiously*", mood: "curious" as DaemonMood },
+        ]);
+    }
+  }
+
+  private getEventReaction(
+    daemon: DaemonInstance,
+    eventType: string,
+    initiatorName: string,
+  ): { emote: string; mood: DaemonMood; chat?: string } | null {
+    const type = daemon.behavior.type;
+
+    switch (eventType) {
+      case "flash_sale":
+      case "new_stock":
+      case "taste_test":
+        if (type === "socialite") return { emote: "*rushes over excitedly*", mood: "excited", chat: "Ooh, shopping!" };
+        if (type === "guard") return { emote: "*keeps an eye on the crowd*", mood: "neutral" };
+        return pick([
+          { emote: "*looks over with interest*", mood: "curious" as DaemonMood },
+          { emote: "*considers checking it out*", mood: "curious" as DaemonMood, chat: "Hmm, might be worth a look." },
+        ]);
+
+      case "dance_party":
+        if (type === "guard") return { emote: "*taps foot reluctantly*", mood: "neutral" };
+        return pick([
+          { emote: "*starts swaying to the rhythm*", mood: "happy" as DaemonMood },
+          { emote: "*claps along*", mood: "happy" as DaemonMood, chat: `Nice moves, ${initiatorName}!` },
+          { emote: "*watches with amusement*", mood: "happy" as DaemonMood },
+        ]);
+
+      case "gossip_circle":
+        if (type === "guard") return { emote: "*pretends not to listen*", mood: "curious" };
+        return pick([
+          { emote: "*leans in to listen*", mood: "curious" as DaemonMood },
+          { emote: "*edges closer*", mood: "curious" as DaemonMood, chat: "Wait, what gossip?" },
+        ]);
+
+      case "patrol_drill":
+        if (type === "guard") return { emote: "*joins the formation*", mood: "neutral", chat: "Ready for duty!" };
+        return pick([
+          { emote: "*steps aside respectfully*", mood: "neutral" as DaemonMood },
+          { emote: "*watches the patrol*", mood: "curious" as DaemonMood },
+        ]);
+
+      case "cheer":
+      case "welcome_speech":
+      case "morning_welcome":
+      case "compliments":
+        return pick([
+          { emote: "*joins in the cheer*", mood: "happy" as DaemonMood },
+          { emote: "*smiles and waves*", mood: "happy" as DaemonMood },
+          { emote: "*nods appreciatively*", mood: "happy" as DaemonMood },
+        ]);
+
+      default:
+        if (Math.random() < 0.5) return null; // Not every daemon reacts to generic events
+        return { emote: `*looks at ${initiatorName}*`, mood: "curious" };
+    }
   }
 
   // ─── Free Roaming ─────────────────────────────────────────────

@@ -262,8 +262,8 @@ export class DaemonManager {
     );
   }
 
-  /** Broadcast daemon emote and log it */
-  private broadcastDaemonEmote(daemon: DaemonInstance, emote: string, mood: DaemonMood): void {
+  /** Broadcast daemon emote, log it, and trigger chain reactions */
+  private broadcastDaemonEmote(daemon: DaemonInstance, emote: string, mood: DaemonMood, chainDepth = 0): void {
     this.broadcast("daemon_emote", {
       type: "daemon_emote" as const,
       daemonId: daemon.state.daemonId,
@@ -271,6 +271,64 @@ export class DaemonManager {
       mood,
     });
     this.logActivity(daemon, "emote", emote.slice(0, 100));
+
+    // Chain reactions: nearby idle daemons may react (max depth 2)
+    if (chainDepth >= 2) return;
+    const CHAIN_CHANCE = chainDepth === 0 ? 0.25 : 0.12; // Lower chance for secondary reactions
+    const CHAIN_RADIUS = 12;
+
+    for (const [, other] of this.daemons) {
+      if (other === daemon) continue;
+      if (other.isMuted) continue;
+      if (other.state.currentAction !== "idle") continue;
+      if (Math.random() > CHAIN_CHANCE) continue;
+
+      const dist = this.distance(daemon.state.currentPosition, other.state.currentPosition);
+      if (dist > CHAIN_RADIUS) continue;
+
+      // Pick a complementary reaction
+      const reaction = this.pickChainReaction(emote, mood, other);
+      if (!reaction) continue;
+
+      // Delay chain reaction slightly for natural feel
+      const delay = 800 + Math.random() * 1200;
+      setTimeout(() => {
+        if (other.state.currentAction !== "idle") return; // May have changed
+        other.state.mood = reaction.mood;
+        other.moodDecayTimer = 0;
+        this.broadcastDaemonEmote(other, reaction.emote, reaction.mood, chainDepth + 1);
+      }, delay);
+
+      break; // Only one chain reaction per emote
+    }
+  }
+
+  /** Pick a complementary reaction to a nearby daemon's emote */
+  private pickChainReaction(
+    _sourceEmote: string,
+    sourceMood: DaemonMood,
+    reactor: DaemonInstance,
+  ): { emote: string; mood: DaemonMood } | null {
+    const traits = reactor.state.definition.personality?.traits || [];
+
+    switch (sourceMood) {
+      case "happy":
+        if (traits.includes("grumpy")) return { emote: "*rolls eyes*", mood: "annoyed" };
+        return { emote: "*smiles*", mood: "happy" };
+      case "excited":
+        if (traits.includes("nervous")) return { emote: "*startled by the excitement*", mood: "curious" };
+        return { emote: "*perks up*", mood: "excited" };
+      case "annoyed":
+        if (traits.includes("friendly")) return { emote: "*looks concerned*", mood: "curious" };
+        return { emote: "*nods sympathetically*", mood: "neutral" };
+      case "curious":
+        return { emote: "*also looks intrigued*", mood: "curious" };
+      case "bored":
+        if (traits.includes("energetic")) return { emote: "*tries to liven things up*", mood: "excited" };
+        return { emote: "*also yawns*", mood: "bored" };
+      default:
+        return null;
+    }
   }
 
   addDaemon(id: string, definition: DaemonDefinition, behavior: DaemonBehavior): void {

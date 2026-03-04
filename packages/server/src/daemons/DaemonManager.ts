@@ -76,6 +76,8 @@ interface DaemonInstance {
   // Gathering
   gatheringTarget: Vector3 | null;  // cluster midpoint to drift toward
   gatheringTimer: number;           // cooldown before next group chatter
+  // Daily routine
+  routineTimer: number;             // countdown to next routine-specific action
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -97,6 +99,31 @@ const OVERHEAR_COOLDOWN_MS = 30_000; // 30s cooldown per daemon for overhear rea
 const DAY_CYCLE_SECONDS = 600;     // 10 real minutes = 1 in-game day
 
 type TimeOfDay = "morning" | "afternoon" | "evening" | "night";
+
+/** Roam speed multiplier by time of day */
+function getTimeSpeedMultiplier(time: TimeOfDay): number {
+  switch (time) {
+    case "morning": return 1.1;   // energetic start
+    case "afternoon": return 1.0;
+    case "evening": return 0.8;   // winding down
+    case "night": return 0.5;     // drowsy shuffle
+  }
+}
+
+/** Spontaneous gesture frequency multiplier (lower = more frequent) */
+function getTimeChattinessFactor(time: TimeOfDay): number {
+  switch (time) {
+    case "morning": return 0.9;
+    case "afternoon": return 0.7;  // peak social hours
+    case "evening": return 1.0;
+    case "night": return 1.6;      // much quieter
+  }
+}
+
+/** Pick a random element from an array */
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
 
 function getTimeOfDay(elapsedSeconds: number): TimeOfDay {
   const dayProgress = (elapsedSeconds % DAY_CYCLE_SECONDS) / DAY_CYCLE_SECONDS;
@@ -201,6 +228,7 @@ export class DaemonManager {
       spontaneousGestureTimer: 15 + Math.random() * 25, // 15-40s initial delay
       gatheringTarget: null,
       gatheringTimer: 20 + Math.random() * 20,
+      routineTimer: 30 + Math.random() * 30,
       isMuted: false,
       isRecalled: false,
     };
@@ -673,6 +701,9 @@ export class DaemonManager {
       // Idle chatter (all types)
       this.tickIdleChatter(daemon, dt, players);
 
+      // Daily routine actions (time-of-day specific behaviors)
+      this.tickDailyRoutine(daemon, dt, players);
+
       // Spontaneous personality-based gestures
       this.tickSpontaneousGestures(daemon, dt, players);
 
@@ -879,6 +910,17 @@ export class DaemonManager {
 
         this.broadcastDaemonEmote(daemon, emote, mood);
       }
+
+      // Behavior adjustments on time change
+      if (to === "night" && behaviorType === "shopkeeper" && daemon.behavior.roamingEnabled && !daemon.isRecalled) {
+        // Shopkeepers head home at night
+        daemon.isReturningHome = true;
+        daemon.roamTarget = null;
+      }
+      if (to === "morning" && behaviorType === "shopkeeper" && !daemon.isRecalled) {
+        // Shopkeepers resume roaming in the morning
+        daemon.isReturningHome = false;
+      }
     }
   }
 
@@ -918,6 +960,166 @@ export class DaemonManager {
     return getTimeOfDay(this.worldClock);
   }
 
+  /** Periodic routine actions during each time period */
+  private tickDailyRoutine(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
+    if (daemon.isMuted) return;
+    if (daemon.state.currentAction !== "idle") return;
+
+    daemon.routineTimer -= dt;
+    if (daemon.routineTimer > 0) return;
+
+    // Reset: routines fire every 40-90s, scaled by time chattiness
+    daemon.routineTimer = (40 + Math.random() * 50) * getTimeChattinessFactor(this.lastTimeOfDay);
+
+    const time = this.lastTimeOfDay;
+    const type = daemon.behavior.type;
+    const routine = this.getRoutineAction(daemon, type, time, players);
+    if (!routine) return;
+
+    if (routine.emote) {
+      this.broadcastDaemonEmote(daemon, routine.emote, routine.mood);
+    }
+
+    if (routine.action && routine.action !== "idle") {
+      daemon.state.currentAction = routine.action;
+      daemon.state.mood = routine.mood;
+
+      this.broadcast("daemon_move", {
+        type: "daemon_move" as const,
+        daemonId: daemon.state.daemonId,
+        position: daemon.state.currentPosition,
+        rotation: daemon.state.currentRotation,
+        action: routine.action,
+      });
+
+      setTimeout(() => {
+        if (daemon.state.currentAction === routine.action) {
+          daemon.state.currentAction = "idle";
+          this.broadcast("daemon_move", {
+            type: "daemon_move" as const,
+            daemonId: daemon.state.daemonId,
+            position: daemon.state.currentPosition,
+            rotation: daemon.state.currentRotation,
+            action: "idle",
+          });
+        }
+      }, 3000);
+    }
+  }
+
+  private getRoutineAction(
+    daemon: DaemonInstance,
+    type: string,
+    time: TimeOfDay,
+    _players: PlayerInfo[],
+  ): { emote: string; mood: DaemonMood; action?: DaemonAction } | null {
+    const traits = daemon.state.definition.personality.traits;
+    const interests = daemon.state.definition.personality.interests;
+
+    // Role + time specific routines
+    if (type === "shopkeeper") {
+      switch (time) {
+        case "morning":
+          return pick([
+            { emote: "*polishes the counter*", mood: "neutral" as DaemonMood, action: "emoting" as DaemonAction },
+            { emote: "*counts inventory*", mood: "curious" as DaemonMood, action: "thinking" as DaemonAction },
+            { emote: "*hums while organizing shelves*", mood: "happy" as DaemonMood },
+          ]);
+        case "afternoon":
+          return pick([
+            { emote: "*arranges a new display*", mood: "excited" as DaemonMood, action: "emoting" as DaemonAction },
+            { emote: "*checks prices on the board*", mood: "neutral" as DaemonMood },
+          ]);
+        case "evening":
+          return pick([
+            { emote: "*sweeps the floor*", mood: "neutral" as DaemonMood },
+            { emote: "*tallies up the day's sales*", mood: "curious" as DaemonMood, action: "thinking" as DaemonAction },
+          ]);
+        case "night":
+          return pick([
+            { emote: "*nods off behind the counter*", mood: "bored" as DaemonMood },
+            { emote: "*stifles a yawn*", mood: "bored" as DaemonMood },
+          ]);
+      }
+    }
+
+    if (type === "guard") {
+      switch (time) {
+        case "morning":
+          return pick([
+            { emote: "*does morning exercises*", mood: "neutral" as DaemonMood, action: "emoting" as DaemonAction },
+            { emote: "*sharpens weapon*", mood: "neutral" as DaemonMood },
+          ]);
+        case "afternoon":
+          return pick([
+            { emote: "*scans the perimeter*", mood: "curious" as DaemonMood, action: "thinking" as DaemonAction },
+            { emote: "*stands tall at attention*", mood: "neutral" as DaemonMood },
+          ]);
+        case "evening":
+          return null; // Transition emote covers this
+        case "night":
+          return pick([
+            { emote: "*peers into the darkness*", mood: "curious" as DaemonMood },
+            { emote: "*patrols with heightened vigilance*", mood: "curious" as DaemonMood, action: "walking" as DaemonAction },
+            { emote: "*listens carefully to the night sounds*", mood: "curious" as DaemonMood, action: "thinking" as DaemonAction },
+          ]);
+      }
+    }
+
+    if (type === "socialite") {
+      switch (time) {
+        case "morning":
+          return pick([
+            { emote: "*sips morning tea thoughtfully*", mood: "neutral" as DaemonMood },
+            { emote: "*checks outfit in reflection*", mood: "happy" as DaemonMood, action: "emoting" as DaemonAction },
+          ]);
+        case "afternoon":
+          return pick([
+            { emote: "*looks around for someone to chat with*", mood: "excited" as DaemonMood },
+            { emote: "*waves enthusiastically at passersby*", mood: "happy" as DaemonMood, action: "waving" as DaemonAction },
+          ]);
+        case "evening":
+          return pick([
+            { emote: "*leans against a wall looking cool*", mood: "neutral" as DaemonMood },
+            { emote: "*laughs at a private joke*", mood: "happy" as DaemonMood, action: "laughing" as DaemonAction },
+          ]);
+        case "night":
+          return pick([
+            { emote: "*yawns but refuses to leave*", mood: "bored" as DaemonMood },
+            { emote: "*fights drowsiness*", mood: "bored" as DaemonMood },
+          ]);
+      }
+    }
+
+    // Generic routines for any type, flavored by traits/interests
+    switch (time) {
+      case "morning":
+        if (traits.includes("cheerful") || traits.includes("optimistic")) {
+          return { emote: "*stretches with a big smile*", mood: "happy", action: "emoting" };
+        }
+        return pick([
+          { emote: "*takes a deep breath of morning air*", mood: "neutral" as DaemonMood },
+          { emote: "*looks at the sunrise*", mood: "happy" as DaemonMood },
+        ]);
+      case "afternoon":
+        if (interests.length > 0) {
+          const interest = interests[Math.floor(Math.random() * interests.length)];
+          return { emote: `*thinks about ${interest}*`, mood: "curious", action: "thinking" };
+        }
+        return null;
+      case "evening":
+        return pick([
+          { emote: "*watches the shadows lengthen*", mood: "neutral" as DaemonMood },
+          { emote: "*reflects on the day*", mood: "neutral" as DaemonMood, action: "thinking" as DaemonAction },
+        ]);
+      case "night":
+        return pick([
+          { emote: "*sways sleepily*", mood: "bored" as DaemonMood },
+          { emote: "*gazes at the night sky*", mood: "curious" as DaemonMood },
+        ]);
+    }
+  }
+
   // ─── Spontaneous Gestures ──────────────────────────────────────
 
   private tickSpontaneousGestures(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
@@ -927,13 +1129,15 @@ export class DaemonManager {
     daemon.spontaneousGestureTimer -= dt;
     if (daemon.spontaneousGestureTimer > 0) return;
 
-    // Reset timer (20-60s between gestures, faster if players nearby)
+    // Reset timer (scaled by time of day — quieter at night, chattier in afternoon)
+    const chattiness = getTimeChattinessFactor(this.lastTimeOfDay);
     const hasNearby = players.some(
       (p) => this.distance(daemon.state.currentPosition, p.position) < daemon.behavior.interactionRadius * 2,
     );
-    daemon.spontaneousGestureTimer = hasNearby
+    daemon.spontaneousGestureTimer = (hasNearby
       ? 12 + Math.random() * 20  // More active when watched
-      : 30 + Math.random() * 40; // Less active when alone
+      : 30 + Math.random() * 40  // Less active when alone
+    ) * chattiness;
 
     // Try object-aware gesture first (30% chance if nearby objects match interests)
     const objectReaction = this.tryObjectReaction(daemon);
@@ -1618,8 +1822,9 @@ export class DaemonManager {
       return;
     }
 
-    // Walk toward target
-    this.moveToward(daemon, daemon.roamTarget, ROAM_SPEED, dt);
+    // Walk toward target (speed varies with time of day)
+    const timeSpeed = ROAM_SPEED * getTimeSpeedMultiplier(this.lastTimeOfDay);
+    this.moveToward(daemon, daemon.roamTarget, timeSpeed, dt);
 
     const dist = this.distance(daemon.state.currentPosition, daemon.roamTarget);
     if (dist < 1.0) {

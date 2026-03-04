@@ -364,12 +364,74 @@ export class DaemonManager {
       mood: "neutral",
     };
 
-    this.daemons.set(id, this.createInstance(state, behavior));
+    const instance = this.createInstance(state, behavior);
+    this.daemons.set(id, instance);
 
     this.broadcast("daemon_spawn", {
       type: "daemon_spawn" as const,
       daemon: state,
     });
+
+    // Arrival announcement after a short delay
+    setTimeout(() => {
+      const arrival = this.getArrivalAnnouncement(instance);
+      instance.state.mood = "excited";
+      instance.moodDecayTimer = 0;
+      instance.state.currentAction = "waving";
+      this.broadcastDaemonChat(instance, arrival);
+      this.broadcast("daemon_move", {
+        type: "daemon_move" as const,
+        daemonId: id,
+        position: state.currentPosition,
+        rotation: state.currentRotation,
+        action: "waving",
+      });
+      setTimeout(() => {
+        instance.state.currentAction = "idle";
+        this.broadcast("daemon_move", {
+          type: "daemon_move" as const,
+          daemonId: id,
+          position: state.currentPosition,
+          rotation: state.currentRotation,
+          action: "idle",
+        });
+      }, 3000);
+    }, 1500);
+  }
+
+  /** Generate a personality-appropriate arrival announcement */
+  private getArrivalAnnouncement(daemon: DaemonInstance): string {
+    const name = daemon.state.definition.name;
+    const personality = daemon.state.definition.personality;
+    const traits = personality?.traits || [];
+    const greeting = daemon.behavior.greetingMessage;
+
+    // Use greeting message if it works as an arrival
+    if (greeting && greeting.length < 80) {
+      return greeting;
+    }
+
+    // Personality-based arrivals
+    if (traits.includes("dramatic") || traits.includes("theatrical")) {
+      return `*${name} arrives with a flourish* The Street has a new star!`;
+    }
+    if (traits.includes("shy") || traits.includes("nervous")) {
+      return `*${name} appears quietly* Oh... hello. I'm new here.`;
+    }
+    if (traits.includes("energetic") || traits.includes("excitable")) {
+      return `*${name} bursts onto the scene* Hey everyone! I'm here!`;
+    }
+    if (traits.includes("mysterious") || traits.includes("secretive")) {
+      return `*${name} materializes from the shadows* ...interesting place.`;
+    }
+    if (traits.includes("grumpy") || traits.includes("stern")) {
+      return `*${name} surveys the area* Hmm. This will do.`;
+    }
+    if (traits.includes("wise") || traits.includes("philosophical")) {
+      return `*${name} arrives thoughtfully* A new chapter begins.`;
+    }
+
+    return `*${name} arrives on The Street* Hello, world!`;
   }
 
   removeDaemon(id: string): void {

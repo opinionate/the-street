@@ -172,17 +172,26 @@ async function init() {
 
   // Avatar panel wiring
   avatarPanel.onGenerate = async (description) => {
-    const res = await fetch(`${apiUrl}/api/avatar/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ description }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: "Generation failed" }));
-      throw new Error(err.error || "Generation failed");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    try {
+      const res = await fetch(`${apiUrl}/api/avatar/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ description }),
+      });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Generation failed" }));
+        throw new Error(err.error || "Generation failed");
+      }
+      const result = await res.json();
+      avatarPanel.setGenerationResult(result.appearance, result.meshyTaskId || null);
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
     }
-    const result = await res.json();
-    avatarPanel.setGenerationResult(result.appearance, result.meshyTaskId || null);
   };
 
   avatarPanel.onSave = async (avatarDefinition) => {
@@ -199,17 +208,26 @@ async function init() {
 
   // Daemon panel wiring
   daemonPanel.onGenerate = async (description) => {
-    const res = await fetch(`${apiUrl}/api/daemons/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ description }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: "Generation failed" }));
-      throw new Error(err.error || "Generation failed");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    try {
+      const res = await fetch(`${apiUrl}/api/daemons/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ description }),
+      });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Generation failed" }));
+        throw new Error(err.error || "Generation failed");
+      }
+      const result = await res.json();
+      daemonPanel.setGenerationResult(result.definition);
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
     }
-    const result = await res.json();
-    daemonPanel.setGenerationResult(result.definition);
   };
 
   daemonPanel.onCreate = async (definition) => {
@@ -223,17 +241,26 @@ async function init() {
       rotation: localRotation,
     };
 
-    const res = await fetch(`${apiUrl}/api/daemons/create`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ definition: fullDefinition }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: "Creation failed" }));
-      throw new Error(err.error || "Creation failed");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+      const res = await fetch(`${apiUrl}/api/daemons/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ definition: fullDefinition }),
+      });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Creation failed" }));
+        throw new Error(err.error || "Creation failed");
+      }
+      // Reload daemon list for this plot
+      loadPlotDaemons(plotUuid);
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
     }
-    // Reload daemon list for this plot
-    loadPlotDaemons(plotUuid);
   };
 
   daemonPanel.onDelete = async (daemonId) => {

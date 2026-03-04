@@ -29,11 +29,11 @@ export class StreetScene {
     document.body.appendChild(this.renderer.domElement);
 
     // Lighting
-    const ambient = new THREE.AmbientLight(0x2a2a3e, 0.6);
+    const ambient = new THREE.AmbientLight(0x8888aa, 1.2);
     this.scene.add(ambient);
 
     // Cool directional light from above (moonlight feel)
-    const moon = new THREE.DirectionalLight(0x6688cc, 0.8);
+    const moon = new THREE.DirectionalLight(0x8899cc, 1.5);
     moon.position.set(50, 200, 50);
     moon.castShadow = true;
     moon.shadow.mapSize.width = 2048;
@@ -46,8 +46,13 @@ export class StreetScene {
     moon.shadow.camera.bottom = -250;
     this.scene.add(moon);
 
+    // Fill light from opposite side to reduce harsh shadows
+    const fill = new THREE.DirectionalLight(0x6666aa, 0.6);
+    fill.position.set(-80, 100, -60);
+    this.scene.add(fill);
+
     // Neon accent light from below
-    const neonUp = new THREE.HemisphereLight(0x0d0d1a, 0xff00ff, 0.15);
+    const neonUp = new THREE.HemisphereLight(0x334466, 0xff00ff, 0.4);
     this.scene.add(neonUp);
 
     this.clock = new THREE.Clock();

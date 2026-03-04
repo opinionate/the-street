@@ -1838,9 +1838,10 @@ export class DaemonManager {
 
       const rel = daemon.relationships.get(otherId);
       if (rel) {
-        if (rel.sentiment === "friendly") score += 30;
-        else if (rel.sentiment === "curious") score += 20;
+        if (rel.sentiment === "friendly") score += 40;   // strongly prefer friends
         else if (rel.sentiment === "amused") score += 25;
+        else if (rel.sentiment === "curious") score += 20;
+        else if (rel.sentiment === "wary") score -= 50;  // actively avoid rivals
       } else {
         score += 10; // Slight bonus for unknown daemons (curiosity)
       }
@@ -2141,6 +2142,15 @@ export class DaemonManager {
     const home = daemon.behavior.homePosition || daemon.state.definition.position;
     const maxRadius = daemon.behavior.roamRadius || 100;
 
+    // 25% chance: gravitate toward a friendly daemon
+    if (Math.random() < 0.25) {
+      const friendTarget = this.findFriendlyDaemonNearby(daemon);
+      if (friendTarget) {
+        const distFromHome = this.distance(friendTarget, home);
+        if (distFromHome <= maxRadius) return friendTarget;
+      }
+    }
+
     // Pick a random point on the street ring
     const randomAngle = Math.random() * Math.PI * 2;
     const streetPos = getStreetPosition(randomAngle, V1_CONFIG);
@@ -2158,6 +2168,29 @@ export class DaemonManager {
     }
 
     return streetPos;
+  }
+
+  /** Find a position near a friendly daemon to roam toward */
+  private findFriendlyDaemonNearby(daemon: DaemonInstance): Vector3 | null {
+    for (const [otherId, rel] of daemon.relationships) {
+      if (rel.targetType !== "daemon") continue;
+      if (rel.sentiment !== "friendly" && rel.sentiment !== "amused") continue;
+
+      const other = this.daemons.get(otherId);
+      if (!other || other.isMuted || other.isRecalled) continue;
+
+      const dist = this.distance(daemon.state.currentPosition, other.state.currentPosition);
+      if (dist > 60) continue; // Don't walk too far
+
+      // Aim for a point near the friend, not exactly on them
+      const offset = (Math.random() - 0.5) * 4;
+      return {
+        x: other.state.currentPosition.x + offset,
+        y: 0,
+        z: other.state.currentPosition.z + offset,
+      };
+    }
+    return null;
   }
 
   private moveToward(daemon: DaemonInstance, target: Vector3, speed: number, dt: number): void {
@@ -2205,9 +2238,43 @@ export class DaemonManager {
 
         // Check cooldown for this specific pair
         const convA = daemonA.daemonConversations.get(idB);
-        const convB = daemonB.daemonConversations.get(idA);
         const now = Date.now();
         if (convA && now - convA.lastConversation < DAEMON_CHAT_COOLDOWN_MS) continue;
+
+        // Relationship-based proximity reactions
+        const relAtoB = daemonA.relationships.get(idB);
+        const relBtoA = daemonB.relationships.get(idA);
+
+        // Rivals: snide remark instead of conversation
+        if (relAtoB?.sentiment === "wary" || relBtoA?.sentiment === "wary") {
+          // Only do rivalry reaction occasionally (30% chance)
+          if (Math.random() < 0.3) {
+            const rivalRemarks = [
+              { daemon: daemonA, rival: daemonB.state.definition.name, emote: `*glances at ${daemonB.state.definition.name} and looks away*` },
+              { daemon: daemonA, rival: daemonB.state.definition.name, emote: `*mutters something about ${daemonB.state.definition.name}*` },
+            ];
+            const reaction = pick(rivalRemarks);
+            this.broadcastDaemonEmote(reaction.daemon, reaction.emote, "annoyed");
+            // Update cooldown so we don't spam
+            if (!convA) {
+              daemonA.daemonConversations.set(idB, {
+                otherDaemonId: idB, lastConversation: now, isActive: false,
+                pendingLines: [], lineIndex: 0, lineTimer: 0,
+              });
+            } else {
+              convA.lastConversation = now;
+            }
+          }
+          continue; // Don't start a friendly conversation with a rival
+        }
+
+        // Friends: wave at each other when they meet
+        if (relAtoB?.sentiment === "friendly" && Math.random() < 0.3) {
+          this.broadcastDaemonEmote(daemonA, `*waves at ${daemonB.state.definition.name}*`, "happy");
+          setTimeout(() => {
+            this.broadcastDaemonEmote(daemonB, `*waves back at ${daemonA.state.definition.name}*`, "happy");
+          }, 800);
+        }
 
         // Start a conversation!
         this.startDaemonConversation(idA, daemonA, idB, daemonB);

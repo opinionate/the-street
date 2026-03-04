@@ -1462,16 +1462,18 @@ export class DaemonManager {
 
   private tickAttention(daemon: DaemonInstance, _dt: number, players: PlayerInfo[]): void {
     const pos = daemon.state.currentPosition;
-    const radius = daemon.behavior.interactionRadius * 2;
+    const awarenessRadius = daemon.behavior.interactionRadius * 3; // wider awareness zone
     let bestTarget: Vector3 | null = null;
-    let bestDist = radius;
+    let bestDist = awarenessRadius;
+    let bestPlayerId: string | null = null;
 
-    // Priority 1: Closest player within radius
+    // Priority 1: Closest player within awareness radius
     for (const player of players) {
       const dist = this.distance(pos, player.position);
       if (dist < bestDist && dist > 1.0) { // Don't track if too close (already interacting)
         bestDist = dist;
         bestTarget = player.position;
+        bestPlayerId = player.userId;
       }
     }
 
@@ -1484,6 +1486,7 @@ export class DaemonManager {
         if (dist < bestDist) {
           bestDist = dist;
           bestTarget = other.state.currentPosition;
+          bestPlayerId = null;
         }
       }
     }
@@ -1502,13 +1505,62 @@ export class DaemonManager {
 
     if (Math.abs(rotDiff) > 0.15) { // ~8.5 degrees threshold
       daemon.state.currentRotation = targetRotation;
+
+      // Curiosity reaction: when a player enters awareness zone
+      let action: DaemonAction = "idle";
+      if (bestPlayerId && bestDist < awarenessRadius && bestDist > daemon.behavior.interactionRadius) {
+        const rel = daemon.relationships.get(bestPlayerId);
+        if (!rel || rel.interactionCount === 0) {
+          // Unknown player → curious head tilt
+          if (daemon.state.mood !== "curious" && Math.random() < 0.3) {
+            daemon.state.mood = "curious";
+            daemon.moodDecayTimer = 0;
+            action = "thinking"; // head tilt / curious pose
+          }
+        } else if (rel.sentiment === "friendly") {
+          // Known friendly player → quick wave
+          if (Math.random() < 0.15) {
+            action = "waving";
+            setTimeout(() => {
+              if (daemon.state.currentAction === "waving") {
+                daemon.state.currentAction = "idle";
+                this.broadcast("daemon_move", {
+                  type: "daemon_move" as const,
+                  daemonId: daemon.state.daemonId,
+                  position: daemon.state.currentPosition,
+                  rotation: daemon.state.currentRotation,
+                  action: "idle",
+                });
+              }
+            }, 1500);
+          }
+        }
+      }
+
+      daemon.state.currentAction = action;
       this.broadcast("daemon_move", {
         type: "daemon_move" as const,
         daemonId: daemon.state.daemonId,
         position: pos,
         rotation: targetRotation,
-        action: "idle",
+        action,
       });
+
+      // If thinking (curious), return to idle after a moment
+      if (action === "thinking") {
+        setTimeout(() => {
+          if (daemon.state.currentAction === "thinking") {
+            daemon.state.currentAction = "idle";
+            this.broadcast("daemon_move", {
+              type: "daemon_move" as const,
+              daemonId: daemon.state.daemonId,
+              position: daemon.state.currentPosition,
+              rotation: daemon.state.currentRotation,
+              action: "idle",
+            });
+          }
+        }, 2000);
+      }
     }
   }
 

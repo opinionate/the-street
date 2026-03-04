@@ -882,10 +882,21 @@ export class DaemonManager {
 
         const { generateDaemonResponse } = await import("@the-street/ai-service");
 
+        // Build memory-enriched message history
+        const recentMessages = memory!.messages.slice(-6);
+
+        // Prepend relationship summary for this player if we have history
+        const rel = daemon.relationships.get(playerId);
+        if (rel && rel.interactionCount > 0) {
+          const summary = this.buildMemorySummary(daemon, playerId, resolvedPlayerName, rel);
+          // Insert as a context note before conversation
+          recentMessages.unshift({ role: "daemon" as const, content: summary });
+        }
+
         // Build context
         const nearbyDaemons = this.getNearbyDaemonNames(daemon, 15);
         const context = {
-          recentMessages: memory!.messages.slice(-6),
+          recentMessages,
           nearbyDaemons,
           relationships: this.getRelationshipContext(daemon),
           currentMood: daemon.state.mood,
@@ -2416,14 +2427,27 @@ export class DaemonManager {
       try {
         const { generateDaemonConversation } = await import("@the-street/ai-service");
 
+        // Build memory-enriched context for both daemons
+        const messagesA: { role: "player" | "daemon"; content: string }[] = [];
+        const relAtoB = daemonA.relationships.get(idB);
+        if (relAtoB && relAtoB.interactionCount > 0) {
+          messagesA.push({ role: "daemon", content: this.buildMemorySummary(daemonA, idB, daemonB.state.definition.name, relAtoB) });
+        }
+
+        const messagesB: { role: "player" | "daemon"; content: string }[] = [];
+        const relBtoA = daemonB.relationships.get(idA);
+        if (relBtoA && relBtoA.interactionCount > 0) {
+          messagesB.push({ role: "daemon", content: this.buildMemorySummary(daemonB, idA, daemonA.state.definition.name, relBtoA) });
+        }
+
         const contextA = {
-          recentMessages: [] as { role: "player" | "daemon"; content: string }[],
+          recentMessages: messagesA,
           nearbyDaemons: [daemonB.state.definition.name],
           relationships: this.getRelationshipContext(daemonA),
           currentMood: daemonA.state.mood,
         };
         const contextB = {
-          recentMessages: [] as { role: "player" | "daemon"; content: string }[],
+          recentMessages: messagesB,
           nearbyDaemons: [daemonA.state.definition.name],
           relationships: this.getRelationshipContext(daemonB),
           currentMood: daemonB.state.mood,
@@ -2735,6 +2759,37 @@ export class DaemonManager {
     if (rel.interactionCount >= 5 && rel.sentiment === "neutral") {
       rel.sentiment = "friendly";
     }
+  }
+
+  /** Build a concise memory summary for AI context about a specific player */
+  private buildMemorySummary(daemon: DaemonInstance, playerId: string, playerName: string, rel: Relationship): string {
+    const parts: string[] = [];
+
+    parts.push(`[Memory: You've spoken to ${playerName} ${rel.interactionCount} time${rel.interactionCount > 1 ? "s" : ""}.`);
+    parts.push(`You feel ${rel.sentiment} toward them.`);
+
+    // Include gossip about this player
+    if (rel.gossip.length > 0) {
+      parts.push(`You've heard: ${rel.gossip.slice(-2).join("; ")}.`);
+    }
+
+    // Include last conversation topic if available
+    const memory = daemon.conversationMemory.get(playerId);
+    if (memory && memory.messages.length > 0) {
+      // Find the last substantial player message for context
+      const lastPlayerMsg = [...memory.messages]
+        .reverse()
+        .find(m => m.role === "player" && !m.content.startsWith("[Previous meeting:"));
+      if (lastPlayerMsg) {
+        const topic = lastPlayerMsg.content.length > 60
+          ? lastPlayerMsg.content.slice(0, 57) + "..."
+          : lastPlayerMsg.content;
+        parts.push(`Last time they said: "${topic}".`);
+      }
+    }
+
+    parts.push("]");
+    return parts.join(" ");
   }
 
   private getRelationshipContext(daemon: DaemonInstance): Array<{

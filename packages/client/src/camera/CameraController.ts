@@ -8,7 +8,7 @@ export class CameraController {
   private yaw = 0; // horizontal rotation
   private pitch = 0.4; // vertical angle (radians, 0 = level, positive = looking down)
 
-  private static MIN_PITCH = -0.3; // look up limit
+  private static MIN_PITCH = 0.05; // slight above level — prevents going under floor
   private static MAX_PITCH = 1.2; // look down limit
   private static MIN_DISTANCE = 4;
   private static MAX_DISTANCE = 40;
@@ -44,6 +44,9 @@ export class CameraController {
       this.target.y + offsetY,
       this.target.z + offsetZ
     );
+
+    // Clamp camera above ground
+    desiredPos.y = Math.max(desiredPos.y, 1.0);
 
     // Smooth follow
     this.camera.position.lerp(desiredPos, Math.min(dt * this.damping, 1));

@@ -179,6 +179,8 @@ export class DaemonManager {
   private lastEventDaemonId: string | null = null;
   private challengeTimer = 180 + Math.random() * 120; // first challenge in 3-5 min
   private playerMovement = new Map<string, { lastPos: Vector3; speed: number; stillTime: number; nearDaemonTime: Map<string, number> }>();
+  private lastPlayerCount = 0;
+  private crowdReactionCooldown = 0;
 
   constructor(
     broadcast: BroadcastFn,
@@ -1026,6 +1028,9 @@ export class DaemonManager {
       this.tickDaemonConversations(daemon, dt);
     }
 
+    // Crowd awareness — daemons react to player count changes
+    this.tickCrowdAwareness(dt, players);
+
     // Emotional contagion — moods spread between nearby daemons
     this.tickEmotionalContagion(dt);
 
@@ -1363,6 +1368,106 @@ export class DaemonManager {
     }
     const defaults = ["*yawns*", "*looks around*", "*taps foot*", "*stretches*", "*sighs*"];
     return defaults[Math.floor(Math.random() * defaults.length)];
+  }
+
+  // ─── Crowd Awareness ──────────────────────────────────────────────
+
+  /** Daemons react to changes in player count — busy streets vs empty ones */
+  private tickCrowdAwareness(dt: number, players: PlayerInfo[]): void {
+    this.crowdReactionCooldown -= dt;
+    if (this.crowdReactionCooldown > 0) return;
+
+    const count = players.length;
+    const prevCount = this.lastPlayerCount;
+    this.lastPlayerCount = count;
+
+    // Only react to significant changes
+    if (count === prevCount) return;
+    this.crowdReactionCooldown = 30; // 30s cooldown between crowd reactions
+
+    // Street just got busy (3+ players arrive)
+    if (count >= 3 && prevCount < 3) {
+      for (const [, daemon] of this.daemons) {
+        if (daemon.isMuted || daemon.state.currentAction !== "idle") continue;
+        if (Math.random() > 0.5) continue;
+
+        const type = daemon.behavior.type;
+        const traits = daemon.state.definition.personality?.traits || [];
+
+        let reaction: string | null = null;
+
+        if (type === "socialite" || traits.includes("extroverted") || traits.includes("energetic")) {
+          reaction = pick([
+            "The street's getting busy! I love it!",
+            "*perks up at the growing crowd* This is what I live for!",
+            "More people! Let's get this party started!",
+          ]);
+          daemon.state.mood = "excited";
+        } else if (type === "shopkeeper") {
+          reaction = pick([
+            "Customers! *straightens display* Welcome, welcome!",
+            "Business is picking up! Great time to browse!",
+          ]);
+          daemon.state.mood = "happy";
+        } else if (type === "guard") {
+          reaction = pick([
+            "*stands taller* Crowd forming. Staying alert.",
+            "Lots of foot traffic today. Keeping watch.",
+          ]);
+          daemon.state.mood = "curious";
+        } else if (traits.includes("shy") || traits.includes("introverted")) {
+          reaction = pick([
+            "*shrinks back a bit* Getting crowded...",
+            "*looks for a quiet corner* So many people...",
+          ]);
+          daemon.state.mood = "curious";
+        }
+
+        if (reaction) {
+          daemon.moodDecayTimer = 0;
+          const delay = Math.random() * 3000;
+          setTimeout(() => this.broadcastDaemonChat(daemon, reaction!), delay);
+        }
+        break; // Only one daemon reacts
+      }
+    }
+
+    // Street just emptied out (went below 2)
+    if (count < 2 && prevCount >= 2) {
+      for (const [, daemon] of this.daemons) {
+        if (daemon.isMuted || daemon.state.currentAction !== "idle") continue;
+        if (Math.random() > 0.4) continue;
+
+        const type = daemon.behavior.type;
+        const traits = daemon.state.definition.personality?.traits || [];
+
+        let reaction: string | null = null;
+
+        if (type === "socialite" || traits.includes("extroverted")) {
+          reaction = pick([
+            "*looks around* Where'd everyone go?",
+            "The street feels so empty now...",
+            "*sighs* I miss the crowd already.",
+          ]);
+          daemon.state.mood = "bored";
+        } else if (traits.includes("shy") || traits.includes("introverted")) {
+          reaction = pick([
+            "*relaxes* Ah, quiet at last.",
+            "Much better. Nice and peaceful.",
+          ]);
+          daemon.state.mood = "happy";
+        } else if (type === "guard") {
+          reaction = "*stands down a notch* All clear. Quiet shift.";
+          daemon.state.mood = "neutral";
+        }
+
+        if (reaction) {
+          daemon.moodDecayTimer = 0;
+          setTimeout(() => this.broadcastDaemonChat(daemon, reaction!), 1000);
+        }
+        break;
+      }
+    }
   }
 
   // ─── Emotional Contagion ──────────────────────────────────────────

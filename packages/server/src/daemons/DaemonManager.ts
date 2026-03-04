@@ -84,6 +84,8 @@ interface DaemonInstance {
   proactiveCooldowns: Map<string, number>; // playerId -> timestamp of last proactive remark
   // Thought bubbles
   thoughtTimer: number;             // countdown to next thought
+  // Emotional contagion
+  contagionTimer: number;           // countdown to next contagion check
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -104,6 +106,9 @@ const OVERHEAR_CHANCE = 0.15;      // 15% chance a daemon reacts to nearby chat
 const OVERHEAR_COOLDOWN_MS = 30_000; // 30s cooldown per daemon for overhear reactions
 const PROACTIVE_COOLDOWN_MS = 120_000; // 2 min cooldown per player for proactive remarks
 const DAY_CYCLE_SECONDS = 600;     // 10 real minutes = 1 in-game day
+const CONTAGION_RADIUS = 15;       // units — mood spreads within this radius
+const CONTAGION_INTERVAL = 8;      // check every 8 seconds
+const CONTAGION_RESIST_BASE = 0.4; // 40% base chance to resist mood spread
 
 type TimeOfDay = "morning" | "afternoon" | "evening" | "night";
 
@@ -241,6 +246,7 @@ export class DaemonManager {
       proactiveTimer: 20 + Math.random() * 40,
       proactiveCooldowns: new Map(),
       thoughtTimer: 45 + Math.random() * 60,
+      contagionTimer: CONTAGION_INTERVAL * Math.random(),
       isMuted: false,
       isRecalled: false,
     };
@@ -921,6 +927,9 @@ export class DaemonManager {
       this.tickDaemonConversations(daemon, dt);
     }
 
+    // Emotional contagion — moods spread between nearby daemons
+    this.tickEmotionalContagion(dt);
+
     // Detect daemon-daemon proximity for new conversations
     this.detectDaemonProximity();
 
@@ -1136,6 +1145,133 @@ export class DaemonManager {
     }
     const defaults = ["*yawns*", "*looks around*", "*taps foot*", "*stretches*", "*sighs*"];
     return defaults[Math.floor(Math.random() * defaults.length)];
+  }
+
+  // ─── Emotional Contagion ──────────────────────────────────────────
+
+  /** Moods spread between nearby daemons — excitement is infectious, boredom drags others down */
+  private tickEmotionalContagion(dt: number): void {
+    const daemons = Array.from(this.daemons.values()).filter(d => !d.isMuted);
+    if (daemons.length < 2) return;
+
+    for (const daemon of daemons) {
+      daemon.contagionTimer -= dt;
+      if (daemon.contagionTimer > 0) continue;
+      daemon.contagionTimer = CONTAGION_INTERVAL + Math.random() * 4;
+
+      // Only spread moods that have emotional weight
+      const mood = daemon.state.mood;
+      const intensity = this.getMoodIntensity(mood);
+      if (intensity === 0) continue;
+
+      // Find nearby daemons
+      for (const other of daemons) {
+        if (other === daemon) continue;
+        const dist = this.distance(daemon.state.currentPosition, other.state.currentPosition);
+        if (dist > CONTAGION_RADIUS) continue;
+
+        // Closer = stronger influence; relationship affects susceptibility
+        const proximityFactor = 1 - dist / CONTAGION_RADIUS; // 0..1
+        const rel = other.relationships.get(daemon.state.daemonId);
+        const sentimentBonus = rel?.sentiment === "friendly" ? 0.2
+          : rel?.sentiment === "wary" ? -0.3 : 0;
+
+        // Personality resistance — guards resist more, socialites spread more
+        const resistMod = other.behavior.type === "guard" ? 0.2
+          : other.behavior.type === "socialite" ? -0.15
+          : 0;
+
+        const spreadChance = (1 - CONTAGION_RESIST_BASE - resistMod) * proximityFactor + sentimentBonus;
+        if (Math.random() > spreadChance) continue;
+
+        // Don't overwrite a stronger mood with a weaker one
+        const otherIntensity = this.getMoodIntensity(other.state.mood);
+        if (Math.abs(otherIntensity) >= Math.abs(intensity)) continue;
+
+        // Spread the mood with a visible reaction
+        const prevMood = other.state.mood;
+        const spreadMood = this.getContagionMood(mood, other);
+        other.state.mood = spreadMood;
+        other.moodDecayTimer = 0;
+
+        // Visible reaction — only sometimes to avoid spam
+        if (Math.random() < 0.5) {
+          const reaction = this.getContagionReaction(daemon, other, prevMood, spreadMood);
+          if (reaction) {
+            this.broadcastDaemonEmote(other, reaction, spreadMood);
+          }
+        }
+      }
+    }
+  }
+
+  /** How "strong" a mood is — positive for energetic, negative for downer */
+  private getMoodIntensity(mood: DaemonMood): number {
+    switch (mood) {
+      case "excited": return 3;
+      case "happy": return 2;
+      case "curious": return 1;
+      case "neutral": return 0;
+      case "bored": return -1;
+      case "annoyed": return -2;
+      default: return 0;
+    }
+  }
+
+  /** Determine what mood gets spread — influenced by receiver's personality */
+  private getContagionMood(sourceMood: DaemonMood, receiver: DaemonInstance): DaemonMood {
+    const traits = receiver.state.definition.personality?.traits || [];
+
+    // Grumpy daemons dampen positive contagion
+    if ((sourceMood === "excited" || sourceMood === "happy") &&
+        (traits.includes("grumpy") || traits.includes("stern"))) {
+      return sourceMood === "excited" ? "curious" : "neutral";
+    }
+
+    // Optimistic daemons resist negative contagion
+    if ((sourceMood === "bored" || sourceMood === "annoyed") &&
+        (traits.includes("cheerful") || traits.includes("optimistic") || traits.includes("energetic"))) {
+      return "neutral";
+    }
+
+    return sourceMood;
+  }
+
+  /** Generate a visible reaction to catching someone else's mood */
+  private getContagionReaction(source: DaemonInstance, receiver: DaemonInstance, _prevMood: DaemonMood, newMood: DaemonMood): string | null {
+    const sourceName = source.state.definition.name;
+
+    switch (newMood) {
+      case "excited":
+        return pick([
+          `*catches ${sourceName}'s excitement*`,
+          `*perks up seeing ${sourceName} so energized*`,
+          "*gets swept up in the energy*",
+        ]);
+      case "happy":
+        return pick([
+          `*smiles watching ${sourceName}*`,
+          "*can't help but smile*",
+          `*${sourceName}'s good mood is contagious*`,
+        ]);
+      case "curious":
+        return pick([
+          `*wonders what ${sourceName} is so interested in*`,
+          "*looks over curiously*",
+        ]);
+      case "bored":
+        return pick([
+          `*${sourceName}'s boredom is spreading...*`,
+          "*starts feeling restless too*",
+        ]);
+      case "annoyed":
+        return pick([
+          `*picks up on ${sourceName}'s irritation*`,
+          "*mood sours a bit*",
+        ]);
+      default:
+        return null;
+    }
   }
 
   // ─── Daily Routines / Time of Day ────────────────────────────────

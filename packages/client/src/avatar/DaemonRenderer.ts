@@ -64,6 +64,7 @@ interface DaemonInstance {
 
 export class DaemonRenderer {
   private daemons = new Map<string, DaemonInstance>();
+  private daemonNames = new Map<string, string>();
   private scene: THREE.Scene;
 
   constructor(scene: THREE.Scene) {
@@ -101,6 +102,8 @@ export class DaemonRenderer {
 
     this.scene.add(group);
 
+    this.daemonNames.set(daemon.daemonId, daemon.definition.name);
+
     this.daemons.set(daemon.daemonId, {
       group,
       targetPosition: new THREE.Vector3(
@@ -130,6 +133,7 @@ export class DaemonRenderer {
     if (!daemon) return;
     this.scene.remove(daemon.group);
     this.daemons.delete(daemonId);
+    this.daemonNames.delete(daemonId);
   }
 
   moveDaemon(daemonId: string, position: Vec3, rotation: number, action: string): void {
@@ -324,6 +328,12 @@ export class DaemonRenderer {
         }
       }
     }
+  }
+
+  /** Get the name of a daemon by ID (from the spawn state cached on creation) */
+  getDaemonName(daemonId: string): string | null {
+    // We need to store daemon definitions — add a name map
+    return this.daemonNames.get(daemonId) || null;
   }
 
   /** Get daemon IDs near a world position */

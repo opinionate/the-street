@@ -365,6 +365,16 @@ export class StreetRoom extends Room<StreetRoomState> {
         c.send("chat", chatMsg);
       }
     });
+
+    // Let daemons overhear nearby chat
+    if (this.daemonManager) {
+      this.daemonManager.onPlayerChat(
+        player.userId,
+        player.displayName,
+        data.content,
+        senderPos,
+      );
+    }
   }
 
   private handleInteract(
@@ -511,7 +521,7 @@ export class StreetRoom extends Room<StreetRoomState> {
   ): void {
     const player = this.state.players.get(client.sessionId);
     if (!player || !this.daemonManager) return;
-    this.daemonManager.handleInteract(data.daemonId, player.userId, client.sessionId, data.message);
+    this.daemonManager.handleInteract(data.daemonId, player.userId, client.sessionId, data.message, player.displayName);
   }
 
   private async handleDaemonRecall(
@@ -555,12 +565,13 @@ export class StreetRoom extends Room<StreetRoomState> {
 
     // Tick daemons
     if (this.daemonManager) {
-      const players: { userId: string; position: Vector3; sessionId: string }[] = [];
+      const players: { userId: string; position: Vector3; sessionId: string; displayName?: string }[] = [];
       this.state.players.forEach((p: PlayerSchema, sessionId: string) => {
         players.push({
           userId: p.userId,
           position: { x: p.posX, y: p.posY, z: p.posZ },
           sessionId,
+          displayName: p.displayName,
         });
       });
       this.daemonManager.tick(1 / TICK_RATE, players);

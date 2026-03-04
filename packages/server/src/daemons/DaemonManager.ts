@@ -50,6 +50,8 @@ interface DaemonInstance {
   // Daemon-daemon
   daemonConversations: Map<string, DaemonDaemonConversation>; // otherDaemonId -> state
   conversationCooldown: number; // global cooldown before seeking new conversation
+  // Overhear
+  lastOverhearReaction: number;
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -66,6 +68,8 @@ const ROAM_PAUSE_MAX = 20;
 const ROAM_HOME_INTERVAL = 120;    // return home every 2 minutes
 const MOOD_DECAY_INTERVAL = 60;    // mood trends toward bored after 60s of no interaction
 const CONVERSATION_EXCHANGES = 3;  // lines per daemon in a conversation
+const OVERHEAR_CHANCE = 0.15;      // 15% chance a daemon reacts to nearby chat
+const OVERHEAR_COOLDOWN_MS = 30_000; // 30s cooldown per daemon for overhear reactions
 
 export class DaemonManager {
   private daemons = new Map<string, DaemonInstance>();
@@ -142,6 +146,7 @@ export class DaemonManager {
       isReturningHome: false,
       daemonConversations: new Map(),
       conversationCooldown: 10 + Math.random() * 20, // stagger initial conversations
+      lastOverhearReaction: 0,
       isMuted: false,
       isRecalled: false,
     };
@@ -217,6 +222,64 @@ export class DaemonManager {
     daemon.isMuted = muted;
   }
 
+  /** Called when a player sends a chat message — daemons may overhear and react */
+  onPlayerChat(playerId: string, playerName: string, content: string, position: Vector3): void {
+    const now = Date.now();
+
+    for (const [_id, daemon] of this.daemons) {
+      if (daemon.isMuted) continue;
+      if (daemon.state.currentAction !== "idle") continue;
+      if (now - daemon.lastOverhearReaction < OVERHEAR_COOLDOWN_MS) continue;
+
+      // Check distance
+      const dist = this.distance(daemon.state.currentPosition, position);
+      if (dist > daemon.behavior.interactionRadius * 1.5) continue;
+
+      // Random chance to react
+      if (Math.random() > OVERHEAR_CHANCE) continue;
+
+      daemon.lastOverhearReaction = now;
+
+      // Queue AI reaction
+      this.queueAiConversation(async () => {
+        try {
+          const { generateDaemonResponse } = await import("@the-street/ai-service");
+
+          const context = {
+            recentMessages: [] as { role: "player" | "daemon"; content: string }[],
+            nearbyPlayers: [playerName],
+            currentMood: daemon.state.mood,
+          };
+
+          const response = await generateDaemonResponse(
+            daemon.state.definition,
+            playerName,
+            `[Overheard nearby]: "${content}"`,
+            context,
+          );
+
+          daemon.state.mood = response.mood;
+          daemon.moodDecayTimer = 0;
+
+          const fullMessage = response.emote
+            ? `${response.emote} ${response.message}`
+            : response.message;
+
+          this.broadcast("daemon_chat", {
+            type: "daemon_chat" as const,
+            daemonId: daemon.state.daemonId,
+            daemonName: daemon.state.definition.name,
+            content: fullMessage,
+          });
+        } catch (err) {
+          console.error("Daemon overhear reaction failed:", err);
+        }
+      });
+
+      break; // Only one daemon reacts per chat message
+    }
+  }
+
   tick(dt: number, players: PlayerInfo[]): void {
     for (const [_daemonId, daemon] of this.daemons) {
       // Update mood
@@ -269,7 +332,7 @@ export class DaemonManager {
   }
 
   /** Handle player interacting with a daemon — triggers AI conversation */
-  handleInteract(daemonId: string, playerId: string, playerSessionId: string, playerMessage?: string): void {
+  handleInteract(daemonId: string, playerId: string, playerSessionId: string, playerMessage?: string, playerName?: string): void {
     const daemon = this.daemons.get(daemonId);
     if (!daemon || daemon.isMuted) return;
 
@@ -286,13 +349,13 @@ export class DaemonManager {
     let memory = daemon.conversationMemory.get(playerId);
     if (!memory || now - memory.lastInteraction > 300_000) {
       // New conversation or stale (>5 min)
-      memory = { playerId, playerName: "Traveler", messages: [], lastInteraction: now };
+      memory = { playerId, playerName: playerName || "Traveler", messages: [], lastInteraction: now };
       daemon.conversationMemory.set(playerId, memory);
     }
+    if (playerName) memory.playerName = playerName;
     memory.lastInteraction = now;
 
-    // Find player name
-    const playerName = memory.playerName;
+    const resolvedPlayerName = memory.playerName;
 
     // Queue AI response
     this.queueAiConversation(async () => {
@@ -311,7 +374,7 @@ export class DaemonManager {
 
         const response = await generateDaemonResponse(
           daemon.state.definition,
-          playerName,
+          resolvedPlayerName,
           playerMessage,
           context,
         );

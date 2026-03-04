@@ -12,6 +12,7 @@ import { CreationPanel } from "./ui/CreationPanel.js";
 import { GalleryPanel } from "./ui/GalleryPanel.js";
 import { AvatarPanel } from "./ui/AvatarPanel.js";
 import { DaemonPanel } from "./ui/DaemonPanel.js";
+import { DaemonChatUI } from "./ui/DaemonChatUI.js";
 import { getDefaultSpawnPoint, getAllPlotPositions } from "@the-street/shared";
 import type { WorldObject, PlotSnapshot, DaemonState } from "@the-street/shared";
 import * as THREE from "three";
@@ -50,6 +51,7 @@ async function init() {
   );
   const avatarPanel = new AvatarPanel();
   const daemonPanel = new DaemonPanel();
+  const daemonChatUI = new DaemonChatUI();
 
   // Build button (B key) / Gallery (G key)
   document.addEventListener("keydown", (e) => {
@@ -158,8 +160,9 @@ async function init() {
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
 
-  streetScene.renderer.domElement.addEventListener("click", (event) => {
+  streetScene.renderer.domElement.addEventListener("click", () => {
     if (!inputManager.isPointerLocked()) return;
+    if (daemonChatUI.isVisible()) return;
 
     // Screen center for pointer-locked clicks
     pointer.set(0, 0);
@@ -173,11 +176,19 @@ async function init() {
 
       const intersects = raycaster.intersectObject(daemonGroup, true);
       if (intersects.length > 0) {
-        network.sendDaemonInteract(daemonId);
+        const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
+        daemonChatUI.show(daemonId, name);
+        // Exit pointer lock so player can type
+        document.exitPointerLock();
         break;
       }
     }
   });
+
+  // Daemon chat send handler
+  daemonChatUI.onSendMessage = (daemonId, message) => {
+    network.sendDaemonInteract(daemonId, message || undefined);
+  };
 
   // Zoom wiring
   inputManager.onZoom = (delta) => {

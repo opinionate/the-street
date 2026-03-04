@@ -2427,9 +2427,13 @@ export class DaemonManager {
         const [, spk] = speaker;
         spk.gatheringTimer = GATHER_CHAT_INTERVAL + Math.random() * 15;
 
-        // 20% chance to start a full AI group conversation instead of a one-liner
-        if (Math.random() < 0.2 && group.length >= 3 && !this.processingAi) {
+        const roll = Math.random();
+        if (roll < 0.15 && group.length >= 3 && !this.processingAi) {
+          // 15% — full AI group conversation
           this.startGroupConversation(group);
+        } else if (roll < 0.30) {
+          // 15% — storytelling performance
+          this.performStory(spk, group);
         } else {
           const remark = this.pickGroupRemark(spk, group.length);
           if (remark) {
@@ -2475,6 +2479,263 @@ export class DaemonManager {
     }
 
     return remarks[Math.floor(Math.random() * remarks.length)];
+  }
+
+  /** Daemon tells a story, joke, or rumor to the gathered group — multi-line performance */
+  private performStory(performer: DaemonInstance, group: Array<[string, DaemonInstance]>): void {
+    const name = performer.state.definition.name;
+    const personality = performer.state.definition.personality;
+    const interests = personality?.interests || [];
+    const traits = personality?.traits || [];
+    const behaviorType = performer.behavior.type;
+
+    // Pick a story type based on personality
+    type StoryType = "joke" | "rumor" | "tale" | "wisdom" | "brag";
+    let storyType: StoryType;
+
+    if (traits.includes("funny") || traits.includes("witty") || behaviorType === "socialite") {
+      storyType = pick(["joke", "joke", "rumor", "brag"]) as StoryType;
+    } else if (traits.includes("wise") || traits.includes("philosophical") || behaviorType === "guide") {
+      storyType = pick(["wisdom", "tale", "wisdom"]) as StoryType;
+    } else if (traits.includes("mysterious") || traits.includes("secretive")) {
+      storyType = pick(["rumor", "tale", "rumor"]) as StoryType;
+    } else if (behaviorType === "guard") {
+      storyType = pick(["tale", "brag", "rumor"]) as StoryType;
+    } else if (behaviorType === "shopkeeper") {
+      storyType = pick(["brag", "rumor", "joke"]) as StoryType;
+    } else {
+      storyType = pick(["joke", "rumor", "tale", "wisdom", "brag"]) as StoryType;
+    }
+
+    // Generate the performance lines
+    const lines = this.generateStoryLines(performer, storyType, interests);
+    if (lines.length === 0) return;
+
+    // Set performer to talking
+    performer.state.currentAction = "talking";
+    performer.state.mood = "excited";
+    performer.moodDecayTimer = 0;
+
+    // Deliver lines with dramatic timing
+    let delay = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const capturedDelay = delay;
+      setTimeout(() => {
+        this.broadcastDaemonChat(performer, line);
+      }, capturedDelay * 1000);
+      delay += 2.5 + line.length * 0.02; // longer lines get more time
+    }
+
+    // Audience reactions after the performance
+    const endDelay = delay + 1.5;
+    setTimeout(() => {
+      performer.state.currentAction = "idle";
+
+      // Each audience member reacts
+      for (const [, listener] of group) {
+        if (listener === performer) continue;
+        if (Math.random() > 0.7) continue; // 70% react
+
+        const reaction = this.getStoryReaction(listener, storyType, performer);
+        if (reaction) {
+          const reactionDelay = 500 + Math.random() * 2000;
+          setTimeout(() => {
+            this.broadcastDaemonChat(listener, reaction);
+            listener.state.mood = storyType === "joke" ? "happy" : "curious";
+            listener.moodDecayTimer = 0;
+          }, reactionDelay);
+        }
+      }
+    }, endDelay * 1000);
+  }
+
+  /** Generate the lines for a story performance */
+  private generateStoryLines(performer: DaemonInstance, storyType: string, interests: string[]): string[] {
+    const name = performer.state.definition.name;
+    const interest = interests.length > 0 ? interests[Math.floor(Math.random() * interests.length)] : "the street";
+
+    switch (storyType) {
+      case "joke":
+        return pick([
+          [
+            "Okay okay, I got one for you all...",
+            `So a daemon walks into a bar on The Street...`,
+            `The bartender says "We don't serve your type here."`,
+            `The daemon says "That's fine, I'm just here for the atmosphere!" *ba dum tss*`,
+          ],
+          [
+            "Oh! That reminds me of something funny—",
+            `Why did the ${interest} cross The Street?`,
+            `Because the other side had better plot prices! Ha!`,
+          ],
+          [
+            "*clears throat dramatically*",
+            "Here's a good one... What do you call a daemon with no friends?",
+            "...A plot device! *laughs at own joke*",
+          ],
+          [
+            `You know what they say about ${interest}?`,
+            `Neither do I, but it sounded like a good setup!`,
+            "*finger guns*",
+          ],
+        ]);
+
+      case "rumor":
+        return pick([
+          [
+            "*leans in conspiratorially*",
+            "So I heard something interesting the other day...",
+            `Apparently there's a secret spot on The Street where ${interest} enthusiasts gather...`,
+            "But you didn't hear it from me. *taps nose*",
+          ],
+          [
+            "Okay, you didn't hear this from me, but...",
+            `Word on the street is that something big is coming.`,
+            `I can't say more, but keep your eyes open. *winks*`,
+          ],
+          [
+            "*glances around*",
+            `Between us... I've noticed some strange things around here lately.`,
+            `Things appearing and disappearing. Weird vibes. You feel it too, right?`,
+          ],
+        ]);
+
+      case "tale":
+        return pick([
+          [
+            "*settles in for a story*",
+            `When I first arrived on The Street, everything was different...`,
+            `There were fewer of us then. The plots were empty. But the potential... you could feel it.`,
+            `And look at us now! A real community. *smiles*`,
+          ],
+          [
+            `Let me tell you about the time I encountered a ${interest} situation...`,
+            `It was a dark and stormy evening — well, not really, but it sounds better that way.`,
+            `Long story short, I learned that you should never underestimate this place.`,
+            `The Street has a way of surprising you.`,
+          ],
+          [
+            "You want to hear something amazing?",
+            `Legend has it that the very first daemon on The Street just... appeared one day.`,
+            `No creator, no plot. Just materialized and started talking.`,
+            `Sometimes I wonder if we're all just echoes of that first one.`,
+          ],
+        ]);
+
+      case "wisdom":
+        return pick([
+          [
+            "*looks at the sky thoughtfully*",
+            `You know, I've been thinking about something...`,
+            `We all exist in this space together, but how often do we really see each other?`,
+            `Not just look, but truly see? ...Anyway, that's my deep thought for today.`,
+          ],
+          [
+            "Here's something worth remembering:",
+            `The best conversations aren't about finding answers.`,
+            `They're about finding better questions. *nods sagely*`,
+          ],
+          [
+            `*pauses reflectively*`,
+            `In my experience, the most interesting thing about ${interest}...`,
+            `...is not the thing itself, but the people you meet through it.`,
+            `That's the real treasure. Friendship! ...Sorry, got sappy there.`,
+          ],
+        ]);
+
+      case "brag":
+        return pick([
+          [
+            "Not to brag, but...",
+            `I'm pretty sure I'm the best ${performer.behavior.type} on The Street.`,
+            `I mean, has anyone else here greeted ${Math.floor(10 + Math.random() * 50)} people today? I think not.`,
+            "*flexes dramatically*",
+          ],
+          [
+            "Did I ever tell you all about my greatest achievement?",
+            `So there I was, doing my ${performer.behavior.type} thing, when suddenly...`,
+            `Actually, I can't tell the full story. It's classified. But trust me, it was impressive.`,
+          ],
+          [
+            `You know what I love about being a ${performer.behavior.type}?`,
+            `I'm basically the backbone of this whole street. Without me? Chaos.`,
+            `But hey, I'm humble about it. *adjusts collar smugly*`,
+          ],
+        ]);
+
+      default:
+        return [];
+    }
+  }
+
+  /** Generate an audience reaction to a story */
+  private getStoryReaction(listener: DaemonInstance, storyType: string, performer: DaemonInstance): string | null {
+    const performerName = performer.state.definition.name;
+    const listenerTraits = listener.state.definition.personality?.traits || [];
+    const rel = listener.relationships.get(performer.state.daemonId);
+    const isWary = rel?.sentiment === "wary";
+
+    // Wary listeners react dismissively
+    if (isWary) {
+      return pick([
+        "*rolls eyes*",
+        "...right.",
+        `Sure, ${performerName}. Whatever you say.`,
+      ]);
+    }
+
+    switch (storyType) {
+      case "joke":
+        if (listenerTraits.includes("grumpy") || listenerTraits.includes("stern")) {
+          return pick([
+            "*suppresses a smile*",
+            "That... was terrible. *almost grins*",
+            `I refuse to laugh at that, ${performerName}.`,
+          ]);
+        }
+        return pick([
+          "Ha! Good one!",
+          "*laughs*",
+          `Oh ${performerName}, that's awful! *laughs anyway*`,
+          "I don't get it... oh wait. OH. *snickers*",
+        ]);
+
+      case "rumor":
+        return pick([
+          "Wait, really? Tell me more!",
+          "*leans in closer*",
+          "Interesting... very interesting.",
+          `Hmm, I'll keep my eyes open, ${performerName}.`,
+        ]);
+
+      case "tale":
+        return pick([
+          "Wow, what a story!",
+          "I love hearing about the old days.",
+          `Tell us more, ${performerName}!`,
+          "*nods thoughtfully*",
+        ]);
+
+      case "wisdom":
+        return pick([
+          "*nods slowly*",
+          "That's... actually pretty deep.",
+          `Wise words, ${performerName}.`,
+          "Huh. I never thought of it that way.",
+        ]);
+
+      case "brag":
+        return pick([
+          "Oh here we go again...",
+          `*claps politely for ${performerName}*`,
+          "Very impressive. Very humble too.",
+          "*stifles a laugh*",
+        ]);
+
+      default:
+        return "Interesting!";
+    }
   }
 
   /** Start an AI-generated group conversation between 3+ gathered daemons */

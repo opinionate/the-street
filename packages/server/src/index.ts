@@ -31,6 +31,27 @@ async function main(): Promise<void> {
   await runMigrations(pool);
   console.log("Database migrations complete");
 
+  // Seed dev user + plots in development mode
+  if (process.env.NODE_ENV === "development") {
+    const devUserId = "00000000-0000-0000-0000-000000000000";
+    await pool.query(
+      `INSERT INTO users (id, clerk_id, display_name, public_key, private_key_encrypted)
+       VALUES ($1, 'dev_clerk_id', 'Dev User', 'dev-pub-key', 'dev-priv-key')
+       ON CONFLICT (id) DO NOTHING`,
+      [devUserId],
+    );
+    // Seed plots for dev user (ring 0, positions 0-7)
+    for (let i = 0; i < 8; i++) {
+      await pool.query(
+        `INSERT INTO plots (owner_id, neighborhood, ring, position)
+         VALUES ($1, 'origin', 0, $2)
+         ON CONFLICT (neighborhood, ring, position) DO NOTHING`,
+        [devUserId, i],
+      );
+    }
+    console.log("Dev user and plots seeded");
+  }
+
   // --- REST API Server ---
   const apiApp = express();
   apiApp.use(cors());

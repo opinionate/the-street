@@ -132,18 +132,23 @@ export class StreetRoom extends Room<StreetRoomState> {
     _client: Client,
     options: { token: string },
   ): Promise<ClientAuth> {
-    // Validate Clerk token and resolve user
-    // In production, use Clerk SDK to verify the session token
-    // For now, we extract clerkId from options and look up the user
+    // Dev bypass — skip Clerk auth in development
+    if (process.env.NODE_ENV === "development" || !process.env.CLERK_SECRET_KEY) {
+      return {
+        userId: "00000000-0000-0000-0000-000000000000",
+        clerkId: "dev_clerk_id",
+        displayName: "Dev User",
+        avatarIndex: 0,
+        lastPosition: null,
+      };
+    }
+
     if (!options?.token) {
       throw new Error("Authentication required");
     }
 
     const pool = getPool();
 
-    // Verify token via Clerk backend SDK
-    // The token is validated by Clerk middleware before reaching here
-    // We look up the user by their Clerk ID embedded in the token
     const { verifyToken } = await import("@clerk/express");
     const payload = await verifyToken(options.token, {
       secretKey: process.env.CLERK_SECRET_KEY,

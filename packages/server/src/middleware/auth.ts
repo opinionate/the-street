@@ -44,7 +44,7 @@ function devBypass(
   _res: Response,
   next: NextFunction,
 ): void {
-  req.userId = "dev-user-00000000-0000-0000-0000-000000000000";
+  req.userId = "00000000-0000-0000-0000-000000000000";
   req.clerkId = "dev_clerk_id";
   next();
 }

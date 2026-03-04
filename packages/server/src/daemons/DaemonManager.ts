@@ -16,6 +16,12 @@ interface PlayerInfo {
   displayName?: string;
 }
 
+interface WorldObjectInfo {
+  name: string;
+  tags: string[];
+  position: Vector3;
+}
+
 interface ConversationMemory {
   playerId: string;
   playerName: string;
@@ -122,6 +128,7 @@ export class DaemonManager {
   private worldClock = 0;  // elapsed seconds for day/night cycle
   private lastTimeOfDay: TimeOfDay = "morning";
   private activityLog: ActivityLogEntry[] = [];
+  private worldObjects: WorldObjectInfo[] = [];
 
   constructor(
     broadcast: BroadcastFn,
@@ -201,6 +208,11 @@ export class DaemonManager {
 
   getDaemonStates(): DaemonState[] {
     return Array.from(this.daemons.values()).map((d) => d.state);
+  }
+
+  /** Set world objects so daemons can notice nearby items */
+  setWorldObjects(objects: WorldObjectInfo[]): void {
+    this.worldObjects = objects;
   }
 
   /** Get recent activity for a specific daemon */
@@ -861,6 +873,13 @@ export class DaemonManager {
       ? 12 + Math.random() * 20  // More active when watched
       : 30 + Math.random() * 40; // Less active when alone
 
+    // Try object-aware gesture first (30% chance if nearby objects match interests)
+    const objectReaction = this.tryObjectReaction(daemon);
+    if (objectReaction) {
+      this.broadcastDaemonEmote(daemon, objectReaction.emote, objectReaction.mood);
+      return;
+    }
+
     // Pick a gesture based on personality and mood
     const { emote, action, mood } = this.pickSpontaneousGesture(daemon);
 
@@ -894,6 +913,47 @@ export class DaemonManager {
         }
       }, 2500);
     }
+  }
+
+  /** Try to react to a nearby world object that matches daemon's interests */
+  private tryObjectReaction(daemon: DaemonInstance): { emote: string; mood: DaemonMood } | null {
+    if (this.worldObjects.length === 0) return null;
+    if (Math.random() > 0.3) return null; // 30% chance to notice objects
+
+    const interests = daemon.state.definition.personality?.interests || [];
+    if (interests.length === 0) return null;
+
+    const pos = daemon.state.currentPosition;
+    const NOTICE_RADIUS = 10;
+
+    // Find nearby objects
+    for (const obj of this.worldObjects) {
+      const dist = this.distance(pos, obj.position);
+      if (dist > NOTICE_RADIUS) continue;
+
+      // Check if object matches any interest (by name or tags)
+      const objText = `${obj.name} ${obj.tags.join(" ")}`.toLowerCase();
+      const matchedInterest = interests.find(interest =>
+        objText.includes(interest.toLowerCase()) ||
+        interest.toLowerCase().split(" ").some(word => objText.includes(word)),
+      );
+
+      if (!matchedInterest) continue;
+
+      // Generate a reaction
+      const reactions = [
+        `*examines the ${obj.name} with interest*`,
+        `*looks at the ${obj.name}* Reminds me of ${matchedInterest}...`,
+        `*admires the nearby ${obj.name}*`,
+        `*glances at the ${obj.name} thoughtfully*`,
+      ];
+      return {
+        emote: reactions[Math.floor(Math.random() * reactions.length)],
+        mood: "curious" as DaemonMood,
+      };
+    }
+
+    return null;
   }
 
   private pickSpontaneousGesture(daemon: DaemonInstance): {

@@ -144,7 +144,10 @@ export class StreetRoom extends Room<StreetRoomState> {
 
     // Load plot cache and daemons
     this.loadPlots()
-      .then(() => this.loadDaemons())
+      .then(() => {
+        this.updateDaemonWorldObjects();
+        return this.loadDaemons();
+      })
       .then(() => this.daemonManager?.loadSavedState())
       .catch((err) => console.error("Failed to load plots/daemons:", err));
   }
@@ -471,11 +474,17 @@ export class StreetRoom extends Room<StreetRoomState> {
       objectDefinition: obj,
     });
 
-    // Notify daemons about the building activity
+    // Notify daemons about the building activity and update object awareness
     if (this.daemonManager) {
       this.daemonManager.onWorldEvent("object_placed", {
         x: player.posX, y: player.posY, z: player.posZ,
       }, player.displayName);
+    }
+    // Refresh plot cache objects for daemon awareness
+    const plotInCache = this.plotCache.find(p => p.uuid === data.plotUUID);
+    if (plotInCache) {
+      plotInCache.objects.push(obj);
+      this.updateDaemonWorldObjects();
     }
   }
 
@@ -549,6 +558,26 @@ export class StreetRoom extends Room<StreetRoomState> {
     if (!this.daemonManager) return;
     const plotUuids = this.plotCache.map((p) => p.uuid);
     await this.daemonManager.loadDaemons(plotUuids);
+  }
+
+  /** Build world objects list from plot cache for daemon awareness */
+  private updateDaemonWorldObjects(): void {
+    if (!this.daemonManager) return;
+    const objects: Array<{ name: string; tags: string[]; position: Vector3 }> = [];
+    for (const plot of this.plotCache) {
+      for (const obj of plot.objects) {
+        objects.push({
+          name: obj.name || "",
+          tags: obj.tags || [],
+          position: {
+            x: plot.placement.position.x + (obj.origin?.x || 0),
+            y: 0,
+            z: plot.placement.position.z + (obj.origin?.z || 0),
+          },
+        });
+      }
+    }
+    this.daemonManager.setWorldObjects(objects);
   }
 
   private handleDaemonInteract(

@@ -4,7 +4,7 @@
 
 V1 ships: one neighborhood, one ring, AI creation pipeline, staging environment, default avatars, avatar movement and presence, proximity text chat, persistence, and the attribution registry.
 
-V1 does not ship: multiple rings, promotion/relegation, combat, teleport-out, ignore system, advanced daemons, monorail, crowd pressure system, jury moderation, event hosting, cross-plot interactions, governance framework, voice audio, or the overflow layer.
+V1 does not ship: multiple rings, promotion/relegation, combat, teleport-out, ignore system, advanced daemons, monorail, crowd pressure system, jury moderation, event hosting, cross-plot interactions, governance framework, voice audio, the overflow layer, or CSG mesh generation.
 
 The V1 test: a non-technical person describes a building, sees it appear, walks down The Street, encounters another person's build, and initiates unprompted interaction with that person.
 
@@ -59,12 +59,15 @@ CREATE TABLE users (
   public_key TEXT NOT NULL,
   private_key_encrypted TEXT NOT NULL,
   avatar_definition JSONB NOT NULL,
+  last_position JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen_at TIMESTAMPTZ
 );
 ```
 
-The keypair is generated server-side at registration. The private key is encrypted at rest. The public key signs creation records. This preserves decentralization optionality per the PRD.
+The keypair is generated server-side at registration. The private key is encrypted at rest using a single master encryption key (see Security section). The public key signs creation records. This preserves decentralization optionality per the PRD.
+
+`last_position` is a JSONB column storing `{x, y, z, rotation}`. Nullable — null means "place at default spawn point." The game server writes player positions here every 30 seconds and on disconnect.
 
 #### plots
 
@@ -180,6 +183,38 @@ CREATE INDEX idx_chat_messages_location ON chat_messages(neighborhood, ring, cre
 
 Proximity text chat. Messages are spatially tagged. The client filters to show only messages within a configurable radius of the viewer.
 
+#### staging_objects
+
+```sql
+CREATE TABLE staging_objects (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  creator_id UUID NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  description TEXT,
+  tags TEXT[],
+  object_definition JSONB NOT NULL,
+  state_data JSONB NOT NULL DEFAULT '{}',
+  render_cost NUMERIC NOT NULL,
+  origin_x FLOAT NOT NULL,
+  origin_y FLOAT NOT NULL,
+  origin_z FLOAT NOT NULL,
+  scale_x FLOAT NOT NULL DEFAULT 1,
+  scale_y FLOAT NOT NULL DEFAULT 1,
+  scale_z FLOAT NOT NULL DEFAULT 1,
+  rotation_x FLOAT NOT NULL DEFAULT 0,
+  rotation_y FLOAT NOT NULL DEFAULT 0,
+  rotation_z FLOAT NOT NULL DEFAULT 0,
+  rotation_w FLOAT NOT NULL DEFAULT 1,
+  asset_hash TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  modified_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_staging_objects_creator ON staging_objects(creator_id);
+```
+
+Separate table from `world_objects`. Staging objects are ephemeral drafts — they are never visible in the live world. The publish flow copies validated staging objects to `world_objects` and deletes the staging records atomically. This prevents staged objects from leaking into the live world.
+
 #### moderation_log
 
 ```sql
@@ -211,6 +246,10 @@ Clerk handles auth. Flow:
 
 No passwords. No OAuth with third parties. Clerk manages all session handling.
 
+### Launch Cohort Gating
+
+V1 is invite-only. Clerk is configured with an email allowlist. The 56 launch cohort members are pre-registered by email address. Users not on the allowlist see a "The Street is invite-only during launch" page. A public waitlist form (Clerk signup without access grant) captures interest for future cohorts.
+
 ---
 
 ## World Geometry (V1)
@@ -227,6 +266,7 @@ interface WorldConfig {
   plotHeight: number;           // max build height
   streetWidth: number;          // width of the walkable street in front of plots
   plotCount: number;            // total plots on the ring
+  plotRenderBudget: number;     // total render cost units per plot
 }
 
 // V1 defaults — these are the open decisions from the PRD.
@@ -238,6 +278,7 @@ const V1_CONFIG: WorldConfig = {
   plotHeight: 40,               // 40 units tall
   streetWidth: 15,              // 15 unit wide street
   plotCount: 56,                // 56 plots for launch cohort
+  plotRenderBudget: 500_000,    // total render cost units per plot (tune based on perf testing)
 };
 ```
 
@@ -271,7 +312,7 @@ The street is the walkable ring between the plot frontages and the center. Users
 
 ### Room Structure
 
-V1 uses a single Colyseus room since there is one ring and one neighborhood. The room manages all connected players, their positions, object state changes, and proximity chat.
+V1 uses a single Colyseus room since there is one ring and one neighborhood. The room manages all connected players, their positions, object state changes, and proximity chat. The room is configured with `maxClients: 100`. If the room is full, new connections receive a "The Street is at capacity, please try again shortly" message. This is consistent with the PRD principle of transparent capacity communication.
 
 ```typescript
 // server/src/rooms/StreetRoom.ts
@@ -376,7 +417,7 @@ Scene
 
 1. On load: connect to Colyseus room, receive world snapshot.
 2. Generate street ring geometry procedurally from `WorldConfig`.
-3. For each plot in snapshot: load its objects. Objects with an `asset_hash` fetch glTF from CDN. Objects without fetch their `object_definition` JSON and build geometry client-side (CSG primitives or procedurally).
+3. For each plot in snapshot: load its objects. Objects with an `asset_hash` fetch glTF from CDN (archetype primitives or Meshy-generated novel meshes). Objects currently generating display as translucent placeholder bounding boxes (see Generation Placeholder UX).
 4. Place default avatars for each connected player at their reported position.
 5. Enter game loop: process input, send movement to server, interpolate remote players, render frame.
 
@@ -456,8 +497,7 @@ If invalid: feed errors back to Claude, regenerate (max 3 retries)
 If valid, route mesh:
   A) Archetype match → select base mesh from platform primitives library,
      apply material/scale/parameter overrides from the generated definition
-  B) Simple geometry → CSG operations produce mesh directly
-  C) Novel object → send description to Meshy API (text-to-3D, Meshy-6 model,
+  B) Novel object → send description to Meshy API (text-to-3D, Meshy-6 model,
      enable_pbr=true, target_polycount=30000), receive glTF,
      validate polygon count and materials
         │
@@ -472,6 +512,17 @@ Send WorldObject definition + asset_hash back to client
 Client places object, server broadcasts to all connected clients
 Write to world_objects table
 ```
+
+### Generation Placeholder UX
+
+Novel mesh generation via Meshy takes 30-90 seconds. During this time, the client displays a placeholder:
+
+- A translucent bounding box matching the object's declared dimensions
+- Shimmer/pulse effect to indicate generation in progress
+- Object name floating above the placeholder (e.g., "Building... Steve's Bookshop")
+- Visible to all connected players — creation is a social spectacle
+
+When the glTF is ready, the placeholder swaps to the final mesh with a brief fade transition. If generation fails after retries, the placeholder is removed and the user receives an error with the option to retry or revise their description.
 
 ### AI Service Implementation
 
@@ -492,9 +543,8 @@ interface GenerationRequest {
 
 interface GenerationResult {
   objectDefinition: WorldObject;
-  meshRoute: "archetype" | "csg" | "novel";
+  meshRoute: "archetype" | "novel";
   archetypeId?: string;        // if meshRoute === "archetype"
-  csgOperations?: CSGOp[];     // if meshRoute === "csg"
   novelDescription?: string;   // if meshRoute === "novel"
   validationErrors: string[];
 }
@@ -887,6 +937,10 @@ V1 does not ship Wasm execution of user scripts. The TypeScript generated by the
 
 Wasm sandboxing activates when daemon behavior trees and more complex interactivity ship (V1.1+). The interfaces are designed now but the sandbox runtime is not V1 scope.
 
+### Master Encryption Key
+
+V1 uses a single master encryption key (environment variable) to encrypt all user private keys at rest. This is appropriate for the launch cohort of 56 users. Key rotation is a post-launch concern — when needed, the standard approach is versioned keys: each encrypted private key stores which key version encrypted it, and re-encryption happens lazily on access.
+
 ### Server Authority
 
 The game server validates all state-changing actions. The client is a dumb renderer that sends intents. The server:
@@ -984,6 +1038,7 @@ These are not forgotten. They are deliberately excluded from V1 and accounted fo
 - **Governance** — platform operator makes all decisions with documented reasoning
 - **Voice audio** — text chat only
 - **Community asset marketplace** — assets exist and are attributed, no browse/search/rating UI
+- **CSG mesh generation** — two routes suffice for V1 (archetype + Meshy novel). CSG adds complexity without clear user benefit. Revisit when there's data on what the AI generates and where routes fall short
 
 ---
 

@@ -321,7 +321,7 @@ export class DaemonRenderer {
 
     daemon.mood = mood;
     this.updateMoodIndicator(daemon);
-    this.updateMoodVisuals(daemon);
+    this.updateMoodVisuals(daemon, 0);
 
     // Spawn emote particles
     const color = MOOD_COLORS[mood] || 0x888888;
@@ -347,21 +347,91 @@ export class DaemonRenderer {
     daemon.gesturePhase = 0;
   }
 
-  /** Update mood-driven visual properties: accent light color, body tint, animation speed */
-  private updateMoodVisuals(daemon: DaemonInstance): void {
+  /** Update mood-driven visual properties: accent light color, body tint, animation speed, particles */
+  private updateMoodVisuals(daemon: DaemonInstance, dt: number): void {
     const moodColor = MOOD_COLORS[daemon.mood] || 0x888888;
 
     // Accent light shifts color to match mood
     daemon.accentLight.color.setHex(moodColor);
 
-    // Subtle body emissive tint — very faint mood coloring
+    // Subtle body emissive tint — faint mood coloring with pulse for strong moods
     const bodyMat = daemon.bodyMesh.material as THREE.MeshStandardMaterial;
     bodyMat.emissive.setHex(moodColor);
-    bodyMat.emissiveIntensity = daemon.mood === "excited" ? 0.08
-      : daemon.mood === "happy" ? 0.04
-      : daemon.mood === "annoyed" ? 0.06
-      : daemon.mood === "curious" ? 0.03
-      : 0.01; // bored/neutral barely glows
+
+    const basePulse = Math.sin(daemon.breathPhase * 2) * 0.015;
+    if (daemon.mood === "excited") {
+      bodyMat.emissiveIntensity = 0.08 + basePulse * 2;
+      // Emit sparkle particles occasionally
+      if (Math.random() < dt * 2) {
+        this.emitMoodParticle(daemon, 0xffff44);
+      }
+    } else if (daemon.mood === "happy") {
+      bodyMat.emissiveIntensity = 0.04 + basePulse;
+    } else if (daemon.mood === "annoyed") {
+      bodyMat.emissiveIntensity = 0.06 + Math.abs(basePulse) * 2;
+      // Occasional red spark
+      if (Math.random() < dt * 0.8) {
+        this.emitMoodParticle(daemon, 0xff4444);
+      }
+    } else if (daemon.mood === "curious") {
+      bodyMat.emissiveIntensity = 0.03 + basePulse * 0.5;
+    } else if (daemon.mood === "bored") {
+      bodyMat.emissiveIntensity = 0.01;
+      // Droopy head for bored daemons
+      daemon.head.rotation.x = Math.sin(daemon.breathPhase * 0.3) * 0.05 + 0.1;
+    } else {
+      bodyMat.emissiveIntensity = 0.01;
+    }
+
+    // Reset head tilt when not bored
+    if (daemon.mood !== "bored") {
+      daemon.head.rotation.x *= 0.9; // Smoothly return to neutral
+    }
+
+    // Accent light intensity pulses with strong moods
+    if (daemon.mood === "excited" || daemon.mood === "happy") {
+      daemon.accentLight.intensity = Math.max(daemon.accentLight.intensity,
+        0.4 + Math.sin(daemon.breathPhase * 3) * 0.15);
+    }
+  }
+
+  /** Emit a small colored particle near the daemon for mood effects */
+  private emitMoodParticle(daemon: DaemonInstance, color: number): void {
+    const canvas = document.createElement("canvas");
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext("2d")!;
+    ctx.beginPath();
+    ctx.arc(8, 8, 6, 0, Math.PI * 2);
+    ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
+    ctx.fill();
+
+    const tex = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      transparent: true,
+      opacity: 0.7,
+      blending: THREE.AdditiveBlending,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.setScalar(0.08);
+
+    // Position near the body with some randomness
+    const offsetX = (Math.random() - 0.5) * 0.4;
+    const offsetZ = (Math.random() - 0.5) * 0.4;
+    sprite.position.set(offsetX, 1.0 + Math.random() * 0.8, offsetZ);
+    daemon.group.add(sprite);
+
+    daemon.emoteParticles.push({
+      mesh: sprite,
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 0.3,
+        0.5 + Math.random() * 0.3,
+        (Math.random() - 0.5) * 0.3,
+      ),
+      life: 0.8 + Math.random() * 0.4,
+      maxLife: 1.2,
+    });
   }
 
   /** Get animation speed multiplier based on mood */
@@ -411,6 +481,9 @@ export class DaemonRenderer {
 
       // Status indicators
       this.updateStatusIndicators(daemon, dt);
+
+      // Continuous mood visual effects (particles, pulses)
+      this.updateMoodVisuals(daemon, dt);
 
       // Track action transitions
       daemon.lastAction = daemon.action;

@@ -178,6 +178,7 @@ export class DaemonManager {
   private eventTimer = 300 + Math.random() * 300; // first event in 5-10 min
   private lastEventDaemonId: string | null = null;
   private challengeTimer = 180 + Math.random() * 120; // first challenge in 3-5 min
+  private playerMovement = new Map<string, { lastPos: Vector3; speed: number; stillTime: number; nearDaemonTime: Map<string, number> }>();
 
   constructor(
     broadcast: BroadcastFn,
@@ -947,6 +948,9 @@ export class DaemonManager {
       this.lastTimeOfDay = timeOfDay;
     }
 
+    // Track player movement patterns
+    this.updatePlayerMovement(dt, players);
+
     for (const [_daemonId, daemon] of this.daemons) {
       // Update mood
       this.tickMood(daemon, dt);
@@ -1002,6 +1006,9 @@ export class DaemonManager {
 
       // Territorial awareness — daemons protect and prefer their turf
       this.tickTerritory(daemon, dt);
+
+      // Movement pattern reactions — notice sprinting, lurking, hovering
+      this.tickMovementReactions(daemon, dt, players);
 
       // Spontaneous personality-based gestures
       this.tickSpontaneousGestures(daemon, dt, players);
@@ -1211,6 +1218,122 @@ export class DaemonManager {
       }
     } else if (behavior.greetingMessage) {
       this.broadcastDaemonChat(daemon, behavior.greetingMessage, playerId);
+    }
+  }
+
+  // ─── Player Movement Awareness ──────────────────────────────────
+
+  /** Track player positions and velocities for daemon awareness */
+  private updatePlayerMovement(dt: number, players: PlayerInfo[]): void {
+    const currentIds = new Set<string>();
+
+    for (const player of players) {
+      currentIds.add(player.userId);
+      let tracker = this.playerMovement.get(player.userId);
+
+      if (!tracker) {
+        tracker = { lastPos: { ...player.position }, speed: 0, stillTime: 0, nearDaemonTime: new Map() };
+        this.playerMovement.set(player.userId, tracker);
+        continue;
+      }
+
+      // Calculate speed
+      const dx = player.position.x - tracker.lastPos.x;
+      const dz = player.position.z - tracker.lastPos.z;
+      const moved = Math.sqrt(dx * dx + dz * dz);
+      tracker.speed = dt > 0 ? moved / dt : 0;
+
+      // Track stillness
+      if (moved < 0.1) {
+        tracker.stillTime += dt;
+      } else {
+        tracker.stillTime = 0;
+      }
+
+      // Track time near each daemon
+      for (const [daemonId, daemon] of this.daemons) {
+        const dist = this.distance(player.position, daemon.state.currentPosition);
+        if (dist < daemon.behavior.interactionRadius * 1.5) {
+          const prev = tracker.nearDaemonTime.get(daemonId) || 0;
+          tracker.nearDaemonTime.set(daemonId, prev + dt);
+        } else {
+          tracker.nearDaemonTime.delete(daemonId);
+        }
+      }
+
+      tracker.lastPos = { ...player.position };
+    }
+
+    // Clean up departed players
+    for (const [pid] of this.playerMovement) {
+      if (!currentIds.has(pid)) this.playerMovement.delete(pid);
+    }
+  }
+
+  /** Daemons react to player movement patterns — sprinting, lurking, lingering */
+  private tickMovementReactions(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
+    if (daemon.isMuted) return;
+    if (daemon.state.currentAction !== "idle") return;
+    if (Math.random() > 0.02) return; // Low chance per tick
+
+    const radius = daemon.behavior.interactionRadius * 2;
+
+    for (const player of players) {
+      const dist = this.distance(daemon.state.currentPosition, player.position);
+      if (dist > radius) continue;
+
+      const tracker = this.playerMovement.get(player.userId);
+      if (!tracker) continue;
+
+      const name = this.getDisplayName(daemon, player.userId, player.displayName || "someone");
+      const rel = daemon.relationships.get(player.userId);
+
+      // Sprinting past — daemon is startled or annoyed
+      if (tracker.speed > 8 && dist < radius * 0.6) {
+        if (Math.random() > 0.3) continue;
+        const reaction = daemon.behavior.type === "guard"
+          ? pick([
+              `*steps back* Slow down, ${name}! No running on the street!`,
+              `Hey! *shouts after ${name}* Watch your speed!`,
+            ])
+          : pick([
+              `*startled by ${name} sprinting past* Whoa!`,
+              `*watches ${name} zoom by* Where's the fire?`,
+              `*hair blown by ${name} rushing past* ...rude.`,
+            ]);
+        this.broadcastDaemonChat(daemon, reaction);
+        daemon.state.mood = "curious";
+        daemon.moodDecayTimer = 0;
+        return;
+      }
+
+      // Lurking nearby without interacting for a long time
+      const nearTime = tracker.nearDaemonTime.get(daemon.state.daemonId) || 0;
+      if (nearTime > 30 && tracker.stillTime > 15 && (!rel || rel.interactionCount < 1)) {
+        if (Math.random() > 0.4) continue;
+        const reaction = daemon.behavior.type === "guard"
+          ? pick([
+              `*eyes ${name}* You've been standing there for a while. Everything okay?`,
+              `*turns toward ${name}* Can I help you with something?`,
+            ])
+          : daemon.behavior.type === "shopkeeper"
+            ? pick([
+                `*notices ${name} hovering* Looking for something? Don't be shy!`,
+                `You've been eyeing the goods for a while, ${name}. Just ask!`,
+              ])
+            : pick([
+                `*glances at ${name}* ...you okay there?`,
+                `*notices ${name} lingering* Hey! Don't be a wallflower, say hi!`,
+                `*waves at ${name}* You've been standing there a while. Come chat!`,
+              ]);
+        this.broadcastDaemonChat(daemon, reaction, player.userId);
+        daemon.state.mood = "curious";
+        daemon.moodDecayTimer = 0;
+
+        // Reset the near time so we don't spam
+        tracker.nearDaemonTime.set(daemon.state.daemonId, 0);
+        return;
+      }
     }
   }
 

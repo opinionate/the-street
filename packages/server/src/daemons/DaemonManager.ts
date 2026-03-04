@@ -2594,37 +2594,61 @@ export class DaemonManager {
     }
   }
 
-  /** Generate a personalized greeting based on relationship history */
+  /** Generate a personalized greeting based on relationship history, time of day, and visit context */
   private getPersonalizedGreeting(daemon: DaemonInstance, player: PlayerInfo): string {
     const rel = daemon.relationships.get(player.userId);
-    const name = player.displayName || "traveler";
+    const realName = player.displayName || "traveler";
+    const name = this.getDisplayName(daemon, player.userId, realName);
+    const time = this.lastTimeOfDay;
 
-    // No prior relationship — default greeting
+    // Time-of-day greeting flavor
+    const timePrefix = this.getTimeGreetingPrefix(daemon, time);
+
+    // No prior relationship — first-time greeting
     if (!rel || rel.interactionCount < 1) {
+      if (timePrefix) {
+        return `${timePrefix} ${daemon.behavior.greetingMessage || `Welcome, ${name}!`}`;
+      }
       return daemon.behavior.greetingMessage || `Hello, ${name}!`;
     }
 
-    // Returning player — personalize based on sentiment and interaction count
+    // Use nickname if available
     const personality = daemon.state.definition.personality;
     const style = personality?.speechStyle || "casual";
 
     if (rel.sentiment === "friendly" && rel.interactionCount >= 3) {
-      const friendlyGreetings = [
+      // Time-aware friendly greetings
+      if (time === "morning") {
+        return pick([
+          `${name}! *yawns* Good morning! You're an early bird too?`,
+          `Morning, ${name}! *stretches* Ready for a new day?`,
+          `${name}! Perfect timing — I just woke up. *rubs eyes*`,
+        ]);
+      }
+      if (time === "night") {
+        return pick([
+          `${name}! Still up? Night owls, the both of us.`,
+          `*whispers* ${name}! Late night stroll?`,
+          `Ah, ${name}! The street is different at night, isn't it?`,
+        ]);
+      }
+      return pick([
         `${name}! Great to see you again!`,
         `Welcome back, ${name}! I was hoping you'd visit.`,
         `Ah, my friend ${name}! How have you been?`,
         `${name}! Always a pleasure.`,
-      ];
-      return friendlyGreetings[Math.floor(Math.random() * friendlyGreetings.length)];
+      ]);
     }
 
     if (rel.sentiment === "wary") {
-      const waryGreetings = [
+      if (time === "night") {
+        return `*squints into the darkness* ...${name}. What are you doing here at this hour?`;
+      }
+      return pick([
         `Oh... ${name}. You're back.`,
         `${name}. Hmm.`,
         `*eyes ${name} cautiously* Hello again.`,
-      ];
-      return waryGreetings[Math.floor(Math.random() * waryGreetings.length)];
+      ]);
     }
 
     if (rel.sentiment === "curious") {
@@ -2635,11 +2659,42 @@ export class DaemonManager {
       return `Ha! ${name} returns! What trouble today?`;
     }
 
-    // Neutral returning player
+    // Neutral returning player with time flavor
+    if (timePrefix) {
+      return `${timePrefix} ${name}! Good to see you.`;
+    }
     if (style.includes("formal") || style.includes("eloquent")) {
       return `Welcome back, ${name}. A pleasure as always.`;
     }
     return `Hey ${name}, good to see you again!`;
+  }
+
+  /** Get a time-of-day specific greeting prefix based on daemon personality */
+  private getTimeGreetingPrefix(daemon: DaemonInstance, time: TimeOfDay): string | null {
+    const traits = daemon.state.definition.personality?.traits || [];
+
+    if (time === "morning") {
+      if (traits.includes("energetic") || traits.includes("cheerful")) {
+        return pick(["Rise and shine!", "Beautiful morning!", "What a great day to start!"]);
+      }
+      if (traits.includes("grumpy") || traits.includes("lazy")) {
+        return pick(["*yawns widely*", "*barely awake*", "Ugh, mornings..."]);
+      }
+      return pick(["Good morning!", "Morning!", null, null]); // 50% chance of prefix
+    }
+
+    if (time === "evening") {
+      return pick(["Good evening!", "Evening!", null, null]);
+    }
+
+    if (time === "night") {
+      if (traits.includes("mysterious") || traits.includes("nocturnal")) {
+        return pick(["Ah, the night shift!", "*emerges from the shadows*"]);
+      }
+      return pick(["*stifles a yawn*", null, null]);
+    }
+
+    return null; // Afternoon — no special prefix
   }
 
   private tickShopkeeper(daemon: DaemonInstance, _dt: number, _players: PlayerInfo[]): void {

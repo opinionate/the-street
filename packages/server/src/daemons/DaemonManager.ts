@@ -1444,61 +1444,59 @@ export class DaemonManager {
   }
 
   /** After a daemon-daemon conversation, share gossip about known players */
+  /** After a daemon-daemon conversation, share gossip about known players */
   private shareGossip(daemonA: DaemonInstance, daemonB: DaemonInstance): void {
-    // A tells B about players A knows
-    for (const [targetId, relA] of daemonA.relationships) {
-      if (relA.targetType !== "player") continue;
-      if (relA.interactionCount < 2) continue; // Only gossip about people you've actually talked to
-
-      let relB = daemonB.relationships.get(targetId);
-      if (!relB) {
-        relB = {
-          targetName: relA.targetName,
-          targetType: "player",
-          sentiment: "neutral",
-          interactionCount: 0,
-          gossip: [],
-          lastUpdated: Date.now(),
-        };
-        daemonB.relationships.set(targetId, relB);
-      }
-
-      // A shares their opinion as gossip
-      const gossipLine = `${daemonA.state.definition.name} says ${relA.targetName} is ${relA.sentiment}`;
-      if (!relB.gossip.includes(gossipLine)) {
-        relB.gossip.push(gossipLine);
-        if (relB.gossip.length > 5) relB.gossip.shift();
-      }
-    }
-
-    // B tells A about players B knows
-    for (const [targetId, relB] of daemonB.relationships) {
-      if (relB.targetType !== "player") continue;
-      if (relB.interactionCount < 2) continue;
-
-      let relA = daemonA.relationships.get(targetId);
-      if (!relA) {
-        relA = {
-          targetName: relB.targetName,
-          targetType: "player",
-          sentiment: "neutral",
-          interactionCount: 0,
-          gossip: [],
-          lastUpdated: Date.now(),
-        };
-        daemonA.relationships.set(targetId, relA);
-      }
-
-      const gossipLine = `${daemonB.state.definition.name} says ${relB.targetName} is ${relB.sentiment}`;
-      if (!relA.gossip.includes(gossipLine)) {
-        relA.gossip.push(gossipLine);
-        if (relA.gossip.length > 5) relA.gossip.shift();
-      }
-    }
+    this.shareGossipOneWay(daemonA, daemonB);
+    this.shareGossipOneWay(daemonB, daemonA);
 
     // Update daemon-daemon relationships
     this.updateRelationship(daemonA, daemonB.state.daemonId, daemonB.state.definition.name, "daemon", daemonA.state.mood);
     this.updateRelationship(daemonB, daemonA.state.daemonId, daemonA.state.definition.name, "daemon", daemonB.state.mood);
+  }
+
+  private shareGossipOneWay(source: DaemonInstance, target: DaemonInstance): void {
+    for (const [targetId, rel] of source.relationships) {
+      if (rel.targetType !== "player") continue;
+      if (rel.interactionCount < 2) continue;
+
+      let targetRel = target.relationships.get(targetId);
+      if (!targetRel) {
+        targetRel = {
+          targetName: rel.targetName,
+          targetType: "player",
+          sentiment: "neutral",
+          interactionCount: 0,
+          gossip: [],
+          lastUpdated: Date.now(),
+        };
+        target.relationships.set(targetId, targetRel);
+      }
+
+      // Share opinion with context from conversation memory
+      const memory = source.conversationMemory.get(targetId);
+      let gossipLine: string;
+
+      if (memory && memory.messages.length > 0) {
+        // Extract a conversation snippet for richer gossip
+        const lastPlayerMsg = memory.messages
+          .filter(m => m.role === "player")
+          .slice(-1)[0];
+
+        if (lastPlayerMsg) {
+          const snippet = lastPlayerMsg.content.slice(0, 40);
+          gossipLine = `${source.state.definition.name} chatted with ${rel.targetName} (${rel.sentiment}) — they said: "${snippet}"`;
+        } else {
+          gossipLine = `${source.state.definition.name} thinks ${rel.targetName} is ${rel.sentiment} (talked ${rel.interactionCount} times)`;
+        }
+      } else {
+        gossipLine = `${source.state.definition.name} says ${rel.targetName} is ${rel.sentiment}`;
+      }
+
+      if (!targetRel.gossip.includes(gossipLine)) {
+        targetRel.gossip.push(gossipLine);
+        if (targetRel.gossip.length > 5) targetRel.gossip.shift();
+      }
+    }
   }
 
   private distance(a: Vector3, b: Vector3): number {

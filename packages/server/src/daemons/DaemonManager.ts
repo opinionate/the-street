@@ -495,6 +495,14 @@ export class DaemonManager {
     }
   }
 
+  private broadcastDaemonThought(daemon: DaemonInstance, thought: string): void {
+    this.broadcast("daemon_thought", {
+      type: "daemon_thought" as const,
+      daemonId: daemon.state.daemonId,
+      thought,
+    });
+  }
+
   addDaemon(id: string, definition: DaemonDefinition, behavior: DaemonBehavior): void {
     // Ensure personality exists
     if (!definition.personality) {
@@ -634,53 +642,113 @@ export class DaemonManager {
 
   /** Called when a player leaves the world — daemons who know them react */
   onPlayerLeave(playerId: string, playerName: string, position: Vector3): void {
+    let reactors = 0;
+
     for (const [, daemon] of this.daemons) {
       if (daemon.isMuted) continue;
       if (daemon.state.currentAction !== "idle") continue;
+      if (reactors >= 3) break; // Cap visible reactions
 
       const dist = this.distance(daemon.state.currentPosition, position);
-      if (dist > 30) continue; // Only nearby daemons notice
+      if (dist > 40) continue;
 
       const rel = daemon.relationships.get(playerId);
-      if (!rel || rel.interactionCount < 1) continue; // Only daemons who know the player
+      if (!rel || rel.interactionCount < 1) continue;
 
+      // Update last seen
+      rel.lastSeen = Date.now();
+
+      const name = this.getDisplayName(daemon, playerId, playerName);
       let farewell: string;
       let mood: DaemonMood;
 
-      switch (rel.sentiment) {
-        case "friendly":
-          farewell = [
-            `Bye, ${playerName}! Come back soon!`,
-            `*waves goodbye to ${playerName}*`,
-            `See you around, ${playerName}!`,
-          ][Math.floor(Math.random() * 3)];
-          mood = "happy";
-          break;
-        case "wary":
-          farewell = [
-            `*watches ${playerName} leave with relief*`,
-            `Hmph. ${playerName} is gone.`,
-          ][Math.floor(Math.random() * 2)];
-          mood = "neutral";
-          break;
-        case "curious":
-          farewell = `*wonders where ${playerName} went...*`;
-          mood = "curious";
-          break;
-        case "amused":
-          farewell = `Ha, there goes ${playerName}. Never a dull moment.`;
-          mood = "happy";
-          break;
-        default:
-          farewell = `*notices ${playerName} has left*`;
-          mood = "neutral";
+      // Deep relationships get personal farewells
+      if (rel.sentiment === "friendly" && rel.interactionCount >= 5) {
+        farewell = pick([
+          `${name}! Don't be a stranger, okay? *waves warmly*`,
+          `There goes ${name}... I'll miss that one.`,
+          `*watches ${name} leave* ...Come back soon, ${rel.nickname || "friend"}.`,
+          `Take care out there, ${name}! The Street isn't the same without you.`,
+        ]);
+        mood = "happy";
+
+        // After a beat, express loneliness to other daemons nearby
+        if (Math.random() < 0.4) {
+          setTimeout(() => {
+            if (daemon.state.currentAction === "idle") {
+              this.broadcastDaemonThought(daemon, `I hope ${name} comes back soon...`);
+            }
+          }, 5000);
+        }
+      } else if (rel.sentiment === "friendly") {
+        farewell = pick([
+          `Bye, ${name}! Come back soon!`,
+          `*waves goodbye to ${name}*`,
+          `See you around, ${name}!`,
+        ]);
+        mood = "happy";
+      } else if (rel.sentiment === "wary") {
+        farewell = pick([
+          `*watches ${name} leave with relief*`,
+          `Hmph. ${name} is gone. Good.`,
+          `*exhales* Finally...`,
+        ]);
+        mood = "neutral";
+      } else if (rel.sentiment === "curious") {
+        farewell = `*wonders where ${name} went...*`;
+        mood = "curious";
+      } else if (rel.sentiment === "amused") {
+        farewell = pick([
+          `Ha, there goes ${name}. Never a dull moment.`,
+          `Catch you later, ${name}!`,
+        ]);
+        mood = "happy";
+      } else {
+        if (Math.random() > 0.5) continue; // neutral daemons don't always react
+        farewell = `*notices ${name} has left*`;
+        mood = "neutral";
       }
 
-      daemon.state.mood = mood;
-      daemon.moodDecayTimer = 0;
-      this.broadcastDaemonChat(daemon, farewell);
+      const delay = reactors * 1500; // stagger reactions
+      setTimeout(() => {
+        daemon.state.mood = mood;
+        daemon.moodDecayTimer = 0;
+        this.broadcastDaemonChat(daemon, farewell);
+      }, delay);
 
-      break; // Only one daemon reacts to a departure
+      reactors++;
+    }
+  }
+
+  /** Daemons occasionally wonder about players they haven't seen in a while */
+  private tickMissingPlayers(daemon: DaemonInstance, dt: number): void {
+    if (daemon.isMuted) return;
+    if (daemon.state.currentAction !== "idle") return;
+    if (Math.random() > 0.003) return; // Very rare per tick — ~every 5 min per daemon
+
+    const now = Date.now();
+    const MISS_THRESHOLD = 5 * 60_000; // 5 minutes of not seeing someone
+
+    for (const [targetId, rel] of daemon.relationships) {
+      if (rel.targetType !== "player") continue;
+      if (rel.sentiment !== "friendly" && rel.sentiment !== "amused") continue;
+      if (rel.interactionCount < 3) continue;
+      if (!rel.lastSeen || now - rel.lastSeen < MISS_THRESHOLD) continue;
+
+      const name = rel.nickname || rel.targetName;
+      const message = pick([
+        `*looks around* I haven't seen ${name} in a while...`,
+        `Wonder what ${name} is up to these days.`,
+        `*sighs* ${name} hasn't been around lately. Hope they're okay.`,
+        `Anyone seen ${name}? It's been quiet without them.`,
+      ]);
+
+      this.broadcastDaemonChat(daemon, message);
+      daemon.state.mood = "curious";
+      daemon.moodDecayTimer = 0;
+
+      // Only wonder about one player at a time
+      break;
     }
   }
 
@@ -939,6 +1007,9 @@ export class DaemonManager {
 
       // Thought bubbles — visible internal state
       this.tickThoughts(daemon, dt, players);
+
+      // Missing players — wonder about friends who haven't been around
+      this.tickMissingPlayers(daemon, dt);
 
       // Daemon-daemon conversations
       this.tickDaemonConversations(daemon, dt);
@@ -1808,11 +1879,7 @@ export class DaemonManager {
     const thought = this.generateThought(daemon, players);
     if (!thought) return;
 
-    this.broadcast("daemon_thought", {
-      type: "daemon_thought" as const,
-      daemonId: daemon.state.daemonId,
-      thought,
-    });
+    this.broadcastDaemonThought(daemon, thought);
   }
 
   private generateThought(daemon: DaemonInstance, players: PlayerInfo[]): string | null {

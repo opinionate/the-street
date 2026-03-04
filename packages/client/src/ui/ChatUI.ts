@@ -1,4 +1,4 @@
-export type ChatMessageType = "player" | "daemon-chat" | "daemon-emote" | "daemon-thought";
+export type ChatMessageType = "player" | "player-emote" | "daemon-chat" | "daemon-emote" | "daemon-thought";
 
 interface ChatMessage {
   senderId: string;
@@ -13,19 +13,45 @@ const MAX_MESSAGES = 50;
 
 const TYPE_STYLES: Record<ChatMessageType, { nameColor: string; textColor: string; fontStyle: string }> = {
   "player":        { nameColor: "#ffffff", textColor: "#ffffff",  fontStyle: "normal" },
+  "player-emote":  { nameColor: "#dddddd", textColor: "#cccccc",  fontStyle: "italic" },
   "daemon-chat":   { nameColor: "#66ff99", textColor: "#ccffcc",  fontStyle: "normal" },
   "daemon-emote":  { nameColor: "#999999", textColor: "#aaaaaa",  fontStyle: "italic" },
   "daemon-thought":{ nameColor: "#6699ff", textColor: "#99bbff",  fontStyle: "italic" },
+};
+
+/** Slash-emote definitions: /command → verb for "[Name] verbs." */
+const EMOTE_VERBS: Record<string, string> = {
+  wave: "waves",
+  dance: "dances",
+  bow: "bows",
+  cheer: "cheers",
+  laugh: "laughs",
+  cry: "cries",
+  shrug: "shrugs",
+  nod: "nods",
+  clap: "claps",
+  sit: "sits down",
+  stretch: "stretches",
+  yawn: "yawns",
+  salute: "salutes",
+  flex: "flexes",
+  think: "thinks",
+  facepalm: "facepalms",
+  point: "points",
 };
 
 export class ChatUI {
   private container: HTMLDivElement;
   private input: HTMLInputElement;
   private messageList: HTMLDivElement;
+  private resizeHandle: HTMLDivElement;
   private messages: ChatMessage[] = [];
   private inputFocused = false;
+  private userScrolledUp = false;
 
   onSendMessage: ((content: string) => void) | null = null;
+  /** Called when the user types a /emote command. Receives the emote text (e.g. "waves.") */
+  onEmote: ((emoteText: string) => void) | null = null;
 
   constructor() {
     // Container — always visible
@@ -42,10 +68,12 @@ export class ChatUI {
       flex-direction: column;
     `;
 
-    // Message list — always visible, scrollable
+    // Message list — always visible, scrollable, resizable
     this.messageList = document.createElement("div");
     this.messageList.style.cssText = `
-      max-height: 220px;
+      height: 220px;
+      min-height: 80px;
+      max-height: 600px;
       overflow-y: auto;
       margin-bottom: 6px;
       background: rgba(0, 0, 0, 0.4);
@@ -54,8 +82,62 @@ export class ChatUI {
       pointer-events: auto;
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.2) transparent;
+      position: relative;
     `;
+    // Track whether the user has scrolled away from the bottom
+    this.messageList.addEventListener("scroll", () => {
+      const el = this.messageList;
+      // Consider "at bottom" if within 30px of the end
+      this.userScrolledUp = el.scrollTop + el.clientHeight < el.scrollHeight - 30;
+    });
     this.container.appendChild(this.messageList);
+
+    // Resize handle — top edge of the message list
+    this.resizeHandle = document.createElement("div");
+    this.resizeHandle.style.cssText = `
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 6px;
+      cursor: ns-resize;
+      pointer-events: auto;
+      opacity: 0;
+      background: rgba(255, 255, 255, 0.3);
+      border-radius: 6px 6px 0 0;
+      transition: opacity 0.2s;
+      z-index: 1;
+    `;
+    // Make the container position:relative so the handle sits inside it
+    this.messageList.style.position = "relative";
+    this.messageList.appendChild(this.resizeHandle);
+
+    // Show resize handle on hover over message list
+    this.messageList.addEventListener("mouseenter", () => {
+      this.resizeHandle.style.opacity = "1";
+    });
+    this.messageList.addEventListener("mouseleave", () => {
+      this.resizeHandle.style.opacity = "0";
+    });
+
+    // Drag to resize
+    this.resizeHandle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startHeight = this.messageList.offsetHeight;
+
+      const onMove = (ev: MouseEvent) => {
+        // Dragging up = increase height (startY - ev.clientY is positive when going up)
+        const newHeight = Math.max(80, Math.min(600, startHeight + (startY - ev.clientY)));
+        this.messageList.style.height = newHeight + "px";
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
 
     // Input — always visible
     this.input = document.createElement("input");
@@ -78,7 +160,15 @@ export class ChatUI {
     this.input.addEventListener("keydown", (e) => {
       e.stopPropagation();
       if (e.key === "Enter" && this.input.value.trim()) {
-        this.onSendMessage?.(this.input.value.trim());
+        const text = this.input.value.trim();
+        // Check for /emote commands
+        const emoteMatch = text.match(/^\/(\w+)$/);
+        if (emoteMatch && EMOTE_VERBS[emoteMatch[1].toLowerCase()]) {
+          const verb = EMOTE_VERBS[emoteMatch[1].toLowerCase()];
+          this.onEmote?.(verb);
+        } else {
+          this.onSendMessage?.(text);
+        }
         this.input.value = "";
         this.input.blur();
         this.inputFocused = false;
@@ -141,7 +231,7 @@ export class ChatUI {
       word-wrap: break-word;
     `;
 
-    const prefix = type === "daemon-emote"
+    const prefix = type === "daemon-emote" || type === "player-emote"
       ? `* ${this.escapeHtml(senderName)} `
       : type === "daemon-thought"
       ? `${this.escapeHtml(senderName)} thinks: `
@@ -166,8 +256,10 @@ export class ChatUI {
       old.element.remove();
     }
 
-    // Auto-scroll to bottom
-    this.messageList.scrollTop = this.messageList.scrollHeight;
+    // Only auto-scroll if the user hasn't scrolled up to read history
+    if (!this.userScrolledUp) {
+      this.messageList.scrollTop = this.messageList.scrollHeight;
+    }
   }
 
   private escapeHtml(text: string): string {

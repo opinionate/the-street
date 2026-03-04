@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import type { PlayerState, Vector3 as Vec3, AvatarDefinition } from "@the-street/shared";
+import type { PlayerState, Vector3 as Vec3, AvatarDefinition, AvatarAppearance } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
 
 const ACCENT_COLORS = [0x00ffff, 0xff00ff, 0x39ff14, 0xff6600, 0xaa44ff, 0xffff00];
@@ -27,14 +27,39 @@ interface LimbRefs {
   leftKneePivot: THREE.Group;
   rightHipPivot: THREE.Group;
   rightKneePivot: THREE.Group;
+  // Feet
+  leftBoot: THREE.Mesh;
+  rightBoot: THREE.Mesh;
   // Coat tails
   coatTailLeft: THREE.Mesh;
   coatTailRight: THREE.Mesh;
 }
 
+interface MaterialRefs {
+  coat: THREE.MeshPhysicalMaterial;
+  skin: THREE.MeshPhysicalMaterial;
+  hair: THREE.MeshStandardMaterial;
+  glasses: THREE.MeshStandardMaterial;
+  glassesGlow: THREE.PointLight;
+  pants: THREE.MeshStandardMaterial;
+  boots: THREE.MeshStandardMaterial;
+}
+
+interface CustomModelData {
+  model: THREE.Group;
+  mixer: THREE.AnimationMixer;
+  actions: {
+    walk?: THREE.AnimationAction;
+    run?: THREE.AnimationAction;
+  };
+  currentAction: "idle" | "walk" | "run";
+  baseY: number; // model's resting y position (after centering)
+}
+
 interface AvatarInstance {
   group: THREE.Group;
   limbs: LimbRefs;
+  materials: MaterialRefs;
   targetPosition: THREE.Vector3;
   prevPosition: THREE.Vector3;
   targetRotation: number;
@@ -42,20 +67,51 @@ interface AvatarInstance {
   animPhase: number;
   breathPhase: number;
   speed: number; // smoothed speed for animation blending
+  prevSpeed: number; // previous frame speed for accel/decel lean
+  landingSquash: number; // 0-1, decays after landing
+  stoppingPhaseTarget: number | null; // stride completion target
   chatBubbles: ChatBubble[];
+  customModel: CustomModelData | null;
 }
 
 export class AvatarManager {
   private avatars: Map<string, AvatarInstance> = new Map();
   private scene: THREE.Scene;
   private gltfLoader = new GLTFLoader();
+  private cachedAnimClips: { walk?: THREE.AnimationClip; run?: THREE.AnimationClip } = {};
+  private animClipsLoading: Promise<void> | null = null;
   localPlayerId: string | null = null;
+  apiUrl: string = "";
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
   }
 
-  /** Load a custom GLB avatar model, replacing the procedural mesh */
+  /** Ensure shared walk/run animation clips are loaded (from server cache). */
+  private ensureAnimClips(): Promise<void> {
+    if (this.cachedAnimClips.walk) return Promise.resolve();
+    if (this.animClipsLoading) return this.animClipsLoading;
+
+    this.animClipsLoading = (async () => {
+      for (const type of ["walk", "run"] as const) {
+        try {
+          const url = `${this.apiUrl}/api/avatar/animations/${type}`;
+          const gltf = await new Promise<any>((resolve, reject) => {
+            this.gltfLoader.load(url, resolve, undefined, reject);
+          });
+          if (gltf.animations.length > 0) {
+            this.cachedAnimClips[type] = gltf.animations[0];
+          }
+        } catch {
+          // Not cached on server yet — will be available after first rig
+        }
+      }
+    })();
+
+    return this.animClipsLoading;
+  }
+
+  /** Load a custom GLB avatar model (static, no animations), replacing the procedural mesh */
   async loadCustomAvatar(userId: string, glbUrl: string): Promise<void> {
     const avatar = this.avatars.get(userId);
     if (!avatar) return;
@@ -78,60 +134,155 @@ export class AvatarManager {
       // Center the model
       const centeredBox = new THREE.Box3().setFromObject(model);
       model.position.y = -centeredBox.min.y;
+      model.rotation.y = Math.PI;
 
-      // Remove old procedural avatar body
-      const oldBody = avatar.limbs.body;
-      if (oldBody.parent) {
-        // Preserve non-body children (name label, chat bubbles)
-        const preserveChildren: THREE.Object3D[] = [];
-        avatar.group.children.forEach((child) => {
-          if (child !== oldBody && !(child instanceof THREE.Mesh)) {
-            preserveChildren.push(child);
-          }
-        });
-
-        // Clear the group
-        while (avatar.group.children.length > 0) {
-          avatar.group.remove(avatar.group.children[0]);
-        }
-
-        // Add the GLB model
-        avatar.group.add(model);
-
-        // Re-add preserved children (name labels, sprites)
-        for (const child of preserveChildren) {
-          avatar.group.add(child);
-        }
-      }
-
-      // Mark as custom so animation doesn't try to move procedural limbs
+      this.swapToCustomModel(avatar, model);
+      // Store as customModel so getPreviewModel can find it + idle breathing works
+      const mixer = new THREE.AnimationMixer(model);
+      avatar.customModel = { model, mixer, actions: {}, currentAction: "idle", baseY: model.position.y };
       (avatar as any).isCustomModel = true;
     } catch (err) {
       console.error(`Failed to load custom avatar for ${userId}:`, err);
-      // Keep procedural fallback — no action needed
+    }
+  }
+
+  /** Load a rigged GLB avatar with shared walk/run animations */
+  async loadRiggedAvatar(userId: string, riggedGlbUrl: string): Promise<void> {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+
+    try {
+      // Load rigged model + shared animations in parallel
+      const [gltf] = await Promise.all([
+        new Promise<any>((resolve, reject) => {
+          this.gltfLoader.load(riggedGlbUrl, resolve, undefined, reject);
+        }),
+        this.ensureAnimClips(),
+      ]);
+
+      const model = gltf.scene as THREE.Group;
+
+      // Scale to avatar height (~1.8m)
+      const box = new THREE.Box3().setFromObject(model);
+      const height = box.max.y - box.min.y;
+      if (height > 0) {
+        const scale = 1.8 / height;
+        model.scale.setScalar(scale);
+      }
+
+      // Center and rotate
+      const centeredBox = new THREE.Box3().setFromObject(model);
+      model.position.y = -centeredBox.min.y;
+      model.rotation.y = Math.PI;
+
+      // Create animation mixer with shared clips
+      const mixer = new THREE.AnimationMixer(model);
+      const actions: CustomModelData["actions"] = {};
+
+      if (this.cachedAnimClips.walk) {
+        actions.walk = mixer.clipAction(this.cachedAnimClips.walk);
+        actions.walk.setLoop(THREE.LoopRepeat, Infinity);
+      }
+      if (this.cachedAnimClips.run) {
+        actions.run = mixer.clipAction(this.cachedAnimClips.run);
+        actions.run.setLoop(THREE.LoopRepeat, Infinity);
+      }
+
+      // Swap procedural body with rigged model
+      this.swapToCustomModel(avatar, model);
+
+      avatar.customModel = { model, mixer, actions, currentAction: "idle", baseY: model.position.y };
+      (avatar as any).isCustomModel = true;
+    } catch (err) {
+      console.error(`Failed to load rigged avatar for ${userId}:`, err);
+    }
+  }
+
+  /** Replace the current model (procedural or custom) with a new model, preserving sprites. */
+  private swapToCustomModel(avatar: AvatarInstance, model: THREE.Group): void {
+    // Identify which object is the current "body" — either procedural limbs or a previous custom model
+    const currentBody = avatar.customModel?.model ?? avatar.limbs.body;
+
+    // Preserve non-body children (name labels, chat bubbles, etc.)
+    const preserveChildren: THREE.Object3D[] = [];
+    for (const child of avatar.group.children) {
+      if (child !== currentBody) {
+        preserveChildren.push(child);
+      }
+    }
+
+    // Clear the group
+    while (avatar.group.children.length > 0) {
+      avatar.group.remove(avatar.group.children[0]);
+    }
+
+    // Add new model + preserved children
+    avatar.group.add(model);
+    for (const child of preserveChildren) {
+      avatar.group.add(child);
+    }
+  }
+
+  /** Apply an AvatarAppearance to a player's procedural avatar materials */
+  applyAppearance(userId: string, appearance: AvatarAppearance): void {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+    if ((avatar as any).isCustomModel) return; // skip for GLB models
+
+    const { materials } = avatar;
+
+    if (appearance.skinTone) {
+      materials.skin.color.set(appearance.skinTone);
+    }
+    if (appearance.hairColor) {
+      materials.hair.color.set(appearance.hairColor);
+    }
+    if (appearance.accentColor) {
+      const accent = new THREE.Color(appearance.accentColor);
+      materials.glasses.emissive.copy(accent);
+      materials.glassesGlow.color.copy(accent);
+    }
+    if (appearance.outfitColors && appearance.outfitColors.length > 0) {
+      materials.coat.color.set(appearance.outfitColors[0]);
+      if (appearance.outfitColors.length > 1) {
+        materials.pants.color.set(appearance.outfitColors[1]);
+      }
+      if (appearance.outfitColors.length > 2) {
+        materials.boots.color.set(appearance.outfitColors[2]);
+      }
     }
   }
 
   /** Update a player's avatar (called when server broadcasts avatar change) */
   updatePlayerAvatar(userId: string, avatarDefinition: AvatarDefinition, apiUrl: string): void {
-    if (avatarDefinition.customMeshHash) {
-      // Has a custom mesh — try to load it
-      // The mesh would be served via the avatar mesh endpoint
-      if (avatarDefinition.meshyTaskId) {
-        this.loadCustomAvatar(userId, `${apiUrl}/api/avatar/mesh/${avatarDefinition.meshyTaskId}/model`);
-      }
+    // Apply appearance colors to procedural avatar
+    if (avatarDefinition.customAppearance) {
+      this.applyAppearance(userId, avatarDefinition.customAppearance);
+    }
+    // Load custom GLB mesh with rigging + shared animations
+    if (avatarDefinition.meshyTaskId) {
+      this.loadRiggedAvatar(userId, `${apiUrl}/api/avatar/mesh/${avatarDefinition.meshyTaskId}/model`);
     }
   }
 
-  /** Notify avatar manager that the local player is moving (call from game loop) */
-  setLocalMoving(isMoving: boolean, isSprinting: boolean): void {
+  /** Notify avatar manager of the local player's current movement speed */
+  setLocalMoving(speed: number): void {
     if (!this.localPlayerId) return;
     const avatar = this.avatars.get(this.localPlayerId);
     if (!avatar) return;
-    avatar.speed = isMoving ? (isSprinting ? 10 : 5) : 0;
+    // Extra smoothing on the avatar side
+    avatar.speed += (speed - avatar.speed) * 0.15;
   }
 
-  private createAvatar(colorIndex: number): { group: THREE.Group; limbs: LimbRefs } {
+  /** Trigger landing squash animation on the local player */
+  triggerLanding(): void {
+    if (!this.localPlayerId) return;
+    const avatar = this.avatars.get(this.localPlayerId);
+    if (!avatar) return;
+    avatar.landingSquash = 1;
+  }
+
+  private createAvatar(colorIndex: number): { group: THREE.Group; limbs: LimbRefs; materials: MaterialRefs } {
     const group = new THREE.Group();
     const accent = ACCENT_COLORS[colorIndex % ACCENT_COLORS.length];
 
@@ -436,8 +587,19 @@ export class AvatarManager {
         leftKneePivot,
         rightHipPivot,
         rightKneePivot,
+        leftBoot: lBoot,
+        rightBoot: rBoot,
         coatTailLeft,
         coatTailRight,
+      },
+      materials: {
+        coat: coatMat,
+        skin: skinMat,
+        hair: hairMat,
+        glasses: glassMat,
+        glassesGlow: glowLight,
+        pants: pantsMat,
+        boots: bootMat,
       },
     };
   }
@@ -473,21 +635,25 @@ export class AvatarManager {
   addPlayer(state: PlayerState): void {
     if (this.avatars.has(state.userId)) return;
 
-    const { group, limbs } = this.createAvatar(state.avatarDefinition.avatarIndex);
+    const { group, limbs, materials } = this.createAvatar(state.avatarDefinition.avatarIndex);
     group.name = `avatar_${state.userId}`;
     group.position.set(state.position.x, state.position.y, state.position.z);
     group.rotation.y = state.rotation;
 
-    // Name label above head
-    const nameSprite = this.createNameLabel(state.displayName);
-    nameSprite.position.set(0, 1.95, 0);
-    group.add(nameSprite);
+    // Name label above head (skip for local player)
+    if (state.userId !== this.localPlayerId) {
+      const nameSprite = this.createNameLabel(state.displayName);
+      nameSprite.position.set(0, 1.95, 0);
+      nameSprite.name = "nameLabel";
+      group.add(nameSprite);
+    }
 
     this.scene.add(group);
 
     this.avatars.set(state.userId, {
       group,
       limbs,
+      materials,
       targetPosition: new THREE.Vector3(state.position.x, state.position.y, state.position.z),
       prevPosition: new THREE.Vector3(state.position.x, state.position.y, state.position.z),
       targetRotation: state.rotation,
@@ -495,8 +661,17 @@ export class AvatarManager {
       animPhase: 0,
       breathPhase: Math.random() * Math.PI * 2,
       speed: 0,
+      prevSpeed: 0,
+      landingSquash: 0,
+      stoppingPhaseTarget: null,
       chatBubbles: [],
+      customModel: null,
     });
+
+    // Apply custom appearance if present
+    if (state.avatarDefinition.customAppearance) {
+      this.applyAppearance(state.userId, state.avatarDefinition.customAppearance);
+    }
   }
 
   removePlayer(userId: string): void {
@@ -552,6 +727,33 @@ export class AvatarManager {
     if (!avatar) return null;
     // Find the name label sprite and extract text (stored in group name)
     return avatar.group.name.replace("avatar_", "") || null;
+  }
+
+  /** Remove the name label from the local player (called after localPlayerId is set) */
+  hideLocalNameLabel(): void {
+    if (!this.localPlayerId) return;
+    const avatar = this.avatars.get(this.localPlayerId);
+    if (!avatar) return;
+    const label = avatar.group.getObjectByName("nameLabel");
+    if (label) {
+      avatar.group.remove(label);
+      if (label instanceof THREE.Sprite) {
+        label.material.map?.dispose();
+        label.material.dispose();
+      }
+    }
+  }
+
+  /** Get a clone of a player's current 3D model for preview rendering */
+  getPreviewModel(userId: string): THREE.Group | null {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return null;
+
+    if (avatar.customModel) {
+      return avatar.customModel.model.clone();
+    }
+    // Clone the procedural limbs body
+    return avatar.limbs.body.clone();
   }
 
   /** Show a chat bubble floating above a player's head */
@@ -675,92 +877,209 @@ export class AvatarManager {
       }
       // Local player: speed is set externally via setLocalMoving()
 
+      // --- Custom rigged model animation ---
+      if (avatar.customModel) {
+        const cm = avatar.customModel;
+        const spd = avatar.speed;
+        const CROSS_FADE_DURATION = 0.3;
+
+        let targetAction: "idle" | "walk" | "run";
+        if (spd > 5) {
+          targetAction = "run";
+        } else if (spd > 0.3) {
+          targetAction = "walk";
+        } else {
+          targetAction = "idle";
+        }
+
+        if (targetAction !== cm.currentAction) {
+          const prevActionClip = cm.currentAction === "walk" ? cm.actions.walk
+            : cm.currentAction === "run" ? cm.actions.run
+            : undefined;
+          const nextActionClip = targetAction === "walk" ? cm.actions.walk
+            : targetAction === "run" ? cm.actions.run
+            : undefined;
+
+          if (prevActionClip && nextActionClip) {
+            prevActionClip.crossFadeTo(nextActionClip, CROSS_FADE_DURATION, true);
+            nextActionClip.play();
+          } else if (nextActionClip) {
+            nextActionClip.reset().fadeIn(CROSS_FADE_DURATION).play();
+          } else if (prevActionClip) {
+            prevActionClip.fadeOut(CROSS_FADE_DURATION);
+          }
+
+          cm.currentAction = targetAction;
+        }
+
+        // Idle: subtle procedural breathing sway
+        if (targetAction === "idle") {
+          avatar.breathPhase += dt * 1.5;
+          const breath = Math.sin(avatar.breathPhase);
+          cm.model.position.y = cm.baseY + breath * 0.003;
+          cm.model.rotation.z = Math.sin(avatar.breathPhase * 0.4) * 0.005;
+        } else {
+          cm.model.position.y = cm.baseY;
+          cm.model.rotation.z = 0;
+        }
+
+        cm.mixer.update(dt);
+
+        // Chat bubble cleanup still runs (below), but skip procedural limb animation
+        // --- Chat bubbles: fade and cleanup ---
+        const now = Date.now();
+        for (let i = avatar.chatBubbles.length - 1; i >= 0; i--) {
+          const bubble = avatar.chatBubbles[i];
+          const age = now - bubble.createdAt;
+          if (age >= bubble.duration) {
+            bubble.sprite.parent?.remove(bubble.sprite);
+            bubble.sprite.material.map?.dispose();
+            bubble.sprite.material.dispose();
+            avatar.chatBubbles.splice(i, 1);
+          } else {
+            const fadeStart = bubble.duration * 0.8;
+            if (age > fadeStart) {
+              const fadeProgress = (age - fadeStart) / (bubble.duration - fadeStart);
+              bubble.sprite.material.opacity = 1 - fadeProgress;
+            }
+          }
+        }
+
+        continue;
+      }
+
       // --- Animation ---
       const spd = avatar.speed;
       const isMoving = spd > 0.3;
+      const moveAmt = Math.min(spd / 2, 1); // smooth 0→1 amplitude (no binary gate)
       const runBlend = Math.min(Math.max((spd - 3) / 7, 0), 1); // 0=walk, 1=run
 
+      // Stride completion on stop
+      if (!isMoving && avatar.prevSpeed >= 0.3 && avatar.stoppingPhaseTarget === null) {
+        avatar.stoppingPhaseTarget = Math.round(avatar.animPhase / Math.PI) * Math.PI;
+      }
+
       // Phase advances with speed
-      if (isMoving) {
-        const phaseSpeed = 5 + runBlend * 6; // faster phase at run speed
+      if (avatar.stoppingPhaseTarget !== null) {
+        avatar.animPhase += (avatar.stoppingPhaseTarget - avatar.animPhase) * Math.min(dt * 8, 1);
+        if (Math.abs(avatar.animPhase - avatar.stoppingPhaseTarget) < 0.05) {
+          avatar.animPhase = 0;
+          avatar.stoppingPhaseTarget = null;
+        }
+      } else if (isMoving) {
+        const phaseSpeed = 5 + runBlend * 6;
         avatar.animPhase += dt * phaseSpeed;
       } else {
-        // Smoothly return limbs to rest
         avatar.animPhase *= 1 - Math.min(dt * 6, 1);
       }
+
+      // Accel/decel body lean delta
+      const speedDelta = spd - avatar.prevSpeed;
+      const leanDelta = Math.max(-0.06, Math.min(speedDelta * 0.15, 0.08));
+      avatar.prevSpeed = spd;
 
       const p = avatar.animPhase;
       const sinP = Math.sin(p);
       const cosP = Math.cos(p);
 
-      // -- Legs: hip swing + knee bend --
-      const hipSwing = (0.3 + runBlend * 0.4) * (isMoving ? 1 : 0);
+      // -- Legs: hip swing + asymmetric knee bend --
+      const hipSwing = (0.3 + runBlend * 0.4) * moveAmt;
       const kneeMax = 0.4 + runBlend * 0.6;
 
       // Left leg
-      const leftHipAngle = sinP * hipSwing;
-      limbs.leftHipPivot.rotation.x = leftHipAngle;
-      // Knee bends backward on the back-swing (when hip angle is positive = leg behind)
-      const leftKneeBend = Math.max(0, sinP) * kneeMax * (isMoving ? 1 : 0);
-      limbs.leftKneePivot.rotation.x = leftKneeBend;
+      limbs.leftHipPivot.rotation.x = sinP * hipSwing;
+      const leftSwing = Math.max(0, sinP);
+      const leftStance = Math.max(0, -sinP);
+      limbs.leftKneePivot.rotation.x = (leftSwing * kneeMax * 1.2 + leftStance * kneeMax * 0.15) * moveAmt;
 
       // Right leg (opposite phase)
-      const rightHipAngle = -sinP * hipSwing;
-      limbs.rightHipPivot.rotation.x = rightHipAngle;
-      const rightKneeBend = Math.max(0, -sinP) * kneeMax * (isMoving ? 1 : 0);
-      limbs.rightKneePivot.rotation.x = rightKneeBend;
+      limbs.rightHipPivot.rotation.x = -sinP * hipSwing;
+      const rightSwing = Math.max(0, -sinP);
+      const rightStance = Math.max(0, sinP);
+      limbs.rightKneePivot.rotation.x = (rightSwing * kneeMax * 1.2 + rightStance * kneeMax * 0.15) * moveAmt;
 
-      // -- Arms: shoulder swing + elbow bend --
-      const armSwing = (0.25 + runBlend * 0.45) * (isMoving ? 1 : 0);
+      // -- Boot/foot articulation: heel strike → toe-off --
+      const leftFootPhase = -sinP;
+      limbs.leftBoot.rotation.x = (leftFootPhase > 0
+        ? -0.15 * leftFootPhase + 0.25 * Math.max(0, leftFootPhase - 0.5)
+        : 0.1 * Math.abs(leftFootPhase)) * moveAmt;
+      const rightFootPhase = sinP;
+      limbs.rightBoot.rotation.x = (rightFootPhase > 0
+        ? -0.15 * rightFootPhase + 0.25 * Math.max(0, rightFootPhase - 0.5)
+        : 0.1 * Math.abs(rightFootPhase)) * moveAmt;
+
+      // -- Arms: shoulder swing + elbow bend + cross-body --
+      const armSwing = (0.25 + runBlend * 0.45) * moveAmt;
       const elbowBend = 0.3 + runBlend * 0.5;
 
-      // Arms oppose the legs (natural gait)
       limbs.leftShoulderPivot.rotation.x = -sinP * armSwing;
-      limbs.leftElbowPivot.rotation.x = -(0.15 + Math.max(0, -sinP) * elbowBend * (isMoving ? 1 : 0));
+      limbs.leftShoulderPivot.rotation.z = sinP * 0.04 * moveAmt; // cross-body
+      limbs.leftElbowPivot.rotation.x = -(0.15 + Math.max(0, -sinP) * elbowBend * moveAmt);
 
       limbs.rightShoulderPivot.rotation.x = sinP * armSwing;
-      limbs.rightElbowPivot.rotation.x = -(0.15 + Math.max(0, sinP) * elbowBend * (isMoving ? 1 : 0));
+      limbs.rightShoulderPivot.rotation.z = -sinP * 0.04 * moveAmt; // cross-body
+      limbs.rightElbowPivot.rotation.x = -(0.15 + Math.max(0, sinP) * elbowBend * moveAmt);
 
-      // -- Torso: lean + sway --
-      if (isMoving) {
-        limbs.body.rotation.x = -(0.03 + runBlend * 0.05); // lean forward
-        limbs.body.rotation.z = Math.sin(p) * 0.02; // subtle lateral sway
-        limbs.chest.rotation.y = sinP * 0.04; // shoulder twist
-      } else {
-        limbs.body.rotation.x *= 0.9;
-        limbs.body.rotation.z *= 0.9;
-        limbs.chest.rotation.y *= 0.9;
-      }
+      // -- Pelvis yaw: hip rotates with leading leg --
+      const pelvisYaw = sinP * (0.04 + runBlend * 0.04) * moveAmt;
+      limbs.body.rotation.y = pelvisYaw;
+
+      // -- Pelvis tilt (roll): tilt toward stance leg --
+      const pelvisTilt = cosP * (0.025 + runBlend * 0.015) * moveAmt;
+      limbs.body.rotation.z = pelvisTilt;
+
+      // -- Lateral weight shift: body shifts toward stance foot --
+      limbs.body.position.x = cosP * (0.015 + runBlend * 0.01) * moveAmt;
+      limbs.body.position.y = 0; // reset before additive offsets (squash, breathing)
+
+      // -- Shoulder counter-rotation: chest opposes pelvis --
+      limbs.chest.rotation.y = -sinP * (0.12 + runBlend * 0.08) * moveAmt;
+
+      // -- Forward lean: smooth interpolation, speed-proportional --
+      const targetLeanX = -(0.03 + runBlend * 0.05) * moveAmt - leanDelta;
+      limbs.body.rotation.x += (targetLeanX - limbs.body.rotation.x) * Math.min(dt * 8, 1);
 
       // -- Coat tails flap with movement --
-      if (isMoving) {
-        const flapAmt = 0.05 + runBlend * 0.15;
-        limbs.coatTailLeft.rotation.x = 0.1 + Math.sin(p * 1.5) * flapAmt;
-        limbs.coatTailRight.rotation.x = 0.1 + Math.sin(p * 1.5 + 0.5) * flapAmt;
-      } else {
-        limbs.coatTailLeft.rotation.x *= 0.92;
-        limbs.coatTailRight.rotation.x *= 0.92;
+      const flapTarget = moveAmt > 0.01
+        ? 0.1 + Math.sin(p * 1.5) * (0.05 + runBlend * 0.15) * moveAmt
+        : 0;
+      limbs.coatTailLeft.rotation.x += (flapTarget - limbs.coatTailLeft.rotation.x) * Math.min(dt * 8, 1);
+      const flapTargetR = moveAmt > 0.01
+        ? 0.1 + Math.sin(p * 1.5 + 0.5) * (0.05 + runBlend * 0.15) * moveAmt
+        : 0;
+      limbs.coatTailRight.rotation.x += (flapTargetR - limbs.coatTailRight.rotation.x) * Math.min(dt * 8, 1);
+
+      // -- Vertical bob: correct phase (highest at midstance) --
+      if (isMoving && userId !== this.localPlayerId) {
+        const bobAmt = 0.025 + runBlend * 0.035;
+        avatar.group.position.y += (-Math.cos(p * 2) * 0.5 + 0.5) * bobAmt;
       }
 
-      // -- Vertical bob (foot-strike, double frequency of step cycle) --
-      if (isMoving && userId !== this.localPlayerId) {
-        avatar.group.position.y = Math.abs(Math.sin(p * 2)) * (0.02 + runBlend * 0.03);
+      // -- Landing squash --
+      if (avatar.landingSquash > 0) {
+        const sq = avatar.landingSquash;
+        limbs.leftKneePivot.rotation.x += 0.4 * sq;
+        limbs.rightKneePivot.rotation.x += 0.4 * sq;
+        limbs.body.position.y -= 0.06 * sq;
+        avatar.landingSquash *= 1 - Math.min(dt * 10, 1);
+        if (avatar.landingSquash < 0.01) avatar.landingSquash = 0;
       }
 
       // -- Idle breathing --
       avatar.breathPhase += dt * 1.5;
       const breath = Math.sin(avatar.breathPhase);
-      limbs.body.position.y = breath * 0.005;
-      limbs.chest.scale.z = 0.12 + breath * 0.003; // chest expand/contract
+      limbs.body.position.y += breath * 0.005; // additive (after lateral shift + squash)
+      limbs.chest.scale.z = 0.12 + breath * 0.003;
 
-      // Head micro-movements on idle
-      if (!isMoving) {
+      // -- Head: counter pelvis motions to stabilize gaze --
+      if (isMoving) {
+        limbs.head.rotation.y = -pelvisYaw * 0.5;
+        limbs.head.rotation.x = Math.sin(p * 2) * 0.02;
+        limbs.head.rotation.z = -pelvisTilt * 0.4;
+      } else {
+        limbs.head.rotation.y *= 0.9;
         limbs.head.rotation.x = Math.sin(avatar.breathPhase * 0.6) * 0.012;
         limbs.head.rotation.z = Math.sin(avatar.breathPhase * 0.4) * 0.008;
-      } else {
-        // Slight head bob with steps
-        limbs.head.rotation.x = Math.sin(p * 2) * 0.015;
-        limbs.head.rotation.z = 0;
       }
 
       // -- Chat bubbles: fade and cleanup --

@@ -9,6 +9,24 @@ export interface MeshyTaskStatus {
   error?: string;
 }
 
+export interface RiggingTaskStatus {
+  taskId: string;
+  status: "PENDING" | "IN_PROGRESS" | "SUCCEEDED" | "FAILED";
+  progress: number;
+  riggedGlbUrl?: string;
+  walkAnimUrl?: string;
+  runAnimUrl?: string;
+  error?: string;
+}
+
+export interface AnimationTaskStatus {
+  taskId: string;
+  status: "PENDING" | "IN_PROGRESS" | "SUCCEEDED" | "FAILED";
+  progress: number;
+  animationGlbUrl?: string;
+  error?: string;
+}
+
 interface MeshyApiResponse {
   result: string;
   model_urls?: {
@@ -45,15 +63,38 @@ async function meshyFetch(
 }
 
 /** Start a Meshy preview task (fast, ~30-60s). Returns the task ID. */
-export async function startMeshPreview(description: string): Promise<string> {
+export async function startMeshPreview(
+  description: string,
+  poseMode?: "t-pose" | "a-pose",
+): Promise<string> {
+  // Append pose instruction for rigging compatibility
+  const poseSuffix = poseMode === "a-pose"
+    ? " Standing in a relaxed A-pose with arms slightly away from the body."
+    : poseMode === "t-pose"
+      ? " Standing in a T-pose with arms straight out to the sides."
+      : "";
+
+  // Meshy enforces 800 char max; truncate at sentence boundary if needed
+  let prompt = description;
+  const maxLen = 780 - poseSuffix.length;
+  if (prompt.length > maxLen) {
+    prompt = prompt.slice(0, maxLen).replace(/\s+\S*$/, "") + ".";
+  }
+  prompt += poseSuffix;
+
+  const body: Record<string, unknown> = {
+    mode: "preview",
+    prompt,
+    ai_model: "meshy-6",
+    target_polycount: 30000,
+  };
+  if (poseMode) {
+    body.pose_mode = poseMode;
+  }
+
   const res = await meshyFetch("/openapi/v2/text-to-3d", {
     method: "POST",
-    body: JSON.stringify({
-      mode: "preview",
-      prompt: description,
-      ai_model: "meshy-6",
-      target_polycount: 30000,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -160,4 +201,114 @@ export async function generateMesh(
   }
 
   return { glbUrl, taskId: refineResult.taskId };
+}
+
+/** Start auto-rigging a completed mesh task. Returns the rig task ID. */
+export async function startRigging(inputTaskId: string): Promise<string> {
+  const res = await meshyFetch("/openapi/v1/rigging", {
+    method: "POST",
+    body: JSON.stringify({
+      input_task_id: inputTaskId,
+      height_meters: 1.8,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Meshy rigging creation failed: ${res.status} ${err}`);
+  }
+
+  const data = (await res.json()) as { result: string };
+  return data.result;
+}
+
+/** Poll a rigging task for its current status. */
+export async function pollRiggingTask(taskId: string): Promise<RiggingTaskStatus> {
+  const res = await meshyFetch(`/openapi/v1/rigging/${taskId}`);
+  if (!res.ok) {
+    throw new Error(`Meshy rigging poll failed: ${res.status} ${res.statusText}`);
+  }
+
+  const data = (await res.json()) as {
+    id: string;
+    status: RiggingTaskStatus["status"];
+    progress?: number;
+    result?: {
+      rigged_character_glb_url?: string;
+      basic_animations?: {
+        walking_glb_url?: string;
+        running_glb_url?: string;
+      };
+    };
+    task_error?: { message?: string };
+  };
+
+  const result: RiggingTaskStatus = {
+    taskId: data.id,
+    status: data.status,
+    progress: data.progress ?? 0,
+  };
+
+  if (data.status === "SUCCEEDED" && data.result) {
+    result.riggedGlbUrl = data.result.rigged_character_glb_url;
+    result.walkAnimUrl = data.result.basic_animations?.walking_glb_url;
+    result.runAnimUrl = data.result.basic_animations?.running_glb_url;
+  }
+
+  if (data.status === "FAILED") {
+    result.error = data.task_error?.message || "Rigging failed";
+  }
+
+  return result;
+}
+
+/** Start a custom animation on a rigged character. Returns the animation task ID. */
+export async function startAnimation(rigTaskId: string, actionId: number): Promise<string> {
+  const res = await meshyFetch("/openapi/v1/animations", {
+    method: "POST",
+    body: JSON.stringify({
+      rig_task_id: rigTaskId,
+      action_id: actionId,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Meshy animation creation failed: ${res.status} ${err}`);
+  }
+
+  const data = (await res.json()) as { result: string };
+  return data.result;
+}
+
+/** Poll an animation task for its current status. */
+export async function pollAnimationTask(taskId: string): Promise<AnimationTaskStatus> {
+  const res = await meshyFetch(`/openapi/v1/animations/${taskId}`);
+  if (!res.ok) {
+    throw new Error(`Meshy animation poll failed: ${res.status} ${res.statusText}`);
+  }
+
+  const data = (await res.json()) as {
+    id: string;
+    status: AnimationTaskStatus["status"];
+    progress?: number;
+    result?: { animation_glb_url?: string };
+    task_error?: { message?: string };
+  };
+
+  const result: AnimationTaskStatus = {
+    taskId: data.id,
+    status: data.status,
+    progress: data.progress ?? 0,
+  };
+
+  if (data.status === "SUCCEEDED" && data.result) {
+    result.animationGlbUrl = data.result.animation_glb_url;
+  }
+
+  if (data.status === "FAILED") {
+    result.error = data.task_error?.message || "Animation failed";
+  }
+
+  return result;
 }

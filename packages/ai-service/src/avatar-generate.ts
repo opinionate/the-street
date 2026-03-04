@@ -42,11 +42,15 @@ Return a single JSON object with this structure (no markdown fences, no extra te
 RULES:
 - All colors must be valid 6-digit hex codes (e.g. "#FF5500")
 - bodyType must be exactly one of: "default", "slim", "stocky"
-- The avatar must be humanoid-scale (approximately 1.8m tall)
-- meshDescription should describe a full humanoid character model suitable for a 3D game
-- Include clothing, accessories, and distinguishing features in the mesh description
+- The avatar should fit within approximately 1.8m tall
+- meshDescription should describe a complete 3D character model suitable for a game
+- The character MUST be humanoid and bipedal (two legs, two arms, upright posture). This is required for animation compatibility. Robots, aliens, cyborgs, etc. are fine as long as they have a humanoid body plan.
+- If the user requests a non-humanoid form (e.g. four-legged, snake, blob), adapt it to a humanoid silhouette (e.g. a centaur becomes a horse-themed knight, a cat becomes an anthropomorphic cat person)
+- For non-human characters, still fill in appearance fields with best-fit values (e.g. fur color as skinTone, body markings as accessories)
+- Include clothing, accessories, props, and distinguishing features in the mesh description
 - Keep the style consistent with a modern virtual world (not hyper-realistic, not too cartoony)
-- The mesh description should specify the character is in a T-pose or A-pose for rigging
+- The mesh description MUST specify the character is standing in a relaxed A-pose with arms slightly away from the body (about 30-45 degrees from torso, NOT a T-pose with arms straight out)
+- meshDescription MUST be under 600 characters — be concise, focus on the most distinctive visual features
 - Maximum 5 accessories
 - Maximum 5 outfit colors`;
 

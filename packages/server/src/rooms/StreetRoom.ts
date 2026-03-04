@@ -88,6 +88,8 @@ export class StreetRoom extends Room<StreetRoomState> {
   private daemonManager: DaemonManager | null = null;
   /** Full avatar definitions keyed by sessionId (schema only stores avatarIndex) */
   private avatarDefinitions = new Map<string, AvatarDefinition>();
+  /** Resolves when plots + daemons are loaded; clients wait on this before getting snapshot */
+  private dataReady: Promise<void> = Promise.resolve();
 
   override maxClients = MAX_CLIENTS;
 
@@ -147,8 +149,8 @@ export class StreetRoom extends Room<StreetRoomState> {
       60_000,
     );
 
-    // Load plot cache and daemons
-    this.loadPlots()
+    // Load plot cache and daemons — clients wait on this before receiving snapshot
+    this.dataReady = this.loadPlots()
       .then(() => {
         this.updateDaemonWorldObjects();
         return this.loadDaemons();
@@ -203,8 +205,10 @@ export class StreetRoom extends Room<StreetRoomState> {
     };
   }
 
-  override onJoin(client: Client, _options?: unknown, auth?: ClientAuth): void {
+  override async onJoin(client: Client, _options?: unknown, auth?: ClientAuth): Promise<void> {
     if (!auth) return;
+    // Wait for plots + daemons to finish loading before sending snapshot
+    await this.dataReady;
     const spawn = auth.lastPosition ?? getDefaultSpawnPoint();
     const player = new PlayerSchema();
     player.userId = auth.userId;

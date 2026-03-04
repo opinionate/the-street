@@ -89,7 +89,7 @@ router.post(
   }),
   async (req, res) => {
     try {
-      const { description } = req.body;
+      const { description, poseMode } = req.body;
 
       if (!description) {
         res.status(400).json({ error: "description is required" });
@@ -97,7 +97,7 @@ router.post(
       }
 
       const { startMeshPreview } = await import("@the-street/ai-service");
-      const taskId = await startMeshPreview(description);
+      const taskId = await startMeshPreview(description, poseMode);
       res.json({ taskId });
     } catch (err) {
       console.error("POST /api/generate/mesh error:", err);

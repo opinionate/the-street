@@ -21,6 +21,11 @@ import * as THREE from "three";
 const WALK_SPEED = 5;
 const RUN_SPEED = 12;
 const SEND_RATE = 1 / 20; // 20Hz position updates to server
+const JUMP_VELOCITY = 6;
+const GRAVITY = -15;
+const ACCEL = 12;   // ~0.1s to full walk speed
+const DECEL = 8;    // ~0.15s slide on release
+const TURN_SPEED = 14;
 
 async function init() {
   // Scene
@@ -32,6 +37,7 @@ async function init() {
   streetScene.scene.add(plotRenderer.plotGroup);
 
   const avatarManager = new AvatarManager(streetScene.scene);
+  avatarManager.apiUrl = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`;
   const daemonRenderer = new DaemonRenderer(streetScene.scene);
   const objectRenderer = new ObjectRenderer(streetScene.scene);
   const cameraController = new CameraController(streetScene.camera);
@@ -81,6 +87,12 @@ async function init() {
   let localRotation = 0;
   let sendTimer = 0;
   let elapsedTime = 0;
+  let verticalVelocity = 0;
+  let isGrounded = true;
+  let velocityX = 0;
+  let velocityZ = 0;
+  let wasJumping = false;
+  let landingTimer = 0;
 
   // Network
   const wsUrl =
@@ -91,6 +103,9 @@ async function init() {
       avatarManager.localPlayerId = yourUserId;
       for (const p of players) {
         avatarManager.addPlayer(p);
+      }
+      avatarManager.hideLocalNameLabel();
+      for (const p of players) {
         // Load custom avatar mesh if available
         if (p.avatarDefinition.meshyTaskId) {
           avatarManager.loadCustomAvatar(
@@ -136,10 +151,14 @@ async function init() {
       avatarManager.updatePlayerPosition(userId, position, rotation);
     },
     onChat(senderId, senderName, content, _position) {
-      chatUI.addMessage(senderId, senderName, content);
+      // Parse /me emotes from other players
+      const isEmote = content.startsWith("/me ");
+      const displayContent = isEmote ? content.slice(4) : content;
+      const msgType = isEmote ? "player-emote" as const : "player" as const;
+      chatUI.addMessage(senderId, senderName, displayContent, msgType);
       // Don't double-show bubble for own messages (already shown on send)
       if (senderId !== avatarManager.localPlayerId) {
-        avatarManager.showChatBubble(senderId, senderName, content);
+        avatarManager.showChatBubble(senderId, senderName, displayContent);
       }
     },
     onObjectPlaced(objectId, plotUUID, objectDefinition) {
@@ -248,6 +267,15 @@ async function init() {
       avatarManager.showChatBubble(myId, "You", content);
     }
   };
+  chatUI.onEmote = (verb) => {
+    const myId = avatarManager.localPlayerId || "local";
+    const emoteText = `${verb}.`;
+    // Show locally as an emote
+    chatUI.addMessage(myId, "You", emoteText, "player-emote");
+    avatarManager.showChatBubble(myId, "You", emoteText);
+    // Broadcast to other players
+    network.sendChat(`/me ${emoteText}`);
+  };
 
   // Creation panel wiring
   const apiUrl =
@@ -270,25 +298,226 @@ async function init() {
         throw new Error(err.error || "Generation failed");
       }
       const result = await res.json();
-      avatarPanel.setGenerationResult(result.appearance, result.meshyTaskId || null);
+      avatarPanel.setGenerationResult(result.appearance, result.meshDescription);
     } catch (err) {
       clearTimeout(timeout);
       throw err;
     }
   };
 
-  avatarPanel.onSave = async (avatarDefinition) => {
+  avatarPanel.onStartMesh = async (description) => {
+    const res = await fetch(`${apiUrl}/api/generate/mesh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description, poseMode: "a-pose" }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Mesh generation failed" }));
+      throw new Error(err.error || "Mesh generation failed");
+    }
+    const { taskId } = await res.json();
+    avatarPanel.setMeshyTaskId(taskId);
+    pollAvatarMesh(taskId);
+  };
+
+  /** Poll Meshy avatar mesh: preview → refine → rig → load */
+  async function pollAvatarMesh(previewTaskId: string): Promise<void> {
+    const POLL_MS = 3000;
+    const MAX_POLLS = 80; // generous for the full pipeline
+    const localId = avatarManager.localPlayerId || "local";
+
+    // ── Stage 1: Preview (0-25%) ──
+    avatarPanel.setMeshProgress(0, "Generating 3D model...");
+
+    const previewDone = await pollStage(
+      `${apiUrl}/api/avatar/mesh/${previewTaskId}`,
+      (pct) => avatarPanel.setMeshProgress(Math.round(pct * 0.25), "Generating 3D model..."),
+      MAX_POLLS,
+    );
+
+    if (!previewDone) {
+      avatarPanel.setMeshProgress(0, "3D model generation failed");
+      return;
+    }
+
+    // ── Stage 2: Refine (25-55%) ──
+    avatarPanel.setMeshProgress(25, "Adding textures...");
+
+    let refineTaskId: string;
+    try {
+      const refineRes = await fetch(`${apiUrl}/api/generate/mesh/refine`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ previewTaskId }),
+      });
+      if (!refineRes.ok) {
+        // Refine failed to start — fall back to rigging the preview
+        console.warn("Refine start failed, rigging preview model");
+        await rigOrFallback(previewTaskId, localId, 25);
+        return;
+      }
+      ({ taskId: refineTaskId } = await refineRes.json());
+    } catch {
+      await rigOrFallback(previewTaskId, localId, 25);
+      return;
+    }
+
+    // Update the panel's meshyTaskId to the refined one (for save)
+    avatarPanel.setMeshyTaskId(refineTaskId);
+
+    const refineDone = await pollStage(
+      `${apiUrl}/api/avatar/mesh/${refineTaskId}`,
+      (pct) => avatarPanel.setMeshProgress(25 + Math.round(pct * 0.30), "Adding textures..."),
+      MAX_POLLS,
+    );
+
+    if (!refineDone) {
+      // Refine failed — fall back to rigging the preview
+      console.warn("Refine failed, rigging preview model");
+      await rigOrFallback(previewTaskId, localId, 55);
+      return;
+    }
+
+    // Grab thumbnail URL from the completed refine task
+    try {
+      const thumbRes = await fetch(`${apiUrl}/api/avatar/mesh/${refineTaskId}`);
+      if (thumbRes.ok) {
+        const thumbData = await thumbRes.json();
+        if (thumbData.thumbnailUrl) {
+          avatarPanel.setThumbnailUrl(thumbData.thumbnailUrl);
+        }
+      }
+    } catch {
+      // Non-critical — thumbnail is optional
+    }
+
+    // ── Stage 3: Rig the refined model (55-95%) ──
+    await rigOrFallback(refineTaskId, localId, 55);
+  }
+
+  /** Generic stage poller. Calls progressCb(0-100) and returns true on SUCCEEDED. */
+  async function pollStage(
+    url: string,
+    progressCb: (pct: number) => void,
+    maxPolls: number,
+  ): Promise<boolean> {
+    const POLL_MS = 3000;
+    for (let i = 0; i < maxPolls; i++) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      try {
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const status = await res.json();
+        if (status.status === "SUCCEEDED") return true;
+        if (status.status === "FAILED") return false;
+        progressCb(status.progress || 0);
+      } catch {
+        // network error, keep polling
+      }
+    }
+    return false; // timed out
+  }
+
+  /** Rig a completed mesh task, or fall back to static model on failure. */
+  async function rigOrFallback(meshTaskId: string, localId: string, baseProgress: number): Promise<void> {
+    const MAX_POLLS = 60;
+
+    try {
+      avatarPanel.setMeshProgress(baseProgress, "Rigging character...");
+
+      const rigRes = await fetch(`${apiUrl}/api/avatar/rig`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meshTaskId }),
+      });
+
+      if (rigRes.ok) {
+        const { rigTaskId } = await rigRes.json();
+
+        const rigDone = await pollStage(
+          `${apiUrl}/api/avatar/rig/${rigTaskId}`,
+          (pct) => avatarPanel.setMeshProgress(
+            baseProgress + Math.round(pct * ((95 - baseProgress) / 100)),
+            "Rigging character...",
+          ),
+          MAX_POLLS,
+        );
+
+        if (rigDone) {
+          const riggedModelUrl = `${apiUrl}/api/avatar/rig/${rigTaskId}/model`;
+          await avatarManager.loadRiggedAvatar(localId, riggedModelUrl);
+          avatarPanel.setMeshComplete();
+          avatarPanel.refreshPreview();
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("Rigging error:", err);
+    }
+
+    // Fallback: load static (unrigged) model
+    console.warn("Rigging failed, loading static model");
+    await avatarManager.loadCustomAvatar(localId, `${apiUrl}/api/avatar/mesh/${meshTaskId}/model`);
+    avatarPanel.setMeshComplete();
+    avatarPanel.refreshPreview();
+  }
+
+  avatarPanel.onSave = async (avatarDefinition, meshDescription, meshyTaskId) => {
+    const thumbnailUrl = avatarPanel.getThumbnailUrl() || undefined;
     const res = await fetch(`${apiUrl}/api/avatar/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ avatarDefinition }),
+      body: JSON.stringify({ avatarDefinition, meshDescription, meshyTaskId, thumbnailUrl }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "Save failed" }));
       throw new Error(err.error || "Save failed");
     }
-    // Notify server so it broadcasts the update to all clients
+    // Don't re-load the model — it's already loaded from the generation pipeline.
+    // Re-loading via updatePlayerAvatar would replace a rigged model with static.
+    // Just broadcast so other clients pick up the change.
     network.sendAvatarUpdate(avatarDefinition);
+  };
+
+  avatarPanel.onLoadHistory = async () => {
+    const res = await fetch(`${apiUrl}/api/avatar/history`);
+    if (!res.ok) throw new Error("Failed to load history");
+    const data = await res.json();
+    return data.history;
+  };
+
+  avatarPanel.onSelectHistoryItem = async (avatarDefinition) => {
+    const def = avatarDefinition as any;
+    const localId = avatarManager.localPlayerId || "local";
+
+    // Load the saved avatar's mesh if it has one
+    if (def.meshyTaskId) {
+      const modelUrl = `${apiUrl}/api/avatar/mesh/${def.meshyTaskId}/model`;
+      await avatarManager.loadRiggedAvatar(localId, modelUrl);
+    }
+
+    // Apply appearance colors (skip re-loading the mesh — already loaded above)
+    if (def.customAppearance) {
+      avatarManager.applyAppearance(localId, def.customAppearance);
+    }
+    // Broadcast to other players
+    network.sendAvatarUpdate(avatarDefinition);
+
+    // Update the 3D preview
+    avatarPanel.refreshPreview();
+  };
+
+  avatarPanel.onDeleteHistoryItem = async (id) => {
+    const res = await fetch(`${apiUrl}/api/avatar/history/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Delete failed" }));
+      throw new Error(err.error || "Delete failed");
+    }
+  };
+
+  avatarPanel.onGetPreviewModel = () => {
+    const localId = avatarManager.localPlayerId || "local";
+    return avatarManager.getPreviewModel(localId);
   };
 
   // Daemon panel wiring
@@ -604,6 +833,7 @@ async function init() {
       rotation: 0,
       velocity: { x: 0, y: 0, z: 0 },
     });
+    avatarManager.hideLocalNameLabel();
     // Generate local plot snapshots so building works offline
     // Use valid UUID v4 format to avoid postgres type errors if connection recovers
     const placements = getAllPlotPositions();
@@ -646,35 +876,74 @@ async function init() {
     if (inputManager.isPointerLocked() && !chatUI.isVisible()) {
       const mouse = inputManager.consumeMouse();
       cameraController.applyMouseDelta(mouse.x, mouse.y);
-      localRotation = cameraController.getYaw();
 
+      // Smooth character rotation (visual facing only)
+      const targetYaw = cameraController.getYaw();
+      let yawDiff = targetYaw - localRotation;
+      while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+      while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+      localRotation += yawDiff * Math.min(dt * TURN_SPEED, 1);
+
+      // Compute target velocity from input
       const moveVec = inputManager.getMovementVector();
-      const speed = inputManager.state.sprint ? RUN_SPEED : WALK_SPEED;
+      let desiredSpeed = inputManager.state.sprint ? RUN_SPEED : WALK_SPEED;
 
+      // Landing recovery: reduce max speed briefly after landing
+      if (landingTimer > 0) {
+        desiredSpeed *= 0.6;
+        landingTimer -= dt;
+        if (landingTimer < 0) landingTimer = 0;
+      }
+
+      let targetVX = 0;
+      let targetVZ = 0;
       if (moveVec.x !== 0 || moveVec.z !== 0) {
-        // Transform movement by camera yaw (camera-relative controls)
-        const angle = localRotation;
-        const dx =
-          (moveVec.x * Math.cos(angle) + moveVec.z * Math.sin(angle)) *
-          speed *
-          dt;
-        const dz =
-          (-moveVec.x * Math.sin(angle) + moveVec.z * Math.cos(angle)) *
-          speed *
-          dt;
+        // Movement direction from camera yaw (camera-relative controls)
+        const angle = targetYaw;
+        targetVX = (moveVec.x * Math.cos(angle) + moveVec.z * Math.sin(angle)) * desiredSpeed;
+        targetVZ = (-moveVec.x * Math.sin(angle) + moveVec.z * Math.cos(angle)) * desiredSpeed;
+      }
 
-        localPosition.x += dx;
-        localPosition.z += dz;
+      // Acceleration / deceleration
+      const accelRate = !isGrounded ? ACCEL * 0.5 : ACCEL; // reduced air control
+      if (targetVX !== 0 || targetVZ !== 0) {
+        velocityX += (targetVX - velocityX) * Math.min(dt * accelRate, 1);
+        velocityZ += (targetVZ - velocityZ) * Math.min(dt * accelRate, 1);
+      } else {
+        velocityX += (0 - velocityX) * Math.min(dt * DECEL, 1);
+        velocityZ += (0 - velocityZ) * Math.min(dt * DECEL, 1);
+      }
+
+      // Apply velocity
+      localPosition.x += velocityX * dt;
+      localPosition.z += velocityZ * dt;
+
+      const currentSpeed = Math.sqrt(velocityX * velocityX + velocityZ * velocityZ);
+
+      // Edge-triggered jump
+      if (inputManager.state.jump && !wasJumping && isGrounded) {
+        verticalVelocity = JUMP_VELOCITY;
+        isGrounded = false;
+      }
+      wasJumping = inputManager.state.jump;
+
+      if (!isGrounded) {
+        verticalVelocity += GRAVITY * dt;
+        localPosition.y += verticalVelocity * dt;
+        if (localPosition.y <= 0) {
+          localPosition.y = 0;
+          verticalVelocity = 0;
+          isGrounded = true;
+          landingTimer = 0.12;
+          avatarManager.triggerLanding();
+        }
       }
 
       avatarManager.setLocalPlayerPosition(
         { x: localPosition.x, y: localPosition.y, z: localPosition.z },
         localRotation
       );
-      avatarManager.setLocalMoving(
-        inputManager.isMoving(),
-        inputManager.state.sprint
-      );
+      avatarManager.setLocalMoving(currentSpeed);
 
       // Send position to server at SEND_RATE
       sendTimer += dt;
@@ -692,7 +961,7 @@ async function init() {
     } else {
       // Consume mouse to prevent accumulation
       inputManager.consumeMouse();
-      avatarManager.setLocalMoving(false, false);
+      avatarManager.setLocalMoving(0);
     }
 
     // Update current plot based on player position

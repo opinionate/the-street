@@ -4,6 +4,7 @@ export interface InputState {
   left: boolean;
   right: boolean;
   sprint: boolean;
+  jump: boolean;
   interact: boolean;
   chat: boolean;
   menu: boolean;
@@ -30,6 +31,7 @@ export class InputManager {
       left: false,
       right: false,
       sprint: false,
+      jump: false,
       interact: false,
       chat: false,
       menu: false,
@@ -119,6 +121,7 @@ export class InputManager {
     this.state.left = this.keys.has("a");
     this.state.right = this.keys.has("d");
     this.state.sprint = this.keys.has("shift");
+    this.state.jump = this.keys.has(" ");
   }
 
   /** Get movement vector in local space (-1 to 1 on each axis) */

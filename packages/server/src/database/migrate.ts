@@ -240,6 +240,26 @@ const MIGRATIONS: { name: string; up: string }[] = [
       ALTER TABLE daemon_memories ADD COLUMN IF NOT EXISTS gossip JSONB NOT NULL DEFAULT '[]';
     `,
   },
+  {
+    name: "013_create_avatar_history",
+    up: `
+      CREATE TABLE IF NOT EXISTS avatar_history (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id),
+        avatar_definition JSONB NOT NULL,
+        mesh_description TEXT,
+        meshy_task_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_avatar_history_user ON avatar_history(user_id, created_at DESC);
+    `,
+  },
+  {
+    name: "014_avatar_history_thumbnail",
+    up: `
+      ALTER TABLE avatar_history ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
+    `,
+  },
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

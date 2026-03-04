@@ -16,6 +16,12 @@ export class DaemonPanel {
   onDelete: ((daemonId: string) => Promise<void>) | null = null;
   onRecall: ((daemonId: string) => void) | null = null;
   onToggleRoam: ((daemonId: string, enabled: boolean) => void) | null = null;
+  onFetchActivity: ((daemonId: string) => Promise<Array<{
+    type: string;
+    content: string;
+    targetName?: string;
+    timestamp: number;
+  }>>) | null = null;
 
   constructor() {
     this.container = document.createElement("div");
@@ -374,6 +380,70 @@ export class DaemonPanel {
       controls.appendChild(delBtn);
 
       card.appendChild(controls);
+
+      // Activity log section (expandable)
+      const activityContainer = document.createElement("div");
+      activityContainer.style.cssText = "margin-top: 6px;";
+
+      const activityBtn = document.createElement("button");
+      activityBtn.textContent = "Activity";
+      activityBtn.style.cssText = `
+        width: 100%;
+        padding: 3px 6px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: rgba(255, 255, 255, 0.4);
+        font-size: 10px;
+        cursor: pointer;
+        border-radius: 3px;
+      `;
+
+      const activityLog = document.createElement("div");
+      activityLog.style.cssText = `
+        display: none;
+        margin-top: 4px;
+        max-height: 120px;
+        overflow-y: auto;
+        font-size: 10px;
+        color: rgba(255, 255, 255, 0.5);
+      `;
+
+      activityBtn.addEventListener("click", async () => {
+        if (activityLog.style.display === "none") {
+          activityLog.style.display = "block";
+          activityBtn.textContent = "Activity (loading...)";
+          try {
+            const activity = await this.onFetchActivity?.(daemon.id) || [];
+            activityLog.innerHTML = "";
+            if (activity.length === 0) {
+              activityLog.textContent = "No recent activity";
+            } else {
+              for (const entry of activity.reverse()) {
+                const line = document.createElement("div");
+                line.style.cssText = "padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04);";
+                const age = this.formatAge(entry.timestamp);
+                const typeColor = entry.type === "conversation" ? "#aa44ff"
+                  : entry.type === "emote" ? "#ffaa00"
+                  : "#44ff88";
+                line.innerHTML = `<span style="color:${typeColor}">[${entry.type}]</span> ${this.escapeHtml(entry.content)}${entry.targetName ? ` <span style="color:rgba(255,255,255,0.3)">with ${this.escapeHtml(entry.targetName)}</span>` : ""} <span style="color:rgba(255,255,255,0.2)">${age}</span>`;
+                activityLog.appendChild(line);
+              }
+            }
+            activityBtn.textContent = "Activity (hide)";
+          } catch {
+            activityLog.textContent = "Failed to load activity";
+            activityBtn.textContent = "Activity";
+          }
+        } else {
+          activityLog.style.display = "none";
+          activityBtn.textContent = "Activity";
+        }
+      });
+
+      activityContainer.appendChild(activityBtn);
+      activityContainer.appendChild(activityLog);
+      card.appendChild(activityContainer);
+
       this.daemonList.appendChild(card);
     }
   }
@@ -425,6 +495,22 @@ export class DaemonPanel {
       this.generateBtn.disabled = !this.plotUuid;
       this.generateBtn.style.opacity = this.plotUuid ? "1" : "0.5";
     }
+  }
+
+  private escapeHtml(text: unknown): string {
+    const div = document.createElement("div");
+    div.textContent = String(text || "");
+    return div.innerHTML;
+  }
+
+  private formatAge(timestamp: number): string {
+    const seconds = Math.floor((Date.now() - timestamp) / 1000);
+    if (seconds < 60) return "just now";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
   }
 
   private async handleCreate(): Promise<void> {

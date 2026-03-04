@@ -97,6 +97,17 @@ function getTimeOfDay(elapsedSeconds: number): TimeOfDay {
   return "night";
 }
 
+interface ActivityLogEntry {
+  daemonId: string;
+  daemonName: string;
+  type: "chat" | "emote" | "conversation" | "greeting" | "mood_change";
+  content: string;
+  targetName?: string;
+  timestamp: number;
+}
+
+const MAX_ACTIVITY_LOG = 50;
+
 export class DaemonManager {
   private daemons = new Map<string, DaemonInstance>();
   private broadcast: BroadcastFn;
@@ -107,6 +118,7 @@ export class DaemonManager {
   private processingAi = false;
   private worldClock = 0;  // elapsed seconds for day/night cycle
   private lastTimeOfDay: TimeOfDay = "morning";
+  private activityLog: ActivityLogEntry[] = [];
 
   constructor(
     broadcast: BroadcastFn,
@@ -184,6 +196,76 @@ export class DaemonManager {
 
   getDaemonStates(): DaemonState[] {
     return Array.from(this.daemons.values()).map((d) => d.state);
+  }
+
+  /** Get recent activity for a specific daemon */
+  getDaemonActivity(daemonId: string, limit = 20): ActivityLogEntry[] {
+    return this.activityLog
+      .filter(e => e.daemonId === daemonId)
+      .slice(-limit);
+  }
+
+  /** Get all recent activity (for all daemons) */
+  getAllActivity(limit = 30): ActivityLogEntry[] {
+    return this.activityLog.slice(-limit);
+  }
+
+  private logActivity(
+    daemon: DaemonInstance,
+    type: ActivityLogEntry["type"],
+    content: string,
+    targetName?: string,
+  ): void {
+    this.activityLog.push({
+      daemonId: daemon.state.daemonId,
+      daemonName: daemon.state.definition.name,
+      type,
+      content,
+      targetName,
+      timestamp: Date.now(),
+    });
+    while (this.activityLog.length > MAX_ACTIVITY_LOG) {
+      this.activityLog.shift();
+    }
+  }
+
+  /** Broadcast daemon chat and log it */
+  private broadcastDaemonChat(
+    daemon: DaemonInstance,
+    content: string,
+    targetUserId?: string,
+    targetDaemonId?: string,
+  ): void {
+    this.broadcast("daemon_chat", {
+      type: "daemon_chat" as const,
+      daemonId: daemon.state.daemonId,
+      daemonName: daemon.state.definition.name,
+      content,
+      targetUserId,
+      targetDaemonId,
+    });
+
+    // Log activity
+    const targetName = targetDaemonId
+      ? this.daemons.get(targetDaemonId)?.state.definition.name
+      : undefined;
+    this.logActivity(
+      daemon,
+      targetDaemonId ? "conversation" : "chat",
+      content.slice(0, 100),
+      targetName,
+    );
+  }
+
+  /** Broadcast daemon emote and log it */
+  private broadcastDaemonEmote(daemon: DaemonInstance, emote: string, mood: DaemonMood): void {
+    this.broadcast("daemon_emote", {
+      type: "daemon_emote" as const,
+      daemonId: daemon.state.daemonId,
+      emote,
+      mood,
+    });
+    this.logActivity(daemon, "emote", emote.slice(0, 100));
   }
 
   addDaemon(id: string, definition: DaemonDefinition, behavior: DaemonBehavior): void {
@@ -290,12 +372,7 @@ export class DaemonManager {
       daemon.state.mood = mood;
       daemon.moodDecayTimer = 0;
 
-      this.broadcast("daemon_emote", {
-        type: "daemon_emote" as const,
-        daemonId: daemon.state.daemonId,
-        emote,
-        mood,
-      });
+      this.broadcastDaemonEmote(daemon, emote, mood);
 
       break; // Only one daemon reacts per event
     }
@@ -344,12 +421,7 @@ export class DaemonManager {
             ? `${response.emote} ${response.message}`
             : response.message;
 
-          this.broadcast("daemon_chat", {
-            type: "daemon_chat" as const,
-            daemonId: daemon.state.daemonId,
-            daemonName: daemon.state.definition.name,
-            content: fullMessage,
-          });
+          this.broadcastDaemonChat(daemon, fullMessage);
         } catch (err) {
           console.error("Daemon overhear reaction failed:", err);
         }
@@ -497,12 +569,7 @@ export class DaemonManager {
 
         // Broadcast emote if present
         if (response.emote) {
-          this.broadcast("daemon_emote", {
-            type: "daemon_emote" as const,
-            daemonId: daemon.state.daemonId,
-            emote: response.emote,
-            mood: response.mood,
-          });
+          this.broadcastDaemonEmote(daemon, response.emote, response.mood);
         }
 
         // Broadcast chat
@@ -510,13 +577,7 @@ export class DaemonManager {
           ? `${response.emote} ${response.message}`
           : response.message;
 
-        this.broadcast("daemon_chat", {
-          type: "daemon_chat" as const,
-          daemonId: daemon.state.daemonId,
-          daemonName: daemon.state.definition.name,
-          content: fullMessage,
-          targetUserId: playerId,
-        });
+        this.broadcastDaemonChat(daemon, fullMessage, playerId);
 
         // Return to idle after a delay
         setTimeout(() => {
@@ -544,13 +605,7 @@ export class DaemonManager {
         daemon.state.currentAction = "talking";
         daemon.state.targetPlayerId = playerId;
 
-        this.broadcast("daemon_chat", {
-          type: "daemon_chat" as const,
-          daemonId: daemon.state.daemonId,
-          daemonName: daemon.state.definition.name,
-          content: response,
-          targetUserId: playerId,
-        });
+        this.broadcastDaemonChat(daemon, response, playerId);
 
         setTimeout(() => {
           daemon.state.currentAction = "idle";
@@ -558,13 +613,7 @@ export class DaemonManager {
         }, 3000);
       }
     } else if (behavior.greetingMessage) {
-      this.broadcast("daemon_chat", {
-        type: "daemon_chat" as const,
-        daemonId: daemon.state.daemonId,
-        daemonName: daemon.state.definition.name,
-        content: behavior.greetingMessage,
-        targetUserId: playerId,
-      });
+      this.broadcastDaemonChat(daemon, behavior.greetingMessage, playerId);
     }
   }
 
@@ -579,12 +628,7 @@ export class DaemonManager {
         daemon.state.mood = "bored";
         daemon.moodDecayTimer = 0;
 
-        this.broadcast("daemon_emote", {
-          type: "daemon_emote" as const,
-          daemonId: daemon.state.daemonId,
-          emote: this.getBoredEmote(daemon),
-          mood: "bored" as DaemonMood,
-        });
+        this.broadcastDaemonEmote(daemon, this.getBoredEmote(daemon), "bored");
       }
     }
   }
@@ -637,12 +681,7 @@ export class DaemonManager {
         daemon.state.mood = mood;
         daemon.moodDecayTimer = 0;
 
-        this.broadcast("daemon_emote", {
-          type: "daemon_emote" as const,
-          daemonId: daemon.state.daemonId,
-          emote,
-          mood,
-        });
+        this.broadcastDaemonEmote(daemon, emote, mood);
       }
     }
   }
@@ -704,12 +743,7 @@ export class DaemonManager {
     const { emote, action, mood } = this.pickSpontaneousGesture(daemon);
 
     // Broadcast the emote
-    this.broadcast("daemon_emote", {
-      type: "daemon_emote" as const,
-      daemonId: daemon.state.daemonId,
-      emote,
-      mood,
-    });
+    this.broadcastDaemonEmote(daemon, emote, mood);
 
     // Set action temporarily
     if (action !== "idle") {
@@ -899,13 +933,7 @@ export class DaemonManager {
       daemon.moodDecayTimer = 0;
 
       const message = daemon.behavior.greetingMessage || "Hello, traveler!";
-      this.broadcast("daemon_chat", {
-        type: "daemon_chat" as const,
-        daemonId: daemon.state.daemonId,
-        daemonName: daemon.state.definition.name,
-        content: message,
-        targetUserId: player.userId,
-      });
+      this.broadcastDaemonChat(daemon, message, player.userId);
 
       setTimeout(() => {
         daemon.state.currentAction = "idle";
@@ -972,13 +1000,7 @@ export class DaemonManager {
       daemon.greetCooldowns.set(player.userId, now);
       const message = daemon.behavior.greetingMessage || "Halt! This area is being watched.";
 
-      this.broadcast("daemon_chat", {
-        type: "daemon_chat" as const,
-        daemonId: daemon.state.daemonId,
-        daemonName: daemon.state.definition.name,
-        content: message,
-        targetUserId: player.userId,
-      });
+      this.broadcastDaemonChat(daemon, message, player.userId);
 
       break;
     }
@@ -1316,18 +1338,11 @@ export class DaemonManager {
 
         // Only the daemon whose ID matches the speaker broadcasts (avoid duplicates)
         if (line.speakerDaemonId === daemon.state.daemonId) {
-          const otherDaemon = this.daemons.get(otherId);
-          const targetDaemonId = line.speakerDaemonId === daemon.state.daemonId ? otherId : daemon.state.daemonId;
+          const targetDaemonId = otherId;
 
           daemon.state.mood = line.mood;
 
-          this.broadcast("daemon_chat", {
-            type: "daemon_chat" as const,
-            daemonId: line.speakerDaemonId,
-            daemonName: daemon.state.definition.name,
-            content: line.message,
-            targetDaemonId,
-          });
+          this.broadcastDaemonChat(daemon, line.message, undefined, targetDaemonId);
         }
 
         conv.lineIndex++;
@@ -1390,12 +1405,7 @@ export class DaemonManager {
     const msgs = daemon.behavior.idleMessages;
     const msg = msgs[Math.floor(Math.random() * msgs.length)];
 
-    this.broadcast("daemon_chat", {
-      type: "daemon_chat" as const,
-      daemonId: daemon.state.daemonId,
-      daemonName: daemon.state.definition.name,
-      content: msg,
-    });
+    this.broadcastDaemonChat(daemon, msg);
 
     daemon.idleTimer = 15 + Math.random() * 20;
   }

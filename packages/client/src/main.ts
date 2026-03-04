@@ -331,6 +331,17 @@ async function init() {
     network.sendDaemonToggleRoam(daemonId, enabled);
   };
 
+  daemonPanel.onFetchActivity = async (daemonId) => {
+    try {
+      const res = await fetch(`${apiUrl}/api/daemons/${daemonId}/activity`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.activity || [];
+    } catch {
+      return [];
+    }
+  };
+
   async function loadPlotDaemons(plotUuid: string) {
     try {
       const res = await fetch(`${apiUrl}/api/daemons/plot/${plotUuid}`);

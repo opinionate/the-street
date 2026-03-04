@@ -179,4 +179,27 @@ router.delete(
   },
 );
 
+// GET /api/daemons/:id/activity — Get recent daemon activity
+router.get(
+  "/:id/activity",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const daemonId = req.params.id as string;
+      const dm = getActiveDaemonManager();
+
+      if (!dm) {
+        res.json({ activity: [] });
+        return;
+      }
+
+      const activity = dm.getDaemonActivity(daemonId, 15);
+      res.json({ activity });
+    } catch (err) {
+      console.error("GET /api/daemons/:id/activity error:", err);
+      res.status(500).json({ error: "Failed to get activity" });
+    }
+  },
+);
+
 export default router;

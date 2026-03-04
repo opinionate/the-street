@@ -9,7 +9,7 @@ import { NetworkManager } from "./network/NetworkManager.js";
 import { ChatUI } from "./ui/ChatUI.js";
 import { CreationPanel } from "./ui/CreationPanel.js";
 import { GalleryPanel } from "./ui/GalleryPanel.js";
-import { getDefaultSpawnPoint } from "@the-street/shared";
+import { getDefaultSpawnPoint, getAllPlotPositions } from "@the-street/shared";
 import type { WorldObject, PlotSnapshot } from "@the-street/shared";
 import * as THREE from "three";
 
@@ -354,6 +354,18 @@ async function init() {
       rotation: 0,
       velocity: { x: 0, y: 0, z: 0 },
     });
+    // Generate local plot snapshots so building works offline
+    const placements = getAllPlotPositions();
+    plotSnapshots = placements.map((placement, i) => ({
+      uuid: `local-plot-${i}`,
+      ownerId: "local",
+      ownerName: "You",
+      neighborhood: "dev",
+      ring: 0,
+      position: i,
+      placement,
+      objects: [],
+    }));
   }
 
   // Find which plot (if any) contains the given position

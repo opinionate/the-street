@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { Reflector } from "three/examples/jsm/objects/Reflector.js";
 import { V1_CONFIG, type WorldConfig } from "@the-street/shared";
 
 export class StreetGeometry {
@@ -13,15 +14,32 @@ export class StreetGeometry {
     const outerRadius = config.ringRadius - config.plotDepth / 2;
     const innerRadius = outerRadius - config.streetWidth;
 
-    // Street surface — dark asphalt with subtle sheen
+    // Reflective layer underneath — mirrors lamp posts, avatars, neon lines
+    const reflectorGeo = new THREE.RingGeometry(innerRadius, outerRadius, 128);
+    reflectorGeo.rotateX(-Math.PI / 2);
+    const reflector = new Reflector(reflectorGeo, {
+      textureWidth: 1024,
+      textureHeight: 1024,
+      color: 0x101018,
+      clipBias: 0.003,
+    });
+    reflector.position.y = -0.005;
+    reflector.name = "StreetReflector";
+    this.mesh.add(reflector);
+
+    // Street surface — wet asphalt with clearcoat for rain-slick sheen
     const streetGeo = new THREE.RingGeometry(innerRadius, outerRadius, 128);
-    streetGeo.rotateX(-Math.PI / 2); // lay flat on XZ plane
-    const streetMat = new THREE.MeshStandardMaterial({
-      color: 0x1a1a24,
-      roughness: 0.7,
-      metalness: 0.2,
-      emissive: 0x0a0a14,
-      emissiveIntensity: 0.3,
+    streetGeo.rotateX(-Math.PI / 2);
+    const streetMat = new THREE.MeshPhysicalMaterial({
+      color: 0x12121c,
+      roughness: 0.35,
+      metalness: 0.1,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.08,
+      emissive: 0x06060e,
+      emissiveIntensity: 0.2,
+      transparent: true,
+      opacity: 0.7, // let reflector show through
     });
     const streetMesh = new THREE.Mesh(streetGeo, streetMat);
     streetMesh.receiveShadow = true;

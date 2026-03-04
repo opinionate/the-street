@@ -1,7 +1,14 @@
 import { Router } from "express";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rate-limit.js";
-import { RATE_LIMITS } from "@the-street/shared";
+import {
+  RATE_LIMITS,
+  UNIVERSAL_CODE,
+  ORIGIN_NEIGHBORHOOD_CODE,
+  V1_CONFIG,
+} from "@the-street/shared";
+import type { GenerationRequest } from "@the-street/shared";
+import { generate } from "@the-street/ai-service";
 
 const router = Router();
 
@@ -14,27 +21,36 @@ router.post(
     maxRequests: RATE_LIMITS.aiGeneration.maxPerMinute,
   }),
   async (req, res) => {
-    const authedReq = req as AuthedRequest;
     try {
-      const { userDescription, plotUUID, plotContext, buildingCode, neighborhoodCode } =
-        req.body;
+      const { userDescription, plotUUID, plotContext } = req.body;
 
-      if (!userDescription || !plotUUID) {
-        res.status(400).json({ error: "userDescription and plotUUID required" });
+      if (!userDescription) {
+        res.status(400).json({ error: "userDescription is required" });
         return;
       }
 
-      // Call Anthropic API for object generation
-      // This will be handled by the ai-service package
-      // For now, return a stub response indicating the pipeline
-      res.status(501).json({
-        error: "AI generation service not yet connected",
-        message:
-          "This endpoint requires the ai-service package to be implemented",
-      });
+      const request: GenerationRequest = {
+        userDescription,
+        plotUUID: plotUUID || "preview",
+        plotContext: plotContext || {
+          existingObjects: [],
+          remainingRenderBudget: V1_CONFIG.plotRenderBudget,
+          plotBounds: {
+            width: V1_CONFIG.plotWidth,
+            depth: V1_CONFIG.plotDepth,
+            height: V1_CONFIG.plotHeight,
+          },
+        },
+        buildingCode: UNIVERSAL_CODE,
+        neighborhoodCode: ORIGIN_NEIGHBORHOOD_CODE,
+      };
+
+      const result = await generate(request);
+      res.json(result);
     } catch (err) {
       console.error("POST /api/generate error:", err);
-      res.status(500).json({ error: "Internal server error" });
+      const message = err instanceof Error ? err.message : "Generation failed";
+      res.status(500).json({ error: message });
     }
   },
 );
@@ -58,16 +74,15 @@ router.post(
         return;
       }
 
-      // Call Meshy API for mesh generation
-      // This will be handled by the ai-service package
-      res.status(501).json({
-        error: "Mesh generation service not yet connected",
-        message:
-          "This endpoint requires the ai-service package to be implemented",
-      });
+      // Meshy integration — import dynamically to avoid requiring key when unused
+      const { generateMesh } = await import("@the-street/ai-service");
+      const result = await generateMesh(description);
+      res.json(result);
     } catch (err) {
       console.error("POST /api/generate/mesh error:", err);
-      res.status(500).json({ error: "Internal server error" });
+      const message =
+        err instanceof Error ? err.message : "Mesh generation failed";
+      res.status(500).json({ error: message });
     }
   },
 );

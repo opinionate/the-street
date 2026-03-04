@@ -16,6 +16,7 @@
     "@colyseus/monitor": "^0.15.0",
     "@colyseus/schema": "^2.0.0",
     "@colyseus/ws-transport": "^0.15.0",
+    "@the-street/ai-service": "workspace:*",
     "@the-street/shared": "workspace:*",
     "@types/node": "^25.3.3",
     "colyseus": "^0.15.0",

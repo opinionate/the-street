@@ -89,6 +89,9 @@ importers:
       '@colyseus/ws-transport':
         specifier: ^0.15.0
         version: 0.15.3(@colyseus/core@0.15.57(@colyseus/schema@2.0.37))(@colyseus/schema@2.0.37)
+      '@the-street/ai-service':
+        specifier: workspace:*
+        version: link:../ai-service
       '@the-street/shared':
         specifier: workspace:*
         version: link:../shared

@@ -38,7 +38,21 @@ export async function resolveUser(
   next();
 }
 
+// Dev bypass — skips Clerk auth when no CLERK_SECRET_KEY is set
+function devBypass(
+  req: AuthedRequest,
+  _res: Response,
+  next: NextFunction,
+): void {
+  req.userId = "dev-user-00000000-0000-0000-0000-000000000000";
+  req.clerkId = "dev_clerk_id";
+  next();
+}
+
 // Combined auth middleware
 export function requireAuth() {
+  if (!process.env.CLERK_SECRET_KEY || process.env.NODE_ENV === "development") {
+    return [devBypass];
+  }
   return [clerkAuth, resolveUser];
 }

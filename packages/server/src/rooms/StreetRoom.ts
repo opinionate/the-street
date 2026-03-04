@@ -154,7 +154,7 @@ export class StreetRoom extends Room<StreetRoomState> {
 
     // Send world snapshot to joining client
     const players: IPlayerState[] = [];
-    this.state.players.forEach((p) => {
+    this.state.players.forEach((p: PlayerSchema) => {
       players.push({
         userId: p.userId,
         displayName: p.displayName,
@@ -489,7 +489,7 @@ export class StreetRoom extends Room<StreetRoomState> {
 
   private async saveAllPositions(): Promise<void> {
     const promises: Promise<void>[] = [];
-    this.state.players.forEach((player) => {
+    this.state.players.forEach((player: PlayerSchema) => {
       promises.push(this.savePlayerPosition(player));
     });
     await Promise.allSettled(promises);

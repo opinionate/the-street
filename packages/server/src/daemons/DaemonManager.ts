@@ -1001,4 +1001,102 @@ export class DaemonManager {
     const dz = a.z - b.z;
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
+
+  // ─── Memory Persistence ─────────────────────────────────────
+
+  /** Save all daemon moods and positions to DB (called periodically and on shutdown) */
+  async saveState(): Promise<void> {
+    const pool = getPool();
+    const promises: Promise<void>[] = [];
+
+    for (const [id, daemon] of this.daemons) {
+      const p = pool.query(
+        `UPDATE daemons SET
+           current_mood = $2,
+           position_x = $3, position_y = $4, position_z = $5,
+           rotation = $6
+         WHERE id = $1`,
+        [
+          id,
+          daemon.state.mood,
+          daemon.state.currentPosition.x,
+          daemon.state.currentPosition.y,
+          daemon.state.currentPosition.z,
+          daemon.state.currentRotation,
+        ],
+      ).then(() => {});
+      promises.push(p);
+
+      // Save conversation memories for players
+      for (const [playerId, memory] of daemon.conversationMemory) {
+        if (memory.messages.length === 0) continue;
+
+        // Summarize the last few messages
+        const lastMessages = memory.messages.slice(-4);
+        const summary = lastMessages.map(m =>
+          `${m.role === "daemon" ? daemon.state.definition.name : memory.playerName}: ${m.content}`
+        ).join(" | ");
+
+        const mp = pool.query(
+          `INSERT INTO daemon_memories (daemon_id, player_id, memory_type, summary, mood, interaction_count, last_interaction)
+           VALUES ($1, $2, 'conversation', $3, $4, $5, now())
+           ON CONFLICT ON CONSTRAINT daemon_memories_pkey DO NOTHING`,
+          [id, playerId, summary.slice(0, 500), daemon.state.mood, memory.messages.length],
+        ).then(() => {}).catch(() => {
+          // If player_id is not a valid UUID (e.g. session ID), skip
+        });
+        promises.push(mp);
+      }
+    }
+
+    await Promise.allSettled(promises);
+  }
+
+  /** Load saved moods from DB after loadDaemons */
+  async loadSavedState(): Promise<void> {
+    const pool = getPool();
+
+    for (const [id, daemon] of this.daemons) {
+      // Load mood from daemons table
+      try {
+        const { rows } = await pool.query(
+          "SELECT current_mood FROM daemons WHERE id = $1",
+          [id],
+        );
+        if (rows.length > 0 && rows[0].current_mood) {
+          const validMoods = ["happy", "neutral", "bored", "excited", "annoyed", "curious"];
+          if (validMoods.includes(rows[0].current_mood)) {
+            daemon.state.mood = rows[0].current_mood;
+          }
+        }
+      } catch {
+        // Non-critical
+      }
+
+      // Load recent memories for context
+      try {
+        const { rows: memories } = await pool.query(
+          `SELECT player_id, summary, interaction_count, last_interaction
+           FROM daemon_memories
+           WHERE daemon_id = $1 AND memory_type = 'conversation'
+           ORDER BY last_interaction DESC
+           LIMIT 10`,
+          [id],
+        );
+
+        for (const mem of memories) {
+          if (mem.player_id && !daemon.conversationMemory.has(mem.player_id)) {
+            daemon.conversationMemory.set(mem.player_id, {
+              playerId: mem.player_id,
+              playerName: "Returning visitor",
+              messages: [{ role: "daemon" as const, content: `[Previous meeting: ${mem.summary}]` }],
+              lastInteraction: new Date(mem.last_interaction).getTime(),
+            });
+          }
+        }
+      } catch {
+        // Non-critical
+      }
+    }
+  }
 }

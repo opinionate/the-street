@@ -204,6 +204,29 @@ const MIGRATIONS: { name: string; up: string }[] = [
       CREATE INDEX IF NOT EXISTS idx_daemons_owner ON daemons(owner_id);
     `,
   },
+  {
+    name: "011_create_daemon_memories",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_memories (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        player_id UUID REFERENCES users(id),
+        other_daemon_id UUID REFERENCES daemons(id) ON DELETE SET NULL,
+        memory_type TEXT NOT NULL DEFAULT 'conversation',
+        summary TEXT NOT NULL,
+        mood TEXT NOT NULL DEFAULT 'neutral',
+        interaction_count INTEGER NOT NULL DEFAULT 1,
+        last_interaction TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemon_memories_daemon ON daemon_memories(daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_memories_player ON daemon_memories(daemon_id, player_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_memories_daemon_pair ON daemon_memories(daemon_id, other_daemon_id);
+
+      ALTER TABLE daemons ADD COLUMN IF NOT EXISTS current_mood TEXT NOT NULL DEFAULT 'neutral';
+      ALTER TABLE daemons ADD COLUMN IF NOT EXISTS total_interactions INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

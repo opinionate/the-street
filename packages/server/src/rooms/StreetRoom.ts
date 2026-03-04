@@ -82,6 +82,7 @@ export function getActiveDaemonManager(): DaemonManager | null {
 export class StreetRoom extends Room<StreetRoomState> {
   private tickInterval: ReturnType<typeof setInterval> | null = null;
   private saveInterval: ReturnType<typeof setInterval> | null = null;
+  private daemonSaveInterval: ReturnType<typeof setInterval> | null = null;
   private playerVisits = new Map<string, PlotVisit | null>();
   private plotCache: PlotSnapshot[] = [];
   private daemonManager: DaemonManager | null = null;
@@ -135,9 +136,16 @@ export class StreetRoom extends Room<StreetRoomState> {
       POSITION_SAVE_INTERVAL * 1000,
     );
 
+    // Save daemon state every 60 seconds
+    this.daemonSaveInterval = setInterval(
+      () => this.daemonManager?.saveState().catch(() => {}),
+      60_000,
+    );
+
     // Load plot cache and daemons
     this.loadPlots()
       .then(() => this.loadDaemons())
+      .then(() => this.daemonManager?.loadSavedState())
       .catch((err) => console.error("Failed to load plots/daemons:", err));
   }
 
@@ -270,9 +278,14 @@ export class StreetRoom extends Room<StreetRoomState> {
     this.playerVisits.delete(client.sessionId);
   }
 
-  override onDispose(): void {
+  override async onDispose(): Promise<void> {
     if (this.tickInterval) clearInterval(this.tickInterval);
     if (this.saveInterval) clearInterval(this.saveInterval);
+    if (this.daemonSaveInterval) clearInterval(this.daemonSaveInterval);
+    // Save daemon state before shutdown
+    await this.daemonManager?.saveState().catch((err) =>
+      console.error("Failed to save daemon state:", err),
+    );
     activeDaemonManager = null;
   }
 

@@ -58,6 +58,7 @@ interface DaemonInstance {
   speed: number;
   action: DaemonAction;
   mood: DaemonMood;
+  behaviorType: string;
   chatBubbles: ChatBubble[];
   emoteParticles: EmoteParticle[];
   emoteLabels: EmoteLabel[];
@@ -141,6 +142,7 @@ export class DaemonRenderer {
       speed: 0,
       action: daemon.currentAction as DaemonAction,
       mood: daemon.mood || "neutral",
+      behaviorType: daemon.definition.behavior.type,
       chatBubbles: [],
       emoteParticles: [],
       emoteLabels: [],
@@ -575,10 +577,53 @@ export class DaemonRenderer {
     daemon.speed *= 1 - Math.min(dt * 5, 1);
     daemon.animPhase += dt * 0.5;
 
-    // Very subtle idle sway
-    daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase * 0.3) * 0.01;
+    // Personality-driven idle animations
+    switch (daemon.behaviorType) {
+      case "guard":
+        // Rigid, alert stance — minimal movement, occasional head scan
+        daemon.bodyMesh.rotation.z = 0;
+        daemon.head.rotation.y = Math.sin(daemon.animPhase * 0.15) * 0.12; // slow scan
+        daemon.leftArm.rotation.x *= 1 - Math.min(dt * 5, 1); // arms at sides
+        daemon.rightArm.rotation.x *= 1 - Math.min(dt * 5, 1);
+        break;
 
-    // Legs return to rest
+      case "socialite":
+        // Fidgety, looking around — weight shifting, head turning
+        daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase * 0.6) * 0.02;
+        daemon.head.rotation.y = Math.sin(daemon.animPhase * 0.4) * 0.15;
+        daemon.head.rotation.x = Math.sin(daemon.animPhase * 0.25) * 0.04;
+        // Weight shift — body sways side to side
+        daemon.bodyMesh.position.x = Math.sin(daemon.animPhase * 0.35) * 0.01;
+        break;
+
+      case "shopkeeper":
+        // Leaning forward slightly, hands together
+        daemon.bodyMesh.rotation.x = -0.03; // slight lean
+        daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase * 0.2) * 0.005;
+        daemon.leftArm.rotation.z = 0.15; // arms closer to body
+        daemon.rightArm.rotation.z = -0.15;
+        break;
+
+      case "greeter":
+        // Upbeat, slight bouncy energy
+        daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase * 0.4) * 0.015;
+        daemon.group.position.y = Math.abs(Math.sin(daemon.animPhase * 0.3)) * 0.005;
+        daemon.head.rotation.y = Math.sin(daemon.animPhase * 0.5) * 0.08;
+        break;
+
+      case "roamer":
+        // Relaxed, looking around curiously
+        daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase * 0.25) * 0.012;
+        daemon.head.rotation.y = Math.sin(daemon.animPhase * 0.3) * 0.2; // wide head turns
+        break;
+
+      default:
+        // Generic subtle sway
+        daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase * 0.3) * 0.01;
+        break;
+    }
+
+    // Legs return to rest (all types)
     daemon.leftLeg.rotation.x *= 1 - Math.min(dt * 3, 1);
     daemon.rightLeg.rotation.x *= 1 - Math.min(dt * 3, 1);
 

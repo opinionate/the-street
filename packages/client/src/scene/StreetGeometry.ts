@@ -96,9 +96,9 @@ export class StreetGeometry {
     const lampCount = Math.floor(config.plotCount / 2); // one lamp every 2 plots
     const streetMidRadius = (innerRadius + outerRadius) / 2;
     const lampPoleMat = new THREE.MeshStandardMaterial({
-      color: 0x222233,
-      roughness: 0.5,
-      metalness: 0.6,
+      color: 0x556677,
+      roughness: 0.4,
+      metalness: 0.7,
     });
 
     for (let i = 0; i < lampCount; i++) {
@@ -109,46 +109,65 @@ export class StreetGeometry {
       const lampGroup = new THREE.Group();
       lampGroup.position.set(lx, 0, lz);
 
+      // Point arm toward street center (inward)
+      const toCenter = Math.atan2(-lz, -lx);
+
       // Pole
-      const poleGeo = new THREE.CylinderGeometry(0.08, 0.1, 5, 6);
+      const poleGeo = new THREE.CylinderGeometry(0.08, 0.12, 5.5, 6);
       const pole = new THREE.Mesh(poleGeo, lampPoleMat);
-      pole.position.y = 2.5;
+      pole.position.y = 2.75;
       pole.castShadow = true;
       lampGroup.add(pole);
 
       // Arm extending over street
-      const armGeo = new THREE.CylinderGeometry(0.04, 0.04, 2, 4);
+      const armGeo = new THREE.CylinderGeometry(0.04, 0.04, 2.5, 4);
       const arm = new THREE.Mesh(armGeo, lampPoleMat);
       arm.rotation.z = Math.PI / 2;
-      // Point arm toward street center (inward)
-      const toCenter = Math.atan2(-lz, -lx);
       arm.rotation.y = -toCenter;
-      arm.position.y = 5;
-      arm.position.x = Math.cos(toCenter) * 1;
-      arm.position.z = Math.sin(toCenter) * 1;
+      arm.position.y = 5.5;
+      arm.position.x = Math.cos(toCenter) * 1.25;
+      arm.position.z = Math.sin(toCenter) * 1.25;
       lampGroup.add(arm);
 
-      // Lamp head (emissive glow)
-      const headGeo = new THREE.SphereGeometry(0.2, 8, 8);
-      const headMat = new THREE.MeshStandardMaterial({
-        color: 0xff8800,
-        emissive: 0xff6600,
-        emissiveIntensity: 2.0,
+      // Lamp housing (visible fixture)
+      const housingGeo = new THREE.CylinderGeometry(0.15, 0.3, 0.25, 8);
+      const housingMat = new THREE.MeshStandardMaterial({
+        color: 0x334455,
         roughness: 0.3,
+        metalness: 0.8,
+      });
+      const housing = new THREE.Mesh(housingGeo, housingMat);
+      housing.position.y = 5.35;
+      housing.position.x = Math.cos(toCenter) * 2.5;
+      housing.position.z = Math.sin(toCenter) * 2.5;
+      lampGroup.add(housing);
+
+      // Lamp bulb (emissive glow)
+      const bulbGeo = new THREE.SphereGeometry(0.15, 8, 8);
+      const bulbMat = new THREE.MeshStandardMaterial({
+        color: 0xffcc66,
+        emissive: 0xffaa33,
+        emissiveIntensity: 3.0,
+        roughness: 0.1,
         metalness: 0.0,
       });
-      const lampHead = new THREE.Mesh(headGeo, headMat);
-      lampHead.position.y = 5;
-      lampHead.position.x = Math.cos(toCenter) * 2;
-      lampHead.position.z = Math.sin(toCenter) * 2;
-      lampGroup.add(lampHead);
+      const bulb = new THREE.Mesh(bulbGeo, bulbMat);
+      bulb.position.y = 5.2;
+      bulb.position.x = Math.cos(toCenter) * 2.5;
+      bulb.position.z = Math.sin(toCenter) * 2.5;
+      lampGroup.add(bulb);
 
-      // Point light for actual illumination
-      const light = new THREE.PointLight(0xff8844, 0.8, 25, 2);
-      light.position.copy(lampHead.position);
-      light.position.y -= 0.3;
-      light.castShadow = false; // too many shadow-casting lights is expensive
-      lampGroup.add(light);
+      // SpotLight pointing down — creates a pool of light on the street
+      const spot = new THREE.SpotLight(0xffcc77, 3.0, 18, Math.PI / 4, 0.6, 1.5);
+      spot.position.set(bulb.position.x, bulb.position.y, bulb.position.z);
+      spot.target.position.set(bulb.position.x, 0, bulb.position.z);
+      lampGroup.add(spot);
+      lampGroup.add(spot.target);
+
+      // Softer point light for ambient fill around the lamp
+      const fill = new THREE.PointLight(0xffaa44, 1.2, 20, 2);
+      fill.position.set(bulb.position.x, bulb.position.y - 0.2, bulb.position.z);
+      lampGroup.add(fill);
 
       this.mesh.add(lampGroup);
     }

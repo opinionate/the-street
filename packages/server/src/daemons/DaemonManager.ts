@@ -78,6 +78,9 @@ interface DaemonInstance {
   gatheringTimer: number;           // cooldown before next group chatter
   // Daily routine
   routineTimer: number;             // countdown to next routine-specific action
+  // Proactive engagement
+  proactiveTimer: number;           // countdown to next unsolicited player remark
+  proactiveCooldowns: Map<string, number>; // playerId -> timestamp of last proactive remark
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -96,6 +99,7 @@ const MOOD_DECAY_INTERVAL = 60;    // mood trends toward bored after 60s of no i
 const CONVERSATION_EXCHANGES = 3;  // lines per daemon in a conversation
 const OVERHEAR_CHANCE = 0.15;      // 15% chance a daemon reacts to nearby chat
 const OVERHEAR_COOLDOWN_MS = 30_000; // 30s cooldown per daemon for overhear reactions
+const PROACTIVE_COOLDOWN_MS = 120_000; // 2 min cooldown per player for proactive remarks
 const DAY_CYCLE_SECONDS = 600;     // 10 real minutes = 1 in-game day
 
 type TimeOfDay = "morning" | "afternoon" | "evening" | "night";
@@ -229,6 +233,8 @@ export class DaemonManager {
       gatheringTarget: null,
       gatheringTimer: 20 + Math.random() * 20,
       routineTimer: 30 + Math.random() * 30,
+      proactiveTimer: 20 + Math.random() * 40,
+      proactiveCooldowns: new Map(),
       isMuted: false,
       isRecalled: false,
     };
@@ -704,6 +710,9 @@ export class DaemonManager {
       // Daily routine actions (time-of-day specific behaviors)
       this.tickDailyRoutine(daemon, dt, players);
 
+      // Proactive engagement — unsolicited remarks to nearby players
+      this.tickProactiveEngagement(daemon, dt, players);
+
       // Spontaneous personality-based gestures
       this.tickSpontaneousGestures(daemon, dt, players);
 
@@ -1117,6 +1126,150 @@ export class DaemonManager {
           { emote: "*sways sleepily*", mood: "bored" as DaemonMood },
           { emote: "*gazes at the night sky*", mood: "curious" as DaemonMood },
         ]);
+    }
+  }
+
+  // ─── Proactive Player Engagement ──────────────────────────────
+
+  private tickProactiveEngagement(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
+    if (daemon.isMuted) return;
+    if (daemon.state.currentAction !== "idle") return;
+    if (players.length === 0) return;
+
+    daemon.proactiveTimer -= dt;
+    if (daemon.proactiveTimer > 0) return;
+
+    // Reset timer: 30-80s, scaled by time of day
+    daemon.proactiveTimer = (30 + Math.random() * 50) * getTimeChattinessFactor(this.lastTimeOfDay);
+
+    // Find the closest player within interaction radius who hasn't been remarked at recently
+    const now = Date.now();
+    const radius = daemon.behavior.interactionRadius * 1.5;
+    let closestPlayer: PlayerInfo | null = null;
+    let closestDist = Infinity;
+
+    for (const player of players) {
+      const dist = this.distance(daemon.state.currentPosition, player.position);
+      if (dist > radius) continue;
+
+      // Check per-player cooldown
+      const lastRemark = daemon.proactiveCooldowns.get(player.userId) || 0;
+      if (now - lastRemark < PROACTIVE_COOLDOWN_MS) continue;
+
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestPlayer = player;
+      }
+    }
+
+    if (!closestPlayer) return;
+
+    // Mark cooldown
+    daemon.proactiveCooldowns.set(closestPlayer.userId, now);
+
+    // Clean up old cooldowns
+    for (const [pid, ts] of daemon.proactiveCooldowns) {
+      if (now - ts > PROACTIVE_COOLDOWN_MS * 3) daemon.proactiveCooldowns.delete(pid);
+    }
+
+    // Generate the remark based on role, relationship, and context
+    const playerName = closestPlayer.displayName || "stranger";
+    const relationship = daemon.relationships.get(closestPlayer.userId);
+    const remark = this.pickProactiveRemark(daemon, playerName, relationship?.sentiment || "neutral");
+    if (!remark) return;
+
+    // Broadcast as chat targeted to this player
+    this.broadcastDaemonChat(daemon, remark, closestPlayer.userId);
+
+    // Update relationship (minor interaction)
+    this.updateRelationship(daemon, closestPlayer.userId, playerName, "player", daemon.state.mood);
+  }
+
+  private pickProactiveRemark(
+    daemon: DaemonInstance,
+    playerName: string,
+    sentiment: Sentiment | string,
+  ): string | null {
+    const type = daemon.behavior.type;
+    const time = this.lastTimeOfDay;
+    const traits = daemon.state.definition.personality.traits;
+    const interests = daemon.state.definition.personality.interests;
+
+    // Friendly players get warmer remarks
+    if (sentiment === "friendly") {
+      return pick([
+        `Hey ${playerName}! Good to see you again.`,
+        `${playerName}! How's it going?`,
+        `Oh, ${playerName}'s back! Nice.`,
+        `Welcome back, ${playerName}.`,
+      ]);
+    }
+
+    // Wary players get cautious acknowledgment
+    if (sentiment === "wary") {
+      return pick([
+        `...${playerName}.`,
+        `Hmm, you again.`,
+        `I've got my eye on you, ${playerName}.`,
+      ]);
+    }
+
+    // Role-specific remarks for neutral/unknown players
+    if (type === "shopkeeper") {
+      return pick([
+        "Browse all you like — everything's for sale!",
+        "Looking for something specific?",
+        time === "morning" ? "Fresh stock this morning!" : "Still open, come have a look!",
+        "Best prices on the street, guaranteed.",
+      ]);
+    }
+
+    if (type === "guard") {
+      return pick([
+        "Everything alright around here?",
+        "Stay safe out there.",
+        time === "night" ? "Late night, huh? Be careful." : "Keeping the peace.",
+        "Nothing suspicious, I hope?",
+      ]);
+    }
+
+    if (type === "greeter") {
+      return pick([
+        `Welcome! I'm ${daemon.state.definition.name}. Nice to meet you!`,
+        "First time here? Let me know if you need anything!",
+        "Hey there! Hope you're enjoying the street.",
+        "Beautiful day to be out, isn't it?",
+      ]);
+    }
+
+    if (type === "socialite") {
+      return pick([
+        "So, what's the latest gossip?",
+        "You look like someone interesting to talk to!",
+        "Anything exciting happening around here?",
+        "I love meeting new people. What's your story?",
+      ]);
+    }
+
+    // Generic remarks based on personality
+    if (traits.includes("curious") || traits.includes("inquisitive")) {
+      return pick([
+        "Hmm, you seem interesting...",
+        "I don't think I've seen you around. What brings you here?",
+      ]);
+    }
+
+    if (interests.length > 0) {
+      const interest = interests[Math.floor(Math.random() * interests.length)];
+      return `You know anything about ${interest}?`;
+    }
+
+    // Time-based generic
+    switch (time) {
+      case "morning": return "Nice morning, isn't it?";
+      case "afternoon": return "Afternoon! Fine day.";
+      case "evening": return "Getting late... enjoy the evening.";
+      case "night": return "*nods quietly*";
     }
   }
 

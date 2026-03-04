@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { DaemonState, DaemonMood, Vector3 as Vec3 } from "@the-street/shared";
+import type { DaemonState, DaemonMood, DaemonAction, Vector3 as Vec3 } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
 
 const NPC_ACCENT_COLORS: Record<string, number> = {
@@ -42,6 +42,12 @@ interface EmoteParticle {
   maxLife: number;
 }
 
+interface EmoteLabel {
+  sprite: THREE.Sprite;
+  createdAt: number;
+  duration: number;
+}
+
 interface DaemonInstance {
   group: THREE.Group;
   targetPosition: THREE.Vector3;
@@ -50,13 +56,24 @@ interface DaemonInstance {
   animPhase: number;
   breathPhase: number;
   speed: number;
-  action: string;
+  action: DaemonAction;
   mood: DaemonMood;
   chatBubbles: ChatBubble[];
   emoteParticles: EmoteParticle[];
+  emoteLabels: EmoteLabel[];
   moodIndicator: THREE.Sprite | null;
   accentLight: THREE.PointLight;
   ringMesh: THREE.Mesh;
+  // Body parts for animation
+  leftArm: THREE.Mesh;
+  rightArm: THREE.Mesh;
+  head: THREE.Mesh;
+  bodyMesh: THREE.Mesh;
+  leftLeg: THREE.Mesh;
+  rightLeg: THREE.Mesh;
+  // Animation state
+  gestureTimer: number;
+  gesturePhase: number;
   // Thinking dots animation
   thinkingDots: THREE.Group | null;
   thinkingPhase: number;
@@ -86,8 +103,8 @@ export class DaemonRenderer {
     const behaviorType = daemon.definition.behavior.type;
     const accent = NPC_ACCENT_COLORS[behaviorType] || 0x44ff88;
 
-    const { body, accentLight, ringMesh } = this.createNPCBody(accent);
-    group.add(body);
+    const parts = this.createNPCBody(accent);
+    group.add(parts.body);
 
     // Name label with behavior tag
     const roleTag = behaviorType.charAt(0).toUpperCase() + behaviorType.slice(1);
@@ -116,13 +133,22 @@ export class DaemonRenderer {
       animPhase: Math.random() * Math.PI * 2,
       breathPhase: Math.random() * Math.PI * 2,
       speed: 0,
-      action: daemon.currentAction,
+      action: daemon.currentAction as DaemonAction,
       mood: daemon.mood || "neutral",
       chatBubbles: [],
       emoteParticles: [],
+      emoteLabels: [],
       moodIndicator,
-      accentLight,
-      ringMesh,
+      accentLight: parts.accentLight,
+      ringMesh: parts.ringMesh,
+      leftArm: parts.leftArm,
+      rightArm: parts.rightArm,
+      head: parts.head,
+      bodyMesh: parts.bodyMesh,
+      leftLeg: parts.leftLeg,
+      rightLeg: parts.rightLeg,
+      gestureTimer: 0,
+      gesturePhase: 0,
       thinkingDots: null,
       thinkingPhase: 0,
     });
@@ -141,7 +167,7 @@ export class DaemonRenderer {
     if (!daemon) return;
     daemon.targetPosition.set(position.x, position.y, position.z);
     daemon.targetRotation = rotation;
-    daemon.action = action;
+    daemon.action = action as DaemonAction;
   }
 
   showDaemonChat(daemonId: string, daemonName: string, content: string, targetDaemonId?: string): void {
@@ -214,6 +240,10 @@ export class DaemonRenderer {
       old.sprite.material.map?.dispose();
       old.sprite.material.dispose();
     }
+
+    // Trigger talking gesture
+    daemon.gestureTimer = 2.0;
+    daemon.gesturePhase = 0;
   }
 
   showDaemonEmote(daemonId: string, emote: string, mood: DaemonMood): void {
@@ -229,6 +259,11 @@ export class DaemonRenderer {
       this.spawnEmoteParticle(daemon, color);
     }
 
+    // Show emote text as floating label
+    if (emote) {
+      this.showEmoteLabel(daemon, emote, color);
+    }
+
     // Pulse the accent light
     daemon.accentLight.intensity = 1.5;
 
@@ -236,6 +271,10 @@ export class DaemonRenderer {
     const ringMat = daemon.ringMesh.material as THREE.MeshStandardMaterial;
     ringMat.color.setHex(color);
     ringMat.emissive.setHex(color);
+
+    // Trigger gesture based on mood
+    daemon.gestureTimer = 1.5;
+    daemon.gesturePhase = 0;
   }
 
   update(dt: number): void {
@@ -252,39 +291,22 @@ export class DaemonRenderer {
       daemon.currentRotation += rotDiff * Math.min(dt * 8, 1);
       daemon.group.rotation.y = daemon.currentRotation;
 
-      // Walking animation
-      const isWalking = daemon.action === "walking";
-      if (isWalking) {
-        daemon.animPhase += dt * 5;
-        daemon.speed += (3 - daemon.speed) * Math.min(dt * 5, 1);
-      } else {
-        daemon.speed *= 1 - Math.min(dt * 5, 1);
-      }
-
-      if (isWalking) {
-        daemon.group.position.y = Math.abs(Math.sin(daemon.animPhase * 2)) * 0.02;
-      }
-
-      // Breathing
+      // Breathing (always active — subtle body scale pulse)
       daemon.breathPhase += dt * 1.5;
+      const breathScale = 1 + Math.sin(daemon.breathPhase) * 0.008;
+      daemon.bodyMesh.scale.set(1, breathScale, 1);
 
-      // Thinking animation
-      if (daemon.action === "thinking") {
-        if (!daemon.thinkingDots) {
-          daemon.thinkingDots = this.createThinkingDots();
-          daemon.thinkingDots.position.set(0, 2.3, 0);
-          daemon.group.add(daemon.thinkingDots);
-        }
-        daemon.thinkingPhase += dt * 3;
-        this.updateThinkingDots(daemon.thinkingDots, daemon.thinkingPhase);
-      } else if (daemon.thinkingDots) {
-        daemon.group.remove(daemon.thinkingDots);
-        daemon.thinkingDots = null;
-      }
+      // Animate based on action
+      this.animateAction(daemon, dt);
 
-      // Waving animation (simple bob + rotation)
-      if (daemon.action === "waving") {
-        daemon.group.position.y = Math.sin(now * 0.005) * 0.03;
+      // Gesture animation (arms, head bobbing during emotes/chat)
+      if (daemon.gestureTimer > 0) {
+        daemon.gestureTimer -= dt;
+        daemon.gesturePhase += dt * 6;
+        this.animateGesture(daemon);
+      } else {
+        // Return arms to rest
+        this.returnToRest(daemon, dt);
       }
 
       // Accent light decay
@@ -310,6 +332,23 @@ export class DaemonRenderer {
         }
       }
 
+      // Emote labels
+      for (let i = daemon.emoteLabels.length - 1; i >= 0; i--) {
+        const label = daemon.emoteLabels[i];
+        const age = now - label.createdAt;
+        if (age >= label.duration) {
+          label.sprite.parent?.remove(label.sprite);
+          label.sprite.material.map?.dispose();
+          label.sprite.material.dispose();
+          daemon.emoteLabels.splice(i, 1);
+        } else {
+          // Float upward and fade
+          const progress = age / label.duration;
+          label.sprite.position.y = 2.6 + progress * 0.4;
+          label.sprite.material.opacity = 1 - progress * progress;
+        }
+      }
+
       // Chat bubble cleanup
       for (let i = daemon.chatBubbles.length - 1; i >= 0; i--) {
         const bubble = daemon.chatBubbles[i];
@@ -330,9 +369,8 @@ export class DaemonRenderer {
     }
   }
 
-  /** Get the name of a daemon by ID (from the spawn state cached on creation) */
+  /** Get the name of a daemon by ID */
   getDaemonName(daemonId: string): string | null {
-    // We need to store daemon definitions — add a name map
     return this.daemonNames.get(daemonId) || null;
   }
 
@@ -346,6 +384,271 @@ export class DaemonRenderer {
     }
     return results;
   }
+
+  // ─── Action Animations ────────────────────────────────────────
+
+  private animateAction(daemon: DaemonInstance, dt: number): void {
+    const action = daemon.action;
+
+    switch (action) {
+      case "walking":
+        this.animateWalking(daemon, dt);
+        break;
+      case "waving":
+        this.animateWaving(daemon, dt);
+        break;
+      case "laughing":
+        this.animateLaughing(daemon, dt);
+        break;
+      case "thinking":
+        this.animateThinking(daemon, dt);
+        break;
+      case "talking":
+        this.animateTalking(daemon, dt);
+        break;
+      case "emoting":
+        this.animateEmoting(daemon, dt);
+        break;
+      case "idle":
+      default:
+        this.animateIdle(daemon, dt);
+        break;
+    }
+  }
+
+  private animateWalking(daemon: DaemonInstance, dt: number): void {
+    daemon.animPhase += dt * 5;
+    daemon.speed += (3 - daemon.speed) * Math.min(dt * 5, 1);
+
+    // Leg swing
+    const legSwing = Math.sin(daemon.animPhase) * 0.3;
+    daemon.leftLeg.rotation.x = legSwing;
+    daemon.rightLeg.rotation.x = -legSwing;
+
+    // Arm swing (opposite to legs)
+    daemon.leftArm.rotation.x = -legSwing * 0.6;
+    daemon.rightArm.rotation.x = legSwing * 0.6;
+
+    // Subtle body bob
+    daemon.group.position.y = Math.abs(Math.sin(daemon.animPhase * 2)) * 0.02;
+
+    // Head slight turn in walk direction
+    daemon.head.rotation.y = Math.sin(daemon.animPhase * 0.5) * 0.05;
+  }
+
+  private animateWaving(daemon: DaemonInstance, dt: number): void {
+    daemon.animPhase += dt * 8;
+
+    // Right arm waves up and down
+    daemon.rightArm.rotation.x = -2.0; // Arm raised
+    daemon.rightArm.rotation.z = Math.sin(daemon.animPhase) * 0.4 - 0.5;
+
+    // Body slight bob
+    daemon.group.position.y = Math.sin(daemon.animPhase * 0.5) * 0.01;
+
+    // Head tilts slightly
+    daemon.head.rotation.z = Math.sin(daemon.animPhase * 0.7) * 0.08;
+  }
+
+  private animateLaughing(daemon: DaemonInstance, dt: number): void {
+    daemon.animPhase += dt * 12;
+
+    // Rapid body shake
+    daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase) * 0.05;
+    daemon.bodyMesh.position.y = 1.0 + Math.abs(Math.sin(daemon.animPhase * 2)) * 0.02;
+
+    // Arms shake outward
+    daemon.leftArm.rotation.z = 0.3 + Math.sin(daemon.animPhase * 1.5) * 0.15;
+    daemon.rightArm.rotation.z = -0.3 - Math.sin(daemon.animPhase * 1.5) * 0.15;
+    daemon.leftArm.rotation.x = -0.4 + Math.sin(daemon.animPhase) * 0.1;
+    daemon.rightArm.rotation.x = -0.4 + Math.sin(daemon.animPhase) * 0.1;
+
+    // Head tilts back
+    daemon.head.rotation.x = -0.15 + Math.sin(daemon.animPhase * 3) * 0.05;
+  }
+
+  private animateThinking(daemon: DaemonInstance, dt: number): void {
+    daemon.animPhase += dt * 2;
+
+    // Right arm up to chin (thinking pose)
+    daemon.rightArm.rotation.x = -1.2;
+    daemon.rightArm.rotation.z = -0.3;
+
+    // Left arm hangs
+    daemon.leftArm.rotation.x = 0;
+    daemon.leftArm.rotation.z = 0.05;
+
+    // Head tilts slightly, slow sway
+    daemon.head.rotation.z = 0.1 + Math.sin(daemon.animPhase) * 0.03;
+    daemon.head.rotation.x = -0.05;
+
+    // Thinking dots
+    if (!daemon.thinkingDots) {
+      daemon.thinkingDots = this.createThinkingDots();
+      daemon.thinkingDots.position.set(0, 2.3, 0);
+      daemon.group.add(daemon.thinkingDots);
+    }
+    daemon.thinkingPhase += dt * 3;
+    this.updateThinkingDots(daemon.thinkingDots, daemon.thinkingPhase);
+  }
+
+  private animateTalking(daemon: DaemonInstance, dt: number): void {
+    daemon.animPhase += dt * 4;
+
+    // Subtle hand gestures while talking
+    daemon.leftArm.rotation.x = -0.3 + Math.sin(daemon.animPhase) * 0.15;
+    daemon.rightArm.rotation.x = -0.3 + Math.sin(daemon.animPhase + 1.5) * 0.15;
+    daemon.leftArm.rotation.z = 0.15 + Math.sin(daemon.animPhase * 0.7) * 0.05;
+    daemon.rightArm.rotation.z = -0.15 - Math.sin(daemon.animPhase * 0.7) * 0.05;
+
+    // Slight head nod
+    daemon.head.rotation.x = Math.sin(daemon.animPhase * 1.5) * 0.05;
+  }
+
+  private animateEmoting(daemon: DaemonInstance, dt: number): void {
+    daemon.animPhase += dt * 6;
+
+    // Expressive full-body movement
+    daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase) * 0.03;
+
+    // Arms spread out
+    daemon.leftArm.rotation.z = 0.5 + Math.sin(daemon.animPhase) * 0.2;
+    daemon.rightArm.rotation.z = -0.5 - Math.sin(daemon.animPhase) * 0.2;
+    daemon.leftArm.rotation.x = -0.5 + Math.sin(daemon.animPhase * 0.5) * 0.1;
+    daemon.rightArm.rotation.x = -0.5 + Math.sin(daemon.animPhase * 0.5) * 0.1;
+
+    // Bouncy head
+    daemon.head.rotation.y = Math.sin(daemon.animPhase * 0.8) * 0.1;
+  }
+
+  private animateIdle(daemon: DaemonInstance, dt: number): void {
+    daemon.speed *= 1 - Math.min(dt * 5, 1);
+    daemon.animPhase += dt * 0.5;
+
+    // Very subtle idle sway
+    daemon.bodyMesh.rotation.z = Math.sin(daemon.animPhase * 0.3) * 0.01;
+
+    // Legs return to rest
+    daemon.leftLeg.rotation.x *= 1 - Math.min(dt * 3, 1);
+    daemon.rightLeg.rotation.x *= 1 - Math.min(dt * 3, 1);
+
+    // Clean up thinking dots if present
+    if (daemon.thinkingDots) {
+      daemon.group.remove(daemon.thinkingDots);
+      daemon.thinkingDots = null;
+    }
+  }
+
+  // ─── Gesture Overlay (during chat/emote events) ────────────────
+
+  private animateGesture(daemon: DaemonInstance): void {
+    const phase = daemon.gesturePhase;
+    const mood = daemon.mood;
+
+    // Mood-specific gesture overlay
+    switch (mood) {
+      case "excited":
+        // Bouncy arms
+        daemon.leftArm.rotation.x = -0.8 + Math.sin(phase * 2) * 0.3;
+        daemon.rightArm.rotation.x = -0.8 + Math.sin(phase * 2 + 1) * 0.3;
+        daemon.group.position.y = Math.abs(Math.sin(phase * 3)) * 0.03;
+        break;
+      case "happy":
+        // Light arm movement
+        daemon.leftArm.rotation.z = 0.1 + Math.sin(phase) * 0.1;
+        daemon.rightArm.rotation.z = -0.1 - Math.sin(phase) * 0.1;
+        break;
+      case "annoyed":
+        // Tense posture, arms crossed feel
+        daemon.leftArm.rotation.x = -0.5;
+        daemon.rightArm.rotation.x = -0.5;
+        daemon.leftArm.rotation.z = 0.3;
+        daemon.rightArm.rotation.z = -0.3;
+        daemon.head.rotation.z = -0.1;
+        break;
+      case "curious":
+        // Head tilt, one arm up
+        daemon.head.rotation.z = 0.15;
+        daemon.head.rotation.x = 0.1;
+        daemon.rightArm.rotation.x = -0.6 + Math.sin(phase) * 0.1;
+        break;
+      case "bored":
+        // Slouchy, slow sway
+        daemon.bodyMesh.position.y = 0.98;
+        daemon.leftArm.rotation.x = Math.sin(phase * 0.3) * 0.05;
+        break;
+    }
+  }
+
+  private returnToRest(daemon: DaemonInstance, dt: number): void {
+    // Only apply if not in an action that controls arms
+    if (daemon.action !== "idle") return;
+
+    const lerp = Math.min(dt * 3, 1);
+    daemon.leftArm.rotation.x *= 1 - lerp;
+    daemon.leftArm.rotation.z = daemon.leftArm.rotation.z * (1 - lerp) + 0.05 * lerp;
+    daemon.rightArm.rotation.x *= 1 - lerp;
+    daemon.rightArm.rotation.z = daemon.rightArm.rotation.z * (1 - lerp) - 0.05 * lerp;
+    daemon.head.rotation.x *= 1 - lerp;
+    daemon.head.rotation.y *= 1 - lerp;
+    daemon.head.rotation.z *= 1 - lerp;
+    daemon.bodyMesh.position.y = daemon.bodyMesh.position.y * (1 - lerp) + 1.0 * lerp;
+    daemon.bodyMesh.rotation.z *= 1 - lerp;
+  }
+
+  // ─── Emote Label ──────────────────────────────────────────────
+
+  private showEmoteLabel(daemon: DaemonInstance, emote: string, color: number): void {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = 256;
+    canvas.height = 40;
+
+    const displayEmote = emote.length > 30 ? emote.slice(0, 27) + "..." : emote;
+
+    // Semi-transparent background
+    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+    ctx.beginPath();
+    ctx.roundRect(2, 2, 252, 36, 6);
+    ctx.fill();
+
+    // Emote text in mood color
+    const r = (color >> 16) & 0xff;
+    const g = (color >> 8) & 0xff;
+    const b = color & 0xff;
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.font = "italic 16px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(displayEmote, 128, 20, 240);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(1.5, 0.23, 1);
+    sprite.position.set(0, 2.6, 0);
+    daemon.group.add(sprite);
+
+    daemon.emoteLabels.push({
+      sprite,
+      createdAt: Date.now(),
+      duration: 3000,
+    });
+
+    // Max 2 emote labels
+    while (daemon.emoteLabels.length > 2) {
+      const old = daemon.emoteLabels.shift()!;
+      old.sprite.parent?.remove(old.sprite);
+      old.sprite.material.map?.dispose();
+      old.sprite.material.dispose();
+    }
+  }
+
+  // ─── Particles ────────────────────────────────────────────────
 
   private spawnEmoteParticle(daemon: DaemonInstance, color: number): void {
     const mat = new THREE.SpriteMaterial({
@@ -374,6 +677,8 @@ export class DaemonRenderer {
     });
   }
 
+  // ─── Thinking Dots ────────────────────────────────────────────
+
   private createThinkingDots(): THREE.Group {
     const group = new THREE.Group();
     for (let i = 0; i < 3; i++) {
@@ -399,10 +704,11 @@ export class DaemonRenderer {
     });
   }
 
+  // ─── Mood Indicator ───────────────────────────────────────────
+
   private updateMoodIndicator(daemon: DaemonInstance): void {
     if (!daemon.moodIndicator) return;
 
-    // Update mood indicator texture
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
     canvas.width = 32;
@@ -418,7 +724,6 @@ export class DaemonRenderer {
     ctx.arc(16, 16, 10, 0, Math.PI * 2);
     ctx.fill();
 
-    // Dispose old texture
     const oldTex = daemon.moodIndicator.material.map;
     if (oldTex) oldTex.dispose();
 
@@ -453,7 +758,19 @@ export class DaemonRenderer {
     return sprite;
   }
 
-  private createNPCBody(accentColor: number): { body: THREE.Group; accentLight: THREE.PointLight; ringMesh: THREE.Mesh } {
+  // ─── NPC Body Construction ────────────────────────────────────
+
+  private createNPCBody(accentColor: number): {
+    body: THREE.Group;
+    accentLight: THREE.PointLight;
+    ringMesh: THREE.Mesh;
+    leftArm: THREE.Mesh;
+    rightArm: THREE.Mesh;
+    head: THREE.Mesh;
+    bodyMesh: THREE.Mesh;
+    leftLeg: THREE.Mesh;
+    rightLeg: THREE.Mesh;
+  } {
     const body = new THREE.Group();
 
     const bodyMat = new THREE.MeshStandardMaterial({
@@ -469,7 +786,7 @@ export class DaemonRenderer {
       emissiveIntensity: 0.3,
     });
 
-    // Body capsule
+    // Torso (capsule)
     const bodyGeo = new THREE.CapsuleGeometry(0.2, 0.8, 8, 12);
     const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
     bodyMesh.position.y = 1.0;
@@ -483,6 +800,20 @@ export class DaemonRenderer {
     head.castShadow = true;
     body.add(head);
 
+    // Eyes (small accent-colored dots)
+    const eyeGeo = new THREE.SphereGeometry(0.02, 6, 4);
+    const eyeMat = new THREE.MeshStandardMaterial({
+      color: accentColor,
+      emissive: accentColor,
+      emissiveIntensity: 0.5,
+    });
+    const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
+    leftEye.position.set(-0.05, 1.62, 0.12);
+    body.add(leftEye);
+    const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
+    rightEye.position.set(0.05, 1.62, 0.12);
+    body.add(rightEye);
+
     // Accent ring (role indicator)
     const ringGeo = new THREE.TorusGeometry(0.18, 0.02, 8, 16);
     const ring = new THREE.Mesh(ringGeo, accentMat);
@@ -495,6 +826,29 @@ export class DaemonRenderer {
     glowLight.position.set(0, 1.75, 0);
     body.add(glowLight);
 
+    // Arms (capsules, attached at shoulder height)
+    const armGeo = new THREE.CapsuleGeometry(0.035, 0.4, 6, 8);
+
+    const leftArm = new THREE.Mesh(armGeo, bodyMat);
+    leftArm.position.set(-0.25, 1.2, 0);
+    leftArm.rotation.z = 0.05; // Slight outward rest
+    body.add(leftArm);
+
+    const rightArm = new THREE.Mesh(armGeo, bodyMat);
+    rightArm.position.set(0.25, 1.2, 0);
+    rightArm.rotation.z = -0.05;
+    body.add(rightArm);
+
+    // Hands (small spheres at arm tips)
+    const handGeo = new THREE.SphereGeometry(0.04, 6, 4);
+    const leftHand = new THREE.Mesh(handGeo, accentMat);
+    leftHand.position.y = -0.24;
+    leftArm.add(leftHand);
+
+    const rightHand = new THREE.Mesh(handGeo, accentMat);
+    rightHand.position.y = -0.24;
+    rightArm.add(rightHand);
+
     // Legs
     const legGeo = new THREE.CylinderGeometry(0.05, 0.06, 0.5, 6);
     const leftLeg = new THREE.Mesh(legGeo, bodyMat);
@@ -504,7 +858,16 @@ export class DaemonRenderer {
     rightLeg.position.set(0.08, 0.3, 0);
     body.add(rightLeg);
 
-    return { body, accentLight: glowLight, ringMesh: ring };
+    // Feet (small accent-colored cylinders)
+    const footGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.03, 6);
+    const leftFoot = new THREE.Mesh(footGeo, accentMat);
+    leftFoot.position.y = -0.26;
+    leftLeg.add(leftFoot);
+    const rightFoot = new THREE.Mesh(footGeo, accentMat);
+    rightFoot.position.y = -0.26;
+    rightLeg.add(rightFoot);
+
+    return { body, accentLight: glowLight, ringMesh: ring, leftArm, rightArm, head, bodyMesh, leftLeg, rightLeg };
   }
 
   private createNameLabel(name: string): THREE.Sprite {

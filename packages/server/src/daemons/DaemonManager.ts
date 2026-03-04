@@ -65,6 +65,8 @@ interface DaemonInstance {
   relationships: Map<string, Relationship>; // targetId -> relationship
   // Overhear
   lastOverhearReaction: number;
+  // Spontaneous gestures
+  spontaneousGestureTimer: number;
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -161,6 +163,7 @@ export class DaemonManager {
       conversationCooldown: 10 + Math.random() * 20, // stagger initial conversations
       relationships: new Map(),
       lastOverhearReaction: 0,
+      spontaneousGestureTimer: 15 + Math.random() * 25, // 15-40s initial delay
       isMuted: false,
       isRecalled: false,
     };
@@ -333,6 +336,9 @@ export class DaemonManager {
 
       // Idle chatter (all types)
       this.tickIdleChatter(daemon, dt, players);
+
+      // Spontaneous personality-based gestures
+      this.tickSpontaneousGestures(daemon, dt, players);
 
       // Daemon-daemon conversations
       this.tickDaemonConversations(daemon, dt);
@@ -514,6 +520,146 @@ export class DaemonManager {
     }
     const defaults = ["*yawns*", "*looks around*", "*taps foot*", "*stretches*", "*sighs*"];
     return defaults[Math.floor(Math.random() * defaults.length)];
+  }
+
+  // ─── Spontaneous Gestures ──────────────────────────────────────
+
+  private tickSpontaneousGestures(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
+    if (daemon.isMuted) return;
+    if (daemon.state.currentAction !== "idle") return;
+
+    daemon.spontaneousGestureTimer -= dt;
+    if (daemon.spontaneousGestureTimer > 0) return;
+
+    // Reset timer (20-60s between gestures, faster if players nearby)
+    const hasNearby = players.some(
+      (p) => this.distance(daemon.state.currentPosition, p.position) < daemon.behavior.interactionRadius * 2,
+    );
+    daemon.spontaneousGestureTimer = hasNearby
+      ? 12 + Math.random() * 20  // More active when watched
+      : 30 + Math.random() * 40; // Less active when alone
+
+    // Pick a gesture based on personality and mood
+    const { emote, action, mood } = this.pickSpontaneousGesture(daemon);
+
+    // Broadcast the emote
+    this.broadcast("daemon_emote", {
+      type: "daemon_emote" as const,
+      daemonId: daemon.state.daemonId,
+      emote,
+      mood,
+    });
+
+    // Set action temporarily
+    if (action !== "idle") {
+      daemon.state.currentAction = action;
+      daemon.state.mood = mood;
+
+      this.broadcast("daemon_move", {
+        type: "daemon_move" as const,
+        daemonId: daemon.state.daemonId,
+        position: daemon.state.currentPosition,
+        rotation: daemon.state.currentRotation,
+        action,
+      });
+
+      // Return to idle after gesture
+      setTimeout(() => {
+        if (daemon.state.currentAction === action) {
+          daemon.state.currentAction = "idle";
+          this.broadcast("daemon_move", {
+            type: "daemon_move" as const,
+            daemonId: daemon.state.daemonId,
+            position: daemon.state.currentPosition,
+            rotation: daemon.state.currentRotation,
+            action: "idle",
+          });
+        }
+      }, 2500);
+    }
+  }
+
+  private pickSpontaneousGesture(daemon: DaemonInstance): {
+    emote: string;
+    action: DaemonAction;
+    mood: DaemonMood;
+  } {
+    const personality = daemon.state.definition.personality;
+    const currentMood = daemon.state.mood;
+    const traits = personality?.traits || [];
+    const interests = personality?.interests || [];
+    const quirks = personality?.quirks || [];
+
+    // Personality-driven gestures
+    const gestures: Array<{ emote: string; action: DaemonAction; mood: DaemonMood; weight: number }> = [];
+
+    // Quirk-based (highest priority — most unique)
+    for (const quirk of quirks) {
+      gestures.push({ emote: `*${quirk}*`, action: "emoting", mood: currentMood, weight: 3 });
+    }
+
+    // Trait-based
+    if (traits.includes("friendly") || traits.includes("cheerful")) {
+      gestures.push({ emote: "*waves to no one in particular*", action: "waving", mood: "happy", weight: 2 });
+      gestures.push({ emote: "*hums a cheerful tune*", action: "emoting", mood: "happy", weight: 1 });
+    }
+    if (traits.includes("nervous") || traits.includes("anxious")) {
+      gestures.push({ emote: "*fidgets nervously*", action: "emoting", mood: "curious", weight: 2 });
+      gestures.push({ emote: "*glances around quickly*", action: "emoting", mood: "neutral", weight: 1 });
+    }
+    if (traits.includes("wise") || traits.includes("thoughtful") || traits.includes("philosophical")) {
+      gestures.push({ emote: "*strokes chin thoughtfully*", action: "thinking", mood: "curious", weight: 2 });
+      gestures.push({ emote: "*gazes at the sky*", action: "thinking", mood: "neutral", weight: 1 });
+    }
+    if (traits.includes("grumpy") || traits.includes("stern")) {
+      gestures.push({ emote: "*crosses arms*", action: "emoting", mood: "annoyed", weight: 2 });
+      gestures.push({ emote: "*mutters under breath*", action: "emoting", mood: "annoyed", weight: 1 });
+    }
+    if (traits.includes("energetic") || traits.includes("excitable")) {
+      gestures.push({ emote: "*bounces on heels*", action: "emoting", mood: "excited", weight: 2 });
+      gestures.push({ emote: "*does a little spin*", action: "emoting", mood: "excited", weight: 1 });
+    }
+    if (traits.includes("mysterious") || traits.includes("secretive")) {
+      gestures.push({ emote: "*glances around conspiratorially*", action: "thinking", mood: "curious", weight: 2 });
+    }
+    if (traits.includes("dramatic") || traits.includes("theatrical")) {
+      gestures.push({ emote: "*strikes a dramatic pose*", action: "emoting", mood: "excited", weight: 2 });
+      gestures.push({ emote: "*gestures grandly at nothing*", action: "waving", mood: "happy", weight: 1 });
+    }
+
+    // Interest-based
+    for (const interest of interests.slice(0, 3)) {
+      gestures.push({
+        emote: `*thinks about ${interest}*`,
+        action: "thinking",
+        mood: "curious",
+        weight: 1,
+      });
+    }
+
+    // Mood-based fallbacks
+    if (currentMood === "happy") {
+      gestures.push({ emote: "*smiles contentedly*", action: "emoting", mood: "happy", weight: 1 });
+    } else if (currentMood === "bored") {
+      gestures.push({ emote: "*yawns*", action: "emoting", mood: "bored", weight: 2 });
+      gestures.push({ emote: "*kicks a pebble*", action: "emoting", mood: "bored", weight: 1 });
+    } else if (currentMood === "curious") {
+      gestures.push({ emote: "*peers at something interesting*", action: "thinking", mood: "curious", weight: 1 });
+    }
+
+    // Universal fallbacks
+    gestures.push({ emote: "*adjusts posture*", action: "idle", mood: currentMood, weight: 1 });
+    gestures.push({ emote: "*looks around the street*", action: "emoting", mood: "neutral", weight: 1 });
+
+    // Weighted random selection
+    const totalWeight = gestures.reduce((sum, g) => sum + g.weight, 0);
+    let pick = Math.random() * totalWeight;
+    for (const gesture of gestures) {
+      pick -= gesture.weight;
+      if (pick <= 0) return gesture;
+    }
+
+    return gestures[gestures.length - 1];
   }
 
   // ─── Behavior Ticks ───────────────────────────────────────────

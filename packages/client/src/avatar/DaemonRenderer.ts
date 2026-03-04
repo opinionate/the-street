@@ -77,6 +77,12 @@ interface DaemonInstance {
   // Thinking dots animation
   thinkingDots: THREE.Group | null;
   thinkingPhase: number;
+  // Status indicators
+  trailTimer: number;
+  trailParticles: Array<{ mesh: THREE.Sprite; life: number }>;
+  sleepZs: THREE.Group | null;
+  sleepPhase: number;
+  lastAction: DaemonAction;
 }
 
 export class DaemonRenderer {
@@ -151,6 +157,11 @@ export class DaemonRenderer {
       gesturePhase: 0,
       thinkingDots: null,
       thinkingPhase: 0,
+      trailTimer: 0,
+      trailParticles: [],
+      sleepZs: null,
+      sleepPhase: 0,
+      lastAction: "idle",
     });
   }
 
@@ -308,6 +319,12 @@ export class DaemonRenderer {
         // Return arms to rest
         this.returnToRest(daemon, dt);
       }
+
+      // Status indicators
+      this.updateStatusIndicators(daemon, dt);
+
+      // Track action transitions
+      daemon.lastAction = daemon.action;
 
       // Accent light decay
       if (daemon.accentLight.intensity > 0.3) {
@@ -594,6 +611,116 @@ export class DaemonRenderer {
     daemon.head.rotation.z *= 1 - lerp;
     daemon.bodyMesh.position.y = daemon.bodyMesh.position.y * (1 - lerp) + 1.0 * lerp;
     daemon.bodyMesh.rotation.z *= 1 - lerp;
+  }
+
+  // ─── Status Indicators ─────────────────────────────────────────
+
+  private updateStatusIndicators(daemon: DaemonInstance, dt: number): void {
+    // Walking trail particles
+    if (daemon.action === "walking") {
+      daemon.trailTimer -= dt;
+      if (daemon.trailTimer <= 0) {
+        daemon.trailTimer = 0.3; // Spawn every 0.3s
+        this.spawnTrailParticle(daemon);
+      }
+    }
+
+    // Update trail particles
+    for (let i = daemon.trailParticles.length - 1; i >= 0; i--) {
+      const p = daemon.trailParticles[i];
+      p.life -= dt;
+      const alpha = p.life / 1.5;
+      (p.mesh.material as THREE.SpriteMaterial).opacity = alpha * 0.4;
+      p.mesh.scale.setScalar(0.04 + (1 - alpha) * 0.02);
+      if (p.life <= 0) {
+        this.scene.remove(p.mesh);
+        (p.mesh.material as THREE.SpriteMaterial).dispose();
+        daemon.trailParticles.splice(i, 1);
+      }
+    }
+
+    // Sleep Z's when bored
+    if (daemon.mood === "bored" && daemon.action === "idle") {
+      if (!daemon.sleepZs) {
+        daemon.sleepZs = this.createSleepZs();
+        daemon.sleepZs.position.set(0.2, 1.8, 0);
+        daemon.group.add(daemon.sleepZs);
+      }
+      daemon.sleepPhase += dt * 1.5;
+      this.updateSleepZs(daemon.sleepZs, daemon.sleepPhase);
+    } else if (daemon.sleepZs) {
+      daemon.group.remove(daemon.sleepZs);
+      daemon.sleepZs = null;
+    }
+
+    // Ring rotation when walking (subtle spin effect)
+    if (daemon.action === "walking") {
+      daemon.ringMesh.rotation.z += dt * 2;
+    }
+  }
+
+  private spawnTrailParticle(daemon: DaemonInstance): void {
+    const accentColor = (daemon.ringMesh.material as THREE.MeshStandardMaterial).color.getHex();
+    const mat = new THREE.SpriteMaterial({
+      color: accentColor,
+      transparent: true,
+      opacity: 0.3,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.setScalar(0.04);
+    // Place at daemon's world position (feet level)
+    sprite.position.copy(daemon.group.position);
+    sprite.position.y = 0.05;
+    this.scene.add(sprite); // Add to scene, not group, so it stays in place
+
+    daemon.trailParticles.push({ mesh: sprite, life: 1.5 });
+
+    // Limit trail length
+    while (daemon.trailParticles.length > 15) {
+      const old = daemon.trailParticles.shift()!;
+      this.scene.remove(old.mesh);
+      (old.mesh.material as THREE.SpriteMaterial).dispose();
+    }
+  }
+
+  private createSleepZs(): THREE.Group {
+    const group = new THREE.Group();
+    for (let i = 0; i < 3; i++) {
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d")!;
+      canvas.width = 24;
+      canvas.height = 24;
+
+      ctx.fillStyle = "#6666aa";
+      ctx.font = `bold ${14 - i * 2}px system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("z", 12, 12);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: false,
+      });
+      const sprite = new THREE.Sprite(mat);
+      sprite.scale.set(0.12 - i * 0.02, 0.12 - i * 0.02, 1);
+      sprite.position.set(i * 0.1, i * 0.15, 0);
+      group.add(sprite);
+    }
+    return group;
+  }
+
+  private updateSleepZs(zGroup: THREE.Group, phase: number): void {
+    zGroup.children.forEach((z, i) => {
+      const offset = i * 1.2;
+      const cyclePhase = (phase + offset) % 3;
+      // Float up and fade
+      (z as THREE.Sprite).position.y = i * 0.15 + Math.sin(cyclePhase * 0.7) * 0.1;
+      const alpha = 0.3 + Math.sin(cyclePhase) * 0.2;
+      ((z as THREE.Sprite).material as THREE.SpriteMaterial).opacity = alpha;
+    });
   }
 
   // ─── Emote Label ──────────────────────────────────────────────

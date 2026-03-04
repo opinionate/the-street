@@ -38,6 +38,8 @@ interface Relationship {
   interactionCount: number;
   gossip: string[];        // Things heard about this entity from others
   topicHistory: string[];  // Topics this person likes talking about (learned from interactions)
+  nickname?: string;       // Personal nickname given after enough interactions
+  lastSeen: number;        // timestamp of last interaction/sighting
   lastUpdated: number;
 }
 
@@ -1584,7 +1586,8 @@ export class DaemonManager {
     }
 
     // Generate the remark based on role, relationship, and context
-    const playerName = closestPlayer.displayName || "stranger";
+    const realName = closestPlayer.displayName || "stranger";
+    const playerName = this.getDisplayName(daemon, closestPlayer.userId, realName);
     const relationship = daemon.relationships.get(closestPlayer.userId);
     const remark = this.pickProactiveRemark(daemon, playerName, relationship?.sentiment || "neutral", relationship);
     if (!remark) return;
@@ -3627,12 +3630,14 @@ export class DaemonManager {
         interactionCount: 0,
         gossip: [],
         topicHistory: [],
+        lastSeen: Date.now(),
         lastUpdated: Date.now(),
       };
       daemon.relationships.set(targetId, rel);
     }
 
     rel.interactionCount++;
+    rel.lastSeen = Date.now();
     rel.lastUpdated = Date.now();
 
     // Sentiment ladder: wary < neutral < curious < amused < friendly
@@ -3731,12 +3736,14 @@ export class DaemonManager {
         interactionCount: 0,
         gossip: [],
         topicHistory: [],
+        lastSeen: Date.now(),
         lastUpdated: Date.now(),
       };
       daemon.relationships.set(targetId, rel);
     }
 
     rel.interactionCount++;
+    rel.lastSeen = Date.now();
     rel.lastUpdated = Date.now();
     rel.targetName = targetName; // Update in case name changed
 
@@ -3758,13 +3765,94 @@ export class DaemonManager {
     if (rel.interactionCount >= 5 && rel.sentiment === "neutral") {
       rel.sentiment = "friendly";
     }
+
+    // Generate nickname after enough interactions (only for players)
+    if (!rel.nickname && rel.targetType === "player" && rel.interactionCount >= 4 &&
+        (rel.sentiment === "friendly" || rel.sentiment === "amused")) {
+      rel.nickname = this.generateNickname(daemon, targetName, rel);
+
+      // Announce the nickname
+      setTimeout(() => {
+        this.broadcastDaemonChat(daemon, `You know what? I'm going to call you "${rel.nickname}" from now on.`);
+      }, 1500);
+    }
+  }
+
+  /** Generate a personality-appropriate nickname for a player */
+  private generateNickname(daemon: DaemonInstance, playerName: string, rel: Relationship): string {
+    const traits = daemon.state.definition.personality?.traits || [];
+    const behaviorType = daemon.behavior.type;
+    const topics = rel.topicHistory || [];
+    const shortName = playerName.length > 5 ? playerName.slice(0, 4) : playerName;
+
+    // Topic-based nicknames (most personal)
+    if (topics.length > 0) {
+      const topic = topics[0];
+      const topicNicks: string[] = [
+        `${topic}-fan`,
+        `the ${topic} enthusiast`,
+        `Captain ${topic.charAt(0).toUpperCase() + topic.slice(1)}`,
+        `${shortName} the ${topic} lover`,
+      ];
+      if (Math.random() < 0.5) return pick(topicNicks);
+    }
+
+    // Role-based nicknames
+    if (behaviorType === "guard") {
+      return pick([
+        "Citizen " + shortName,
+        `my favorite civilian`,
+        "regular",
+        `the reliable one`,
+      ]);
+    }
+    if (behaviorType === "shopkeeper") {
+      return pick([
+        "best customer",
+        `VIP`,
+        `${shortName} the loyal`,
+        "my number one",
+      ]);
+    }
+    if (behaviorType === "socialite") {
+      return pick([
+        `bestie`,
+        `darling`,
+        `${shortName}-dear`,
+        "my people",
+      ]);
+    }
+
+    // Personality-based
+    if (traits.includes("dramatic") || traits.includes("theatrical")) {
+      return pick([`the protagonist`, `star player`, `main character`]);
+    }
+    if (traits.includes("grumpy")) {
+      return pick([`kid`, `the persistent one`, `you again`]);
+    }
+
+    // Generic affectionate
+    return pick([
+      `friend`,
+      `pal`,
+      `${shortName}-buddy`,
+      `the regular`,
+      `neighbor`,
+    ]);
+  }
+
+  /** Get the name a daemon uses for a target — nickname if available, else real name */
+  private getDisplayName(daemon: DaemonInstance, targetId: string, realName: string): string {
+    const rel = daemon.relationships.get(targetId);
+    return rel?.nickname || realName;
   }
 
   /** Build a concise memory summary for AI context about a specific player */
   private buildMemorySummary(daemon: DaemonInstance, playerId: string, playerName: string, rel: Relationship): string {
     const parts: string[] = [];
 
-    parts.push(`[Memory: You've spoken to ${playerName} ${rel.interactionCount} time${rel.interactionCount > 1 ? "s" : ""}.`);
+    const displayName = rel.nickname ? `${playerName} (you call them "${rel.nickname}")` : playerName;
+    parts.push(`[Memory: You've spoken to ${displayName} ${rel.interactionCount} time${rel.interactionCount > 1 ? "s" : ""}.`);
     parts.push(`You feel ${rel.sentiment} toward them.`);
 
     // Include learned topics
@@ -3872,6 +3960,7 @@ export class DaemonManager {
         interactionCount: 0,
         gossip: [] as string[],
         topicHistory: [] as string[],
+        lastSeen: 0,
         lastUpdated: Date.now(),
       };
       if (!existingRel) {
@@ -4059,6 +4148,7 @@ export class DaemonManager {
               interactionCount: mem.interaction_count || 1,
               gossip,
               topicHistory: [],
+              lastSeen: new Date(mem.last_interaction).getTime(),
               lastUpdated: new Date(mem.last_interaction).getTime(),
             });
           }
@@ -4095,6 +4185,7 @@ export class DaemonManager {
             interactionCount: drel.interaction_count || 1,
             gossip,
             topicHistory: [],
+            lastSeen: new Date(drel.last_interaction).getTime(),
             lastUpdated: new Date(drel.last_interaction).getTime(),
           });
         }

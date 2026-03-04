@@ -67,6 +67,9 @@ interface DaemonInstance {
   lastOverhearReaction: number;
   // Spontaneous gestures
   spontaneousGestureTimer: number;
+  // Gathering
+  gatheringTarget: Vector3 | null;  // cluster midpoint to drift toward
+  gatheringTimer: number;           // cooldown before next group chatter
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -189,6 +192,8 @@ export class DaemonManager {
       relationships: new Map(),
       lastOverhearReaction: 0,
       spontaneousGestureTimer: 15 + Math.random() * 25, // 15-40s initial delay
+      gatheringTarget: null,
+      gatheringTimer: 20 + Math.random() * 20,
       isMuted: false,
       isRecalled: false,
     };
@@ -493,6 +498,9 @@ export class DaemonManager {
 
     // Detect daemon-daemon proximity for new conversations
     this.detectDaemonProximity();
+
+    // Detect and animate daemon gatherings (3+ idle daemons nearby)
+    this.tickGatherings(dt, players);
 
     // Process AI conversation queue
     this.processAiQueue();
@@ -1128,6 +1136,143 @@ export class DaemonManager {
     }
 
     return bestTarget;
+  }
+
+  // ─── Gathering Behavior ──────────────────────────────────────
+
+  private tickGatherings(dt: number, players: PlayerInfo[]): void {
+    const GATHER_RADIUS = 15;      // daemons within this range form a group
+    const MIN_GROUP_SIZE = 3;
+    const GATHER_DRIFT_SPEED = 0.6; // slow drift toward center
+    const GATHER_CHAT_INTERVAL = 25; // seconds between group chatter
+
+    // Build groups of nearby idle daemons
+    const visited = new Set<string>();
+    const daemonList = Array.from(this.daemons.entries());
+
+    for (const [seedId, seed] of daemonList) {
+      if (visited.has(seedId)) continue;
+      if (seed.isMuted || seed.state.currentAction !== "idle") continue;
+      if (seed.isReturningHome) continue;
+
+      // Find all idle daemons near this seed
+      const group: Array<[string, DaemonInstance]> = [[seedId, seed]];
+      visited.add(seedId);
+
+      for (const [otherId, other] of daemonList) {
+        if (visited.has(otherId)) continue;
+        if (other.isMuted || other.state.currentAction !== "idle") continue;
+        if (other.isReturningHome) continue;
+
+        const dist = this.distance(seed.state.currentPosition, other.state.currentPosition);
+        if (dist <= GATHER_RADIUS) {
+          group.push([otherId, other]);
+          visited.add(otherId);
+        }
+      }
+
+      if (group.length < MIN_GROUP_SIZE) continue;
+
+      // Calculate group midpoint
+      let cx = 0, cz = 0;
+      for (const [, d] of group) {
+        cx += d.state.currentPosition.x;
+        cz += d.state.currentPosition.z;
+      }
+      cx /= group.length;
+      cz /= group.length;
+      const center: Vector3 = { x: cx, y: 0, z: cz };
+
+      // Each daemon in the group drifts toward center and faces it
+      for (const [, d] of group) {
+        const dist = this.distance(d.state.currentPosition, center);
+
+        // Drift toward center if > 3 units away (don't stack on top of each other)
+        if (dist > 3.0) {
+          d.gatheringTarget = center;
+          const dx = center.x - d.state.currentPosition.x;
+          const dz = center.z - d.state.currentPosition.z;
+          const step = Math.min(GATHER_DRIFT_SPEED * dt, dist - 2.5);
+          if (step > 0.01) {
+            d.state.currentPosition.x += (dx / dist) * step;
+            d.state.currentPosition.z += (dz / dist) * step;
+          }
+        }
+
+        // Face center
+        const dx = center.x - d.state.currentPosition.x;
+        const dz = center.z - d.state.currentPosition.z;
+        if (dx !== 0 || dz !== 0) {
+          d.state.currentRotation = Math.atan2(-dx, -dz);
+        }
+      }
+
+      // Check if a player approaches — group disperses
+      const playerNearby = players.some(
+        p => this.distance(p.position, center) < GATHER_RADIUS * 0.6,
+      );
+      if (playerNearby) {
+        // Clear gathering targets — daemons will resume normal behavior
+        for (const [, d] of group) {
+          d.gatheringTarget = null;
+        }
+        continue;
+      }
+
+      // Occasional group chatter — one daemon says something to the group
+      for (const [, d] of group) {
+        d.gatheringTimer -= dt;
+      }
+
+      const speaker = group.find(([, d]) => d.gatheringTimer <= 0);
+      if (speaker) {
+        const [, spk] = speaker;
+        spk.gatheringTimer = GATHER_CHAT_INTERVAL + Math.random() * 15;
+
+        // Pick a casual group remark based on personality
+        const remark = this.pickGroupRemark(spk, group.length);
+        if (remark) {
+          this.broadcastDaemonChat(spk, remark);
+        }
+      }
+    }
+  }
+
+  /** Pick a casual remark for a daemon chatting in a group */
+  private pickGroupRemark(daemon: DaemonInstance, groupSize: number): string | null {
+    const personality = daemon.state.definition.personality;
+    const interests = personality?.interests || [];
+    const quirks = personality?.quirks || [];
+    const name = daemon.state.definition.name;
+
+    const remarks: string[] = [];
+
+    // Interest-based remarks
+    for (const interest of interests.slice(0, 2)) {
+      remarks.push(`Anyone else into ${interest}? No? Just me?`);
+      remarks.push(`I've been thinking about ${interest} lately...`);
+    }
+
+    // Quirk-based
+    for (const quirk of quirks.slice(0, 2)) {
+      remarks.push(`*${quirk}*`);
+    }
+
+    // Generic group remarks
+    remarks.push(`Nice crowd today. ${groupSize} of us hanging out!`);
+    remarks.push(`So... what's everyone up to?`);
+    remarks.push(`This is nice. Just... standing here. Together.`);
+    remarks.push(`*looks around the group*`);
+
+    // Gossip-based — share something if daemon knows gossip
+    for (const [, rel] of daemon.relationships) {
+      if (rel.gossip.length > 0 && rel.targetType === "player") {
+        remarks.push(`Hey, did you all hear about ${rel.targetName}?`);
+        break;
+      }
+    }
+
+    return remarks[Math.floor(Math.random() * remarks.length)];
   }
 
   // ─── Free Roaming ─────────────────────────────────────────────

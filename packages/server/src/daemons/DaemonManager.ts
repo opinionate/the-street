@@ -1019,6 +1019,9 @@ export class DaemonManager {
       // Missing players — wonder about friends who haven't been around
       this.tickMissingPlayers(daemon, dt);
 
+      // Secret sharing — whisper gossip to trusted players
+      this.tickSecretSharing(daemon, dt, players);
+
       // Daemon-daemon conversations
       this.tickDaemonConversations(daemon, dt);
     }
@@ -1989,6 +1992,96 @@ export class DaemonManager {
         }
       }
     }
+  }
+
+  // ─── Secret Sharing ──────────────────────────────────────────
+
+  /** Daemons share secrets/gossip with trusted players, rewarding relationship building */
+  private tickSecretSharing(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
+    if (daemon.isMuted) return;
+    if (daemon.state.currentAction !== "idle") return;
+    if (Math.random() > 0.004) return; // Very rare per tick
+
+    const radius = daemon.behavior.interactionRadius;
+
+    for (const player of players) {
+      const dist = this.distance(daemon.state.currentPosition, player.position);
+      if (dist > radius) continue;
+
+      const rel = daemon.relationships.get(player.userId);
+      if (!rel) continue;
+      if (rel.sentiment !== "friendly") continue;
+      if (rel.interactionCount < 5) continue; // Need deep trust
+
+      const name = this.getDisplayName(daemon, player.userId, player.displayName || "friend");
+      const secret = this.generateSecret(daemon, player.userId);
+      if (!secret) continue;
+
+      // Whisper the secret — only targeted to this player
+      this.broadcastDaemonChat(daemon, `*whispers to ${name}* ${secret}`, player.userId);
+      daemon.state.mood = "curious";
+      daemon.moodDecayTimer = 0;
+      return; // One secret at a time
+    }
+  }
+
+  /** Generate a secret based on what the daemon knows */
+  private generateSecret(daemon: DaemonInstance, recipientId: string): string | null {
+    const secrets: string[] = [];
+    const daemonName = daemon.state.definition.name;
+
+    // Gossip about other daemons
+    for (const [targetId, rel] of daemon.relationships) {
+      if (targetId === recipientId) continue;
+      if (rel.targetType !== "daemon") continue;
+
+      if (rel.sentiment === "wary") {
+        secrets.push(`Just between us... I don't trust ${rel.targetName}. Something's off about them.`);
+        secrets.push(`Keep this quiet, but ${rel.targetName} and I don't get along. Watch your back around them.`);
+      }
+      if (rel.sentiment === "friendly" && rel.interactionCount > 3) {
+        secrets.push(`You know ${rel.targetName}? We're actually pretty close. If you need anything, mention ${daemonName} sent you.`);
+      }
+      if (rel.gossip.length > 0) {
+        const gossipItem = rel.gossip[rel.gossip.length - 1];
+        secrets.push(`I heard something... ${gossipItem}. Don't tell anyone I told you.`);
+      }
+    }
+
+    // Gossip about other players
+    for (const [targetId, rel] of daemon.relationships) {
+      if (targetId === recipientId) continue;
+      if (rel.targetType !== "player") continue;
+
+      if (rel.sentiment === "wary") {
+        secrets.push(`Heads up — ${rel.targetName} isn't exactly popular around here. Be careful.`);
+      }
+      if (rel.sentiment === "friendly" && rel.topicHistory.length > 0) {
+        const topic = rel.topicHistory[0];
+        secrets.push(`${rel.targetName} is really into ${topic}. Good conversation starter if you meet them.`);
+      }
+    }
+
+    // Role-specific secrets
+    if (daemon.behavior.type === "shopkeeper") {
+      secrets.push("I keep the really good stuff hidden. But for you? I'll make an exception next time.");
+      secrets.push("Business tip: the best time to trade is in the morning. Prices are always better.");
+    }
+    if (daemon.behavior.type === "guard") {
+      secrets.push("There's a spot near the edge of the inner ring that's... interesting. I've been keeping an eye on it.");
+      secrets.push("I've seen some strange patterns lately. Can't say more, but stay vigilant.");
+    }
+    if (daemon.behavior.type === "socialite") {
+      secrets.push("Between you and me, the drama on this street is better than any show.");
+      secrets.push("I know everyone's business here. Ask me anything — but not out loud!");
+    }
+
+    // World observations
+    secrets.push(`I've been here a while now, and honestly? You're one of the good ones.`);
+    secrets.push(`The Street has its own rhythm. Once you learn it, everything makes more sense.`);
+
+    if (secrets.length === 0) return null;
+    return secrets[Math.floor(Math.random() * secrets.length)];
   }
 
   // ─── Thought Bubbles ─────────────────────────────────────────

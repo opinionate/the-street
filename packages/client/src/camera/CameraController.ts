@@ -3,14 +3,14 @@ import * as THREE from "three";
 export class CameraController {
   private camera: THREE.PerspectiveCamera;
   private target = new THREE.Vector3();
-  private distance = 14;
+  private distance = 4; // spawn zoomed in
   private damping = 5;
   private yaw = 0; // horizontal rotation
-  private pitch = 0.4; // vertical angle (radians, 0 = level, positive = looking down)
+  private pitch = 0.3; // vertical angle (radians, 0 = level, positive = looking down)
 
-  private static MIN_PITCH = 0.05; // slight above level — prevents going under floor
+  private static MIN_PITCH = 0.0; // allow nearly level view
   private static MAX_PITCH = 1.2; // look down limit
-  private static MIN_DISTANCE = 4;
+  private static MIN_DISTANCE = 2;
   private static MAX_DISTANCE = 40;
 
   constructor(camera: THREE.PerspectiveCamera) {
@@ -37,7 +37,9 @@ export class CameraController {
 
     const offsetX = horizontalDist * Math.sin(this.yaw);
     const offsetZ = horizontalDist * Math.cos(this.yaw);
-    const offsetY = verticalDist + 2; // +2 base height above avatar feet
+    // Base height scales with distance: close-up = shoulder height, far = higher overview
+    const baseHeight = 1.2 + (this.distance - CameraController.MIN_DISTANCE) * 0.06;
+    const offsetY = verticalDist + baseHeight;
 
     const desiredPos = new THREE.Vector3(
       this.target.x + offsetX,
@@ -45,8 +47,8 @@ export class CameraController {
       this.target.z + offsetZ
     );
 
-    // Clamp camera above ground
-    desiredPos.y = Math.max(desiredPos.y, 1.0);
+    // Clamp camera just above ground
+    desiredPos.y = Math.max(desiredPos.y, 0.3);
 
     // Smooth follow
     this.camera.position.lerp(desiredPos, Math.min(dt * this.damping, 1));

@@ -1571,12 +1571,13 @@ export class DaemonManager {
 
   // ─── Memory Persistence ─────────────────────────────────────
 
-  /** Save all daemon moods and positions to DB (called periodically and on shutdown) */
+  /** Save all daemon moods, positions, memories, and relationships to DB */
   async saveState(): Promise<void> {
     const pool = getPool();
     const promises: Promise<void>[] = [];
 
     for (const [id, daemon] of this.daemons) {
+      // Save mood and position
       const p = pool.query(
         `UPDATE daemons SET
            current_mood = $2,
@@ -1594,32 +1595,69 @@ export class DaemonManager {
       ).then(() => {});
       promises.push(p);
 
-      // Save conversation memories for players
+      // Save conversation memories and relationships for players
       for (const [playerId, memory] of daemon.conversationMemory) {
         if (memory.messages.length === 0) continue;
 
-        // Summarize the last few messages
         const lastMessages = memory.messages.slice(-4);
         const summary = lastMessages.map(m =>
           `${m.role === "daemon" ? daemon.state.definition.name : memory.playerName}: ${m.content}`
         ).join(" | ");
 
+        const rel = daemon.relationships.get(playerId);
+
         const mp = pool.query(
-          `INSERT INTO daemon_memories (daemon_id, player_id, memory_type, summary, mood, interaction_count, last_interaction)
-           VALUES ($1, $2, 'conversation', $3, $4, $5, now())
-           ON CONFLICT ON CONSTRAINT daemon_memories_pkey DO NOTHING`,
-          [id, playerId, summary.slice(0, 500), daemon.state.mood, memory.messages.length],
+          `INSERT INTO daemon_memories (daemon_id, player_id, memory_type, summary, mood, interaction_count, last_interaction, player_name, sentiment, gossip)
+           VALUES ($1, $2, 'conversation', $3, $4, $5, now(), $6, $7, $8)
+           ON CONFLICT (daemon_id, player_id) WHERE player_id IS NOT NULL
+           DO UPDATE SET summary = $3, mood = $4, interaction_count = $5,
+                         last_interaction = now(), player_name = $6,
+                         sentiment = $7, gossip = $8`,
+          [
+            id,
+            playerId,
+            summary.slice(0, 500),
+            daemon.state.mood,
+            memory.messages.length,
+            memory.playerName,
+            rel?.sentiment || "neutral",
+            JSON.stringify(rel?.gossip || []),
+          ],
         ).then(() => {}).catch(() => {
           // If player_id is not a valid UUID (e.g. session ID), skip
         });
         promises.push(mp);
+      }
+
+      // Save daemon-daemon relationships (even without conversation memory)
+      for (const [targetId, rel] of daemon.relationships) {
+        if (rel.targetType !== "daemon") continue;
+        if (rel.interactionCount < 1) continue;
+
+        const dp = pool.query(
+          `INSERT INTO daemon_memories (daemon_id, other_daemon_id, memory_type, summary, mood, interaction_count, last_interaction, sentiment, gossip)
+           VALUES ($1, $2, 'daemon_relationship', $3, $4, $5, now(), $6, $7)
+           ON CONFLICT (daemon_id, other_daemon_id) WHERE other_daemon_id IS NOT NULL
+           DO UPDATE SET summary = $3, mood = $4, interaction_count = $5,
+                         last_interaction = now(), sentiment = $6, gossip = $7`,
+          [
+            id,
+            targetId,
+            `${rel.interactionCount} chats, feels ${rel.sentiment}`,
+            daemon.state.mood,
+            rel.interactionCount,
+            rel.sentiment,
+            JSON.stringify(rel.gossip || []),
+          ],
+        ).then(() => {}).catch(() => {});
+        promises.push(dp);
       }
     }
 
     await Promise.allSettled(promises);
   }
 
-  /** Load saved moods from DB after loadDaemons */
+  /** Load saved moods, memories, and relationships from DB after loadDaemons */
   async loadSavedState(): Promise<void> {
     const pool = getPool();
 
@@ -1640,26 +1678,80 @@ export class DaemonManager {
         // Non-critical
       }
 
-      // Load recent memories for context
+      // Load player memories and relationships
       try {
         const { rows: memories } = await pool.query(
-          `SELECT player_id, summary, interaction_count, last_interaction
+          `SELECT player_id, player_name, summary, interaction_count, sentiment, gossip, last_interaction
            FROM daemon_memories
-           WHERE daemon_id = $1 AND memory_type = 'conversation'
+           WHERE daemon_id = $1 AND memory_type = 'conversation' AND player_id IS NOT NULL
            ORDER BY last_interaction DESC
-           LIMIT 10`,
+           LIMIT 20`,
           [id],
         );
 
         for (const mem of memories) {
-          if (mem.player_id && !daemon.conversationMemory.has(mem.player_id)) {
+          if (!mem.player_id) continue;
+
+          // Restore conversation memory
+          if (!daemon.conversationMemory.has(mem.player_id)) {
             daemon.conversationMemory.set(mem.player_id, {
               playerId: mem.player_id,
-              playerName: "Returning visitor",
+              playerName: mem.player_name || "Returning visitor",
               messages: [{ role: "daemon" as const, content: `[Previous meeting: ${mem.summary}]` }],
               lastInteraction: new Date(mem.last_interaction).getTime(),
             });
           }
+
+          // Restore relationship
+          if (!daemon.relationships.has(mem.player_id)) {
+            const validSentiments: Sentiment[] = ["friendly", "neutral", "wary", "curious", "amused"];
+            const sentiment = validSentiments.includes(mem.sentiment as Sentiment)
+              ? (mem.sentiment as Sentiment) : "neutral";
+            const gossip = Array.isArray(mem.gossip) ? mem.gossip : [];
+
+            daemon.relationships.set(mem.player_id, {
+              targetName: mem.player_name || "Unknown",
+              targetType: "player",
+              sentiment,
+              interactionCount: mem.interaction_count || 1,
+              gossip,
+              lastUpdated: new Date(mem.last_interaction).getTime(),
+            });
+          }
+        }
+      } catch {
+        // Non-critical
+      }
+
+      // Load daemon-daemon relationships
+      try {
+        const { rows: drels } = await pool.query(
+          `SELECT other_daemon_id, summary, interaction_count, sentiment, gossip, last_interaction
+           FROM daemon_memories
+           WHERE daemon_id = $1 AND memory_type = 'daemon_relationship' AND other_daemon_id IS NOT NULL
+           ORDER BY last_interaction DESC
+           LIMIT 20`,
+          [id],
+        );
+
+        for (const drel of drels) {
+          if (!drel.other_daemon_id) continue;
+          if (daemon.relationships.has(drel.other_daemon_id)) continue;
+
+          const otherDaemon = this.daemons.get(drel.other_daemon_id);
+          const validSentiments: Sentiment[] = ["friendly", "neutral", "wary", "curious", "amused"];
+          const sentiment = validSentiments.includes(drel.sentiment as Sentiment)
+            ? (drel.sentiment as Sentiment) : "neutral";
+          const gossip = Array.isArray(drel.gossip) ? drel.gossip : [];
+
+          daemon.relationships.set(drel.other_daemon_id, {
+            targetName: otherDaemon?.state.definition.name || "Unknown NPC",
+            targetType: "daemon",
+            sentiment,
+            interactionCount: drel.interaction_count || 1,
+            gossip,
+            lastUpdated: new Date(drel.last_interaction).getTime(),
+          });
         }
       } catch {
         // Non-critical

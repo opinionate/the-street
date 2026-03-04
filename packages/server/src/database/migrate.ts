@@ -227,6 +227,19 @@ const MIGRATIONS: { name: string; up: string }[] = [
       ALTER TABLE daemons ADD COLUMN IF NOT EXISTS total_interactions INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    name: "012_daemon_relationships_and_memory_upsert",
+    up: `
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_memories_unique_player
+        ON daemon_memories(daemon_id, player_id) WHERE player_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_memories_unique_daemon
+        ON daemon_memories(daemon_id, other_daemon_id) WHERE other_daemon_id IS NOT NULL;
+
+      ALTER TABLE daemon_memories ADD COLUMN IF NOT EXISTS player_name TEXT;
+      ALTER TABLE daemon_memories ADD COLUMN IF NOT EXISTS sentiment TEXT NOT NULL DEFAULT 'neutral';
+      ALTER TABLE daemon_memories ADD COLUMN IF NOT EXISTS gossip JSONB NOT NULL DEFAULT '[]';
+    `,
+  },
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

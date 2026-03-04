@@ -514,10 +514,14 @@ export class DaemonManager {
 
     // Get or create conversation memory
     let memory = daemon.conversationMemory.get(playerId);
-    if (!memory || now - memory.lastInteraction > 300_000) {
-      // New conversation or stale (>5 min)
+    if (!memory) {
       memory = { playerId, playerName: playerName || "Traveler", messages: [], lastInteraction: now };
       daemon.conversationMemory.set(playerId, memory);
+    } else if (now - memory.lastInteraction > 300_000) {
+      // Stale conversation (>5 min) — keep DB-loaded context but clear recent chat
+      const dbContext = memory.messages.filter(m => m.content.startsWith("[Previous meeting:"));
+      memory.messages = dbContext;
+      memory.lastInteraction = now;
     }
     if (playerName) memory.playerName = playerName;
     memory.lastInteraction = now;
@@ -929,10 +933,12 @@ export class DaemonManager {
       daemon.greetCooldowns.set(player.userId, now);
       daemon.state.currentAction = "waving";
       daemon.state.targetPlayerId = player.userId;
-      daemon.state.mood = "happy";
       daemon.moodDecayTimer = 0;
 
-      const message = daemon.behavior.greetingMessage || "Hello, traveler!";
+      // Personalized greeting for returning players
+      const message = this.getPersonalizedGreeting(daemon, player);
+      daemon.state.mood = daemon.relationships.has(player.userId) ? "excited" : "happy";
+
       this.broadcastDaemonChat(daemon, message, player.userId);
 
       setTimeout(() => {
@@ -942,6 +948,54 @@ export class DaemonManager {
 
       break;
     }
+  }
+
+  /** Generate a personalized greeting based on relationship history */
+  private getPersonalizedGreeting(daemon: DaemonInstance, player: PlayerInfo): string {
+    const rel = daemon.relationships.get(player.userId);
+    const name = player.displayName || "traveler";
+
+    // No prior relationship — default greeting
+    if (!rel || rel.interactionCount < 1) {
+      return daemon.behavior.greetingMessage || `Hello, ${name}!`;
+    }
+
+    // Returning player — personalize based on sentiment and interaction count
+    const personality = daemon.state.definition.personality;
+    const style = personality?.speechStyle || "casual";
+
+    if (rel.sentiment === "friendly" && rel.interactionCount >= 3) {
+      const friendlyGreetings = [
+        `${name}! Great to see you again!`,
+        `Welcome back, ${name}! I was hoping you'd visit.`,
+        `Ah, my friend ${name}! How have you been?`,
+        `${name}! Always a pleasure.`,
+      ];
+      return friendlyGreetings[Math.floor(Math.random() * friendlyGreetings.length)];
+    }
+
+    if (rel.sentiment === "wary") {
+      const waryGreetings = [
+        `Oh... ${name}. You're back.`,
+        `${name}. Hmm.`,
+        `*eyes ${name} cautiously* Hello again.`,
+      ];
+      return waryGreetings[Math.floor(Math.random() * waryGreetings.length)];
+    }
+
+    if (rel.sentiment === "curious") {
+      return `${name}! I've been thinking about our last chat...`;
+    }
+
+    if (rel.sentiment === "amused") {
+      return `Ha! ${name} returns! What trouble today?`;
+    }
+
+    // Neutral returning player
+    if (style.includes("formal") || style.includes("eloquent")) {
+      return `Welcome back, ${name}. A pleasure as always.`;
+    }
+    return `Hey ${name}, good to see you again!`;
   }
 
   private tickShopkeeper(daemon: DaemonInstance, _dt: number, _players: PlayerInfo[]): void {

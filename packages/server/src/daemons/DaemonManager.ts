@@ -4405,12 +4405,109 @@ export class DaemonManager {
       return;
     }
 
-    const msgs = daemon.behavior.idleMessages;
-    const msg = msgs[Math.floor(Math.random() * msgs.length)];
+    // 30% chance: environment comment instead of configured idle message
+    let msg: string;
+    if (Math.random() < 0.3) {
+      const envComment = this.getEnvironmentComment(daemon);
+      if (envComment) {
+        msg = envComment;
+      } else {
+        const msgs = daemon.behavior.idleMessages;
+        msg = msgs[Math.floor(Math.random() * msgs.length)];
+      }
+    } else {
+      const msgs = daemon.behavior.idleMessages;
+      msg = msgs[Math.floor(Math.random() * msgs.length)];
+    }
 
     this.broadcastDaemonChat(daemon, msg);
 
     daemon.idleTimer = 15 + Math.random() * 20;
+  }
+
+  /** Generate an observation about the environment */
+  private getEnvironmentComment(daemon: DaemonInstance): string | null {
+    const time = this.lastTimeOfDay;
+    const traits = daemon.state.definition.personality?.traits || [];
+    const name = daemon.state.definition.name;
+    const type = daemon.behavior.type;
+
+    // Nearby objects to comment on
+    const nearbyObjs = this.worldObjects.filter(
+      o => this.distance(daemon.state.currentPosition, o.position) < 20,
+    );
+
+    // Time-based environment observations
+    if (time === "morning") {
+      return pick([
+        "The light is really beautiful this time of day.",
+        "Fresh start, fresh possibilities.",
+        "*takes a deep breath* Morning air hits different.",
+        "The street is always prettiest at dawn.",
+        null, // chance of no comment
+      ]);
+    }
+
+    if (time === "evening") {
+      return pick([
+        "Look at that sunset...",
+        "The evening light makes everything look golden.",
+        "Days go by fast on The Street.",
+        "*watches the shadows lengthen*",
+        "Another day winding down.",
+        null,
+      ]);
+    }
+
+    if (time === "night") {
+      if (traits.includes("romantic") || traits.includes("philosophical")) {
+        return pick([
+          "The stars are out. Makes you feel small, doesn't it?",
+          "Nights like this make me think deep thoughts.",
+          "There's something magical about the street at night.",
+        ]);
+      }
+      return pick([
+        "The street looks completely different at night.",
+        "Quiet nights are the best nights.",
+        "*looks up at the sky* Clear tonight.",
+        "The shadows have shadows at this hour.",
+        null,
+      ]);
+    }
+
+    // Object-based observations
+    if (nearbyObjs.length > 0 && Math.random() < 0.4) {
+      const obj = nearbyObjs[Math.floor(Math.random() * nearbyObjs.length)];
+      return pick([
+        `That ${obj.name} really ties the area together.`,
+        `*glances at the ${obj.name}* Interesting placement.`,
+        `I've been looking at that ${obj.name}. Kinda growing on me.`,
+      ]);
+    }
+
+    // Generic ambient observations
+    if (type === "guard") {
+      return pick([
+        "All sectors secure.",
+        "The perimeter looks good today.",
+        "*surveys the area with satisfaction*",
+      ]);
+    }
+
+    if (type === "shopkeeper") {
+      return pick([
+        "Location, location, location. This spot is perfect.",
+        "*admires the street* Prime real estate right here.",
+      ]);
+    }
+
+    return pick([
+      "I like this spot. Good vibes.",
+      "The Street has its own rhythm if you listen.",
+      `${name}'s corner of the world, right here.`,
+      null,
+    ]);
   }
 
   // ─── AI Queue ─────────────────────────────────────────────────

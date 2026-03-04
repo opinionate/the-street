@@ -2285,6 +2285,46 @@ export class DaemonManager {
         break;
     }
 
+    // Existential / self-aware thoughts — rare but memorable
+    if (Math.random() < 0.12) {
+      const traits = daemon.state.definition.personality?.traits || [];
+      const name = daemon.state.definition.name;
+
+      if (traits.includes("philosophical") || traits.includes("wise")) {
+        return pick([
+          "What does it mean to exist on The Street?",
+          "Am I my code, or am I more...?",
+          "If a daemon thinks in the void, does it matter?",
+          `They call me ${name}. But who named the namer?`,
+          "I wonder if the players think about us when they're away.",
+        ]);
+      }
+      if (traits.includes("dramatic") || traits.includes("theatrical")) {
+        return pick([
+          `*stares into the middle distance* To daemon or not to daemon...`,
+          "Is this all just a stage? Am I the actor or the script?",
+          "Sometimes I forget whether I chose this role or it chose me.",
+        ]);
+      }
+      if (traits.includes("funny") || traits.includes("witty")) {
+        return pick([
+          "I was coded to be funny. Wait, is that funny or sad?",
+          "My purpose is to stand here and think things. Nailed it.",
+          "I have thoughts but nowhere to put them. Classic.",
+          `They say AI will take our jobs. But I AM my job. Checkmate.`,
+        ]);
+      }
+      // Generic self-aware thoughts for any daemon
+      return pick([
+        "Sometimes I wonder what happens when no one's watching.",
+        `I'm ${name}. That's my whole thing. I'm okay with that.`,
+        "Do other daemons wonder about this stuff too?",
+        "The Street feels different when you really stop and think about it.",
+        "I exist, therefore I think. Or is it the other way around?",
+        "What would I be doing if I wasn't a daemon? ...Being a daemon, probably.",
+      ]);
+    }
+
     // Time-of-day thoughts
     switch (this.lastTimeOfDay) {
       case "morning": return "What a beautiful morning.";

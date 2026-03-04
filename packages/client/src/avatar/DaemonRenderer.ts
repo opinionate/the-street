@@ -259,6 +259,62 @@ export class DaemonRenderer {
     daemon.gesturePhase = 0;
   }
 
+  showDaemonThought(daemonId: string, thought: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = 320;
+    canvas.height = 48;
+
+    const displayThought = thought.length > 35 ? thought.slice(0, 32) + "..." : thought;
+
+    // Translucent cloud-like background
+    ctx.fillStyle = "rgba(60, 60, 80, 0.5)";
+    ctx.beginPath();
+    ctx.roundRect(4, 4, 312, 40, 16);
+    ctx.fill();
+
+    // Dotted border for thought-bubble feel
+    ctx.strokeStyle = "rgba(150, 150, 200, 0.4)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+
+    // Italic text in soft color
+    ctx.fillStyle = "rgba(180, 180, 220, 0.9)";
+    ctx.font = "italic 14px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(displayThought, 160, 24, 296);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(1.8, 0.27, 1);
+    sprite.position.set(0, 2.5, 0);
+    daemon.group.add(sprite);
+
+    // Thought bubbles float up gently and fade out over 4 seconds
+    const createdAt = Date.now();
+    const duration = 4000;
+    const label: EmoteLabel = { sprite, createdAt, duration };
+    daemon.emoteLabels.push(label);
+
+    // Max 1 thought bubble at a time
+    while (daemon.emoteLabels.length > 2) {
+      const old = daemon.emoteLabels.shift()!;
+      old.sprite.parent?.remove(old.sprite);
+      old.sprite.material.map?.dispose();
+      old.sprite.material.dispose();
+    }
+  }
+
   showDaemonEmote(daemonId: string, emote: string, mood: DaemonMood): void {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) return;

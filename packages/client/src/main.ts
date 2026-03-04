@@ -154,6 +154,9 @@ async function init() {
     onDaemonEmote(daemonId, emote, mood) {
       daemonRenderer.showDaemonEmote(daemonId, emote, mood);
     },
+    onDaemonThought(daemonId, thought) {
+      daemonRenderer.showDaemonThought(daemonId, thought);
+    },
   });
 
   // Click-to-interact with daemons via raycasting

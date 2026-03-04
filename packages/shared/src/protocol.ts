@@ -70,7 +70,8 @@ export type ServerMessage =
   | { type: "daemon_despawn"; daemonId: string }
   | { type: "daemon_move"; daemonId: string; position: Vector3; rotation: number; action: string }
   | { type: "daemon_chat"; daemonId: string; daemonName: string; content: string; targetUserId?: string; targetDaemonId?: string }
-  | { type: "daemon_emote"; daemonId: string; emote: string; mood: DaemonMood };
+  | { type: "daemon_emote"; daemonId: string; emote: string; mood: DaemonMood }
+  | { type: "daemon_thought"; daemonId: string; thought: string };
 
 // Message type constants for Colyseus
 export const MSG = {
@@ -96,6 +97,7 @@ export const MSG = {
   DAEMON_MOVE: "daemon_move",
   DAEMON_CHAT: "daemon_chat",
   DAEMON_EMOTE: "daemon_emote",
+  DAEMON_THOUGHT: "daemon_thought",
 } as const;
 
 // Rate limits

@@ -36,6 +36,7 @@ export interface NetworkCallbacks {
   onDaemonMove?: (daemonId: string, position: Vector3, rotation: number, action: string) => void;
   onDaemonChat?: (daemonId: string, daemonName: string, content: string, targetUserId?: string, targetDaemonId?: string) => void;
   onDaemonEmote?: (daemonId: string, emote: string, mood: DaemonMood) => void;
+  onDaemonThought?: (daemonId: string, thought: string) => void;
 }
 
 export class NetworkManager {
@@ -125,6 +126,10 @@ export class NetworkManager {
 
     this.room.onMessage("daemon_emote", (data) => {
       this.callbacks.onDaemonEmote?.(data.daemonId, data.emote, data.mood);
+    });
+
+    this.room.onMessage("daemon_thought", (data) => {
+      this.callbacks.onDaemonThought?.(data.daemonId, data.thought);
     });
 
     this.room.onError((code, message) => {

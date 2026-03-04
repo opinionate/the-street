@@ -81,6 +81,8 @@ interface DaemonInstance {
   // Proactive engagement
   proactiveTimer: number;           // countdown to next unsolicited player remark
   proactiveCooldowns: Map<string, number>; // playerId -> timestamp of last proactive remark
+  // Thought bubbles
+  thoughtTimer: number;             // countdown to next thought
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -235,6 +237,7 @@ export class DaemonManager {
       routineTimer: 30 + Math.random() * 30,
       proactiveTimer: 20 + Math.random() * 40,
       proactiveCooldowns: new Map(),
+      thoughtTimer: 45 + Math.random() * 60,
       isMuted: false,
       isRecalled: false,
     };
@@ -803,6 +806,9 @@ export class DaemonManager {
 
       // Spontaneous personality-based gestures
       this.tickSpontaneousGestures(daemon, dt, players);
+
+      // Thought bubbles — visible internal state
+      this.tickThoughts(daemon, dt, players);
 
       // Daemon-daemon conversations
       this.tickDaemonConversations(daemon, dt);
@@ -1409,6 +1415,115 @@ export class DaemonManager {
       case "afternoon": return "Afternoon! Fine day.";
       case "evening": return "Getting late... enjoy the evening.";
       case "night": return "*nods quietly*";
+    }
+  }
+
+  // ─── Thought Bubbles ─────────────────────────────────────────
+
+  private tickThoughts(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
+    if (daemon.isMuted) return;
+    if (daemon.state.currentAction !== "idle") return;
+
+    daemon.thoughtTimer -= dt;
+    if (daemon.thoughtTimer > 0) return;
+
+    // Reset: thoughts every 45-120s, less frequent at night
+    daemon.thoughtTimer = (45 + Math.random() * 75) * getTimeChattinessFactor(this.lastTimeOfDay);
+
+    const thought = this.generateThought(daemon, players);
+    if (!thought) return;
+
+    this.broadcast("daemon_thought", {
+      type: "daemon_thought" as const,
+      daemonId: daemon.state.daemonId,
+      thought,
+    });
+  }
+
+  private generateThought(daemon: DaemonInstance, players: PlayerInfo[]): string | null {
+    const mood = daemon.state.mood;
+    const type = daemon.behavior.type;
+    const interests = daemon.state.definition.personality?.interests || [];
+    const quirks = daemon.state.definition.personality?.quirks || [];
+    const pos = daemon.state.currentPosition;
+
+    // Count nearby entities
+    const nearbyPlayers = players.filter(p => this.distance(pos, p.position) < 20);
+    const nearbyDaemons = Array.from(this.daemons.values()).filter(
+      d => d !== daemon && !d.isMuted && this.distance(pos, d.state.currentPosition) < 20,
+    );
+
+    // Lonely thoughts
+    if (nearbyPlayers.length === 0 && nearbyDaemons.length === 0) {
+      return pick([
+        "Where did everyone go...?",
+        "It's quiet here...",
+        "I wonder if anyone will come by.",
+        "Just me and my thoughts.",
+      ]);
+    }
+
+    // Mood-driven thoughts
+    if (mood === "bored") {
+      return pick([
+        "So boring...",
+        "Nothing ever happens around here.",
+        "I need something to do.",
+        "...*sigh*...",
+      ]);
+    }
+
+    if (mood === "excited") {
+      return pick([
+        "What a great day!",
+        "I feel like something fun is about to happen!",
+        "Everything's going so well!",
+      ]);
+    }
+
+    if (mood === "annoyed") {
+      return pick([
+        "Ugh, some people...",
+        "I need a break.",
+        "Deep breaths...",
+      ]);
+    }
+
+    // Interest-driven thoughts
+    if (interests.length > 0 && Math.random() < 0.4) {
+      const interest = interests[Math.floor(Math.random() * interests.length)];
+      return pick([
+        `I should learn more about ${interest}...`,
+        `I wonder what's new in ${interest}.`,
+        `${interest}... that reminds me.`,
+      ]);
+    }
+
+    // Quirk-driven thoughts
+    if (quirks.length > 0 && Math.random() < 0.3) {
+      const quirk = quirks[Math.floor(Math.random() * quirks.length)];
+      return `${quirk}...`;
+    }
+
+    // Role-driven thoughts
+    switch (type) {
+      case "guard":
+        return pick(["All clear.", "Stay vigilant.", "Something feels off..."]);
+      case "shopkeeper":
+        return pick(["I should restock soon.", "Business is slow today.", "What a fine display."]);
+      case "socialite":
+        if (nearbyPlayers.length > 0) return "Ooh, who should I talk to?";
+        return "I need to find someone fun to chat with.";
+      default:
+        break;
+    }
+
+    // Time-of-day thoughts
+    switch (this.lastTimeOfDay) {
+      case "morning": return "What a beautiful morning.";
+      case "afternoon": return "The afternoon sun is nice.";
+      case "evening": return "Getting late...";
+      case "night": return "I should probably get some rest...";
     }
   }
 

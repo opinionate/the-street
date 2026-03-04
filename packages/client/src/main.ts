@@ -596,9 +596,10 @@ async function init() {
       velocity: { x: 0, y: 0, z: 0 },
     });
     // Generate local plot snapshots so building works offline
+    // Use valid UUID v4 format to avoid postgres type errors if connection recovers
     const placements = getAllPlotPositions();
     plotSnapshots = placements.map((placement, i) => ({
-      uuid: `local-plot-${i}`,
+      uuid: `00000000-0000-4000-8000-${i.toString().padStart(12, "0")}`,
       ownerId: "local",
       ownerName: "You",
       neighborhood: "dev",

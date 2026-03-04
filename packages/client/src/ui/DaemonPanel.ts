@@ -14,6 +14,8 @@ export class DaemonPanel {
   onGenerate: ((description: string) => Promise<void>) | null = null;
   onCreate: ((definition: unknown) => Promise<void>) | null = null;
   onDelete: ((daemonId: string) => Promise<void>) | null = null;
+  onRecall: ((daemonId: string) => void) | null = null;
+  onToggleRoam: ((daemonId: string, enabled: boolean) => void) | null = null;
 
   constructor() {
     this.container = document.createElement("div");
@@ -22,9 +24,9 @@ export class DaemonPanel {
       position: fixed;
       top: 60px;
       right: 20px;
-      width: 350px;
+      width: 370px;
       max-height: calc(100vh - 100px);
-      background: rgba(0, 0, 0, 0.88);
+      background: rgba(0, 0, 0, 0.9);
       border: 1px solid rgba(68, 255, 136, 0.3);
       border-radius: 8px;
       padding: 16px;
@@ -62,7 +64,7 @@ export class DaemonPanel {
     // Input
     this.input = document.createElement("textarea");
     this.input.placeholder =
-      "Describe your NPC daemon...\ne.g. A friendly shopkeeper who sells potions and tells bad jokes";
+      "Describe your NPC daemon...\ne.g. A witty roaming bard who plays invisible instruments and gossips about everyone";
     this.input.style.cssText = `
       width: 100%;
       height: 80px;
@@ -96,7 +98,7 @@ export class DaemonPanel {
       margin-top: 8px;
       font-size: 12px;
       color: rgba(255, 255, 255, 0.7);
-      max-height: 150px;
+      max-height: 200px;
       overflow-y: auto;
       display: none;
       padding: 8px;
@@ -109,48 +111,28 @@ export class DaemonPanel {
     this.generateBtn = document.createElement("button");
     this.generateBtn.textContent = "Generate Daemon";
     this.generateBtn.disabled = true;
-    this.generateBtn.style.cssText = `
-      margin-top: 8px;
-      width: 100%;
-      padding: 10px;
-      background: #228844;
-      border: none;
-      border-radius: 4px;
-      color: white;
-      font-size: 14px;
-      font-weight: bold;
-      cursor: pointer;
-      opacity: 0.5;
-    `;
+    this.generateBtn.style.cssText = this.btnStyle("#228844", "0.5");
     this.generateBtn.addEventListener("click", () => this.handleGenerate());
     this.container.appendChild(this.generateBtn);
 
     // Create button (hidden until generation)
     this.createBtn = document.createElement("button");
     this.createBtn.textContent = "Place Daemon";
-    this.createBtn.style.cssText = `
-      margin-top: 6px;
-      width: 100%;
-      padding: 10px;
-      background: #44ff88;
-      border: none;
-      border-radius: 4px;
-      color: black;
-      font-size: 14px;
-      font-weight: bold;
-      cursor: pointer;
-      display: none;
-    `;
+    this.createBtn.style.cssText = this.btnStyle("#44ff88", "1") + "display: none; color: black;";
     this.createBtn.addEventListener("click", () => this.handleCreate());
     this.container.appendChild(this.createBtn);
 
+    // Divider
+    const divider = document.createElement("hr");
+    divider.style.cssText = "border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 16px 0 12px;";
+    this.container.appendChild(divider);
+
     // Existing daemons list
     const listTitle = document.createElement("div");
-    listTitle.textContent = "Daemons on this plot";
+    listTitle.textContent = "Your Daemons";
     listTitle.style.cssText = `
       font-size: 13px;
       font-weight: bold;
-      margin-top: 16px;
       margin-bottom: 8px;
       color: rgba(255, 255, 255, 0.6);
     `;
@@ -178,6 +160,22 @@ export class DaemonPanel {
     document.body.appendChild(this.container);
   }
 
+  private btnStyle(bg: string, opacity: string): string {
+    return `
+      margin-top: 8px;
+      width: 100%;
+      padding: 10px;
+      background: ${bg};
+      border: none;
+      border-radius: 4px;
+      color: white;
+      font-size: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      opacity: ${opacity};
+    `;
+  }
+
   setPlotInfo(plotUuid: string | null, ownerName: string | null): void {
     this.plotUuid = plotUuid;
     if (plotUuid && ownerName) {
@@ -201,19 +199,52 @@ export class DaemonPanel {
     this.currentDefinition = definition;
     const def = definition as Record<string, unknown>;
     const behavior = def.behavior as Record<string, unknown>;
+    const personality = def.personality as Record<string, unknown> | undefined;
 
-    this.previewArea.style.display = "block";
-    this.previewArea.innerHTML = `
-      <div style="margin-bottom:4px"><strong>Name:</strong> ${def.name}</div>
-      <div style="margin-bottom:4px"><strong>Type:</strong> ${behavior?.type}</div>
-      <div style="margin-bottom:4px"><strong>Description:</strong> ${def.description}</div>
-      <div style="margin-bottom:4px"><strong>Greeting:</strong> ${behavior?.greetingMessage || "—"}</div>
+    const escapeHtml = (t: unknown) => {
+      const div = document.createElement("div");
+      div.textContent = String(t || "");
+      return div.innerHTML;
+    };
+
+    let html = `
+      <div style="margin-bottom:6px"><strong style="color:#44ff88">${escapeHtml(def.name)}</strong></div>
+      <div style="margin-bottom:4px; color:rgba(255,255,255,0.5)"><em>${escapeHtml(def.description)}</em></div>
+      <div style="margin-bottom:4px"><strong>Role:</strong> ${escapeHtml(behavior?.type)}</div>
+      <div style="margin-bottom:4px"><strong>Greeting:</strong> "${escapeHtml(behavior?.greetingMessage || "—")}"</div>
     `;
 
+    if (personality) {
+      html += `
+        <div style="margin-top:8px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.1)">
+          <div style="color:#44ff88; font-weight:bold; margin-bottom:4px; font-size:11px">PERSONALITY</div>
+          <div style="margin-bottom:3px"><strong>Traits:</strong> ${escapeHtml((personality.traits as string[])?.join(", "))}</div>
+          <div style="margin-bottom:3px"><strong>Style:</strong> ${escapeHtml(personality.speechStyle)}</div>
+          <div style="margin-bottom:3px"><strong>Interests:</strong> ${escapeHtml((personality.interests as string[])?.join(", "))}</div>
+          <div style="margin-bottom:3px"><strong>Quirks:</strong> ${escapeHtml((personality.quirks as string[])?.join(", "))}</div>
+          <div style="margin-bottom:3px; font-style:italic; color:rgba(255,255,255,0.5)">${escapeHtml(personality.backstory)}</div>
+        </div>
+      `;
+    }
+
+    if (behavior?.roamingEnabled) {
+      html += `<div style="margin-top:4px; color:#aa44ff"><strong>Roaming:</strong> Will wander the street</div>`;
+    }
+    if (behavior?.canConverseWithDaemons !== false) {
+      html += `<div style="color:#ff44aa"><strong>Social:</strong> Will chat with other NPCs</div>`;
+    }
+
+    this.previewArea.style.display = "block";
+    this.previewArea.innerHTML = html;
     this.createBtn.style.display = "block";
   }
 
-  setDaemonList(daemons: Array<{ id: string; name: string; description: string }>): void {
+  setDaemonList(daemons: Array<{
+    id: string;
+    name: string;
+    description: string;
+    definition?: Record<string, unknown>;
+  }>): void {
     this.daemonList.innerHTML = "";
 
     if (daemons.length === 0) {
@@ -225,37 +256,125 @@ export class DaemonPanel {
     }
 
     for (const daemon of daemons) {
-      const row = document.createElement("div");
-      row.style.cssText = `
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 6px 8px;
-        margin-bottom: 4px;
+      const card = document.createElement("div");
+      card.style.cssText = `
+        padding: 10px;
+        margin-bottom: 6px;
         background: rgba(255, 255, 255, 0.06);
-        border-radius: 4px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
       `;
 
-      const info = document.createElement("div");
-      info.style.cssText = "font-size: 12px;";
-      info.innerHTML = `<strong>${daemon.name}</strong><br><span style="color:rgba(255,255,255,0.5)">${daemon.description.slice(0, 40)}</span>`;
-      row.appendChild(info);
+      // Name + type
+      const header = document.createElement("div");
+      header.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;";
 
-      const delBtn = document.createElement("button");
-      delBtn.textContent = "\u2715";
-      delBtn.style.cssText = `
-        background: rgba(255, 68, 68, 0.3);
-        border: none;
-        color: #ff4444;
-        font-size: 14px;
+      const nameEl = document.createElement("span");
+      nameEl.style.cssText = "font-weight: bold; font-size: 13px; color: #44ff88;";
+      nameEl.textContent = daemon.name;
+      header.appendChild(nameEl);
+
+      // Behavior type badge
+      const behavior = daemon.definition?.behavior as Record<string, unknown> | undefined;
+      if (behavior?.type) {
+        const badge = document.createElement("span");
+        badge.textContent = String(behavior.type);
+        badge.style.cssText = `
+          font-size: 10px;
+          padding: 2px 6px;
+          border-radius: 3px;
+          background: rgba(68, 255, 136, 0.15);
+          color: #44ff88;
+          text-transform: uppercase;
+          font-weight: bold;
+        `;
+        header.appendChild(badge);
+      }
+      card.appendChild(header);
+
+      // Description
+      const desc = document.createElement("div");
+      desc.textContent = daemon.description?.slice(0, 60) || "";
+      desc.style.cssText = "font-size: 11px; color: rgba(255,255,255,0.4); margin-bottom: 6px;";
+      card.appendChild(desc);
+
+      // Personality preview
+      const personality = daemon.definition?.personality as Record<string, unknown> | undefined;
+      if (personality?.traits) {
+        const traits = document.createElement("div");
+        traits.textContent = (personality.traits as string[]).join(" / ");
+        traits.style.cssText = "font-size: 10px; color: rgba(170, 68, 255, 0.7); margin-bottom: 6px; font-style: italic;";
+        card.appendChild(traits);
+      }
+
+      // Control buttons
+      const controls = document.createElement("div");
+      controls.style.cssText = "display: flex; gap: 4px;";
+
+      // Roaming toggle
+      const isRoaming = behavior?.roamingEnabled !== false;
+      const roamBtn = document.createElement("button");
+      roamBtn.textContent = isRoaming ? "Roaming" : "Stationary";
+      roamBtn.style.cssText = `
+        flex: 1;
+        padding: 4px 6px;
+        background: ${isRoaming ? "rgba(170, 68, 255, 0.3)" : "rgba(255, 255, 255, 0.1)"};
+        border: 1px solid ${isRoaming ? "rgba(170, 68, 255, 0.5)" : "rgba(255, 255, 255, 0.15)"};
+        color: ${isRoaming ? "#aa44ff" : "rgba(255,255,255,0.5)"};
+        font-size: 11px;
         cursor: pointer;
-        padding: 4px 8px;
         border-radius: 3px;
+        font-weight: bold;
       `;
-      delBtn.addEventListener("click", () => this.onDelete?.(daemon.id));
-      row.appendChild(delBtn);
+      roamBtn.addEventListener("click", () => {
+        this.onToggleRoam?.(daemon.id, !isRoaming);
+        roamBtn.textContent = isRoaming ? "Stationary" : "Roaming";
+      });
+      controls.appendChild(roamBtn);
 
-      this.daemonList.appendChild(row);
+      // Recall button
+      const recallBtn = document.createElement("button");
+      recallBtn.textContent = "Recall";
+      recallBtn.style.cssText = `
+        flex: 1;
+        padding: 4px 6px;
+        background: rgba(68, 136, 255, 0.2);
+        border: 1px solid rgba(68, 136, 255, 0.4);
+        color: #4488ff;
+        font-size: 11px;
+        cursor: pointer;
+        border-radius: 3px;
+        font-weight: bold;
+      `;
+      recallBtn.addEventListener("click", () => {
+        this.onRecall?.(daemon.id);
+        recallBtn.textContent = "Recalled!";
+        setTimeout(() => { recallBtn.textContent = "Recall"; }, 2000);
+      });
+      controls.appendChild(recallBtn);
+
+      // Delete button
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "Delete";
+      delBtn.style.cssText = `
+        padding: 4px 8px;
+        background: rgba(255, 68, 68, 0.2);
+        border: 1px solid rgba(255, 68, 68, 0.4);
+        color: #ff4444;
+        font-size: 11px;
+        cursor: pointer;
+        border-radius: 3px;
+        font-weight: bold;
+      `;
+      delBtn.addEventListener("click", () => {
+        if (confirm(`Delete ${daemon.name}?`)) {
+          this.onDelete?.(daemon.id);
+        }
+      });
+      controls.appendChild(delBtn);
+
+      card.appendChild(controls);
+      this.daemonList.appendChild(card);
     }
   }
 
@@ -288,14 +407,14 @@ export class DaemonPanel {
 
     this.generateBtn.disabled = true;
     this.generateBtn.textContent = "Generating...";
-    this.status.textContent = "AI is designing your daemon...";
+    this.status.textContent = "AI is designing your daemon's personality and appearance...";
     this.status.style.color = "#44ff88";
     this.createBtn.style.display = "none";
     this.previewArea.style.display = "none";
 
     try {
       await this.onGenerate?.(description);
-      this.status.textContent = "Daemon generated! Review and place.";
+      this.status.textContent = "Daemon generated! Review personality and place.";
       this.status.style.color = "#44ff88";
     } catch (err) {
       const message = err instanceof Error ? err.message : "Generation failed";
@@ -316,7 +435,7 @@ export class DaemonPanel {
 
     try {
       await this.onCreate?.(this.currentDefinition);
-      this.status.textContent = "Daemon placed!";
+      this.status.textContent = "Daemon placed! It may start roaming the street.";
       this.status.style.color = "#44ff88";
       this.input.value = "";
       this.previewArea.style.display = "none";

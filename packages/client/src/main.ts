@@ -323,6 +323,14 @@ async function init() {
     if (plotUuid) loadPlotDaemons(plotUuid);
   };
 
+  daemonPanel.onRecall = (daemonId) => {
+    network.sendDaemonRecall(daemonId);
+  };
+
+  daemonPanel.onToggleRoam = (daemonId, enabled) => {
+    network.sendDaemonToggleRoam(daemonId, enabled);
+  };
+
   async function loadPlotDaemons(plotUuid: string) {
     try {
       const res = await fetch(`${apiUrl}/api/daemons/plot/${plotUuid}`);

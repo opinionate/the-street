@@ -86,6 +86,11 @@ interface DaemonInstance {
   thoughtTimer: number;             // countdown to next thought
   // Emotional contagion
   contagionTimer: number;           // countdown to next contagion check
+  // Territory
+  turfCenter: Vector3;              // center of this daemon's claimed territory
+  turfRadius: number;               // how far they consider "theirs"
+  turfTimer: number;                // countdown to next territorial check
+  timeAwayFromTurf: number;         // how long they've been away from home turf
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -247,6 +252,10 @@ export class DaemonManager {
       proactiveCooldowns: new Map(),
       thoughtTimer: 45 + Math.random() * 60,
       contagionTimer: CONTAGION_INTERVAL * Math.random(),
+      turfCenter: { ...state.currentPosition },
+      turfRadius: behavior.type === "guard" ? 25 : behavior.type === "shopkeeper" ? 15 : 20,
+      turfTimer: 20 + Math.random() * 20,
+      timeAwayFromTurf: 0,
       isMuted: false,
       isRecalled: false,
     };
@@ -919,6 +928,9 @@ export class DaemonManager {
 
       // Reputation announcements — gossip about players to other players
       this.tickReputationAnnouncements(daemon, dt, players);
+
+      // Territorial awareness — daemons protect and prefer their turf
+      this.tickTerritory(daemon, dt);
 
       // Spontaneous personality-based gestures
       this.tickSpontaneousGestures(daemon, dt, players);
@@ -1884,6 +1896,85 @@ export class DaemonManager {
       case "afternoon": return "The afternoon sun is nice.";
       case "evening": return "Getting late...";
       case "night": return "I should probably get some rest...";
+    }
+  }
+
+  // ─── Territorial Behavior ──────────────────────────────────────
+
+  /** Daemons develop attachment to their turf and react to intruders */
+  private tickTerritory(daemon: DaemonInstance, dt: number): void {
+    if (daemon.isMuted) return;
+
+    // Track time away from turf
+    const distFromTurf = this.distance(daemon.state.currentPosition, daemon.turfCenter);
+    if (distFromTurf > daemon.turfRadius) {
+      daemon.timeAwayFromTurf += dt;
+    } else {
+      daemon.timeAwayFromTurf = Math.max(0, daemon.timeAwayFromTurf - dt * 2); // recover faster
+    }
+
+    daemon.turfTimer -= dt;
+    if (daemon.turfTimer > 0) return;
+    daemon.turfTimer = 15 + Math.random() * 15;
+
+    // Homesickness — daemons that have been away too long get anxious
+    if (daemon.timeAwayFromTurf > 120 && daemon.state.currentAction === "idle") {
+      if (Math.random() < 0.3) {
+        const emotes = [
+          "*glances back toward home turf*",
+          "*feels a pull back to familiar ground*",
+          "*shifts uncomfortably — too far from home*",
+        ];
+        this.broadcastDaemonEmote(daemon, pick(emotes), "curious");
+      }
+      // Increase chance of heading home
+      if (Math.random() < 0.2 && daemon.behavior.roamingEnabled) {
+        daemon.isReturningHome = true;
+      }
+    }
+
+    // Territorial reaction — detect other daemons on our turf
+    if (daemon.behavior.type !== "guard" && daemon.behavior.type !== "shopkeeper") return;
+
+    for (const [otherId, other] of this.daemons) {
+      if (other === daemon || other.isMuted) continue;
+      const dist = this.distance(other.state.currentPosition, daemon.turfCenter);
+      if (dist > daemon.turfRadius) continue;
+
+      // Only react to same-type competitors or strangers
+      const rel = daemon.relationships.get(otherId);
+      const isFriendly = rel?.sentiment === "friendly" || rel?.sentiment === "amused";
+      if (isFriendly) continue; // friends are welcome
+
+      const isCompetitor = other.behavior.type === daemon.behavior.type;
+      const isStranger = !rel || rel.interactionCount < 2;
+
+      if (!isCompetitor && !isStranger) continue;
+      if (Math.random() > 0.25) continue; // don't spam
+
+      const otherName = other.state.definition.name;
+      const daemonName = daemon.state.definition.name;
+
+      if (daemon.behavior.type === "guard") {
+        const reaction = pick([
+          `*eyes ${otherName} suspiciously* This is ${daemonName}'s beat.`,
+          `*steps toward ${otherName}* Just making sure everything's in order here.`,
+          `*watches ${otherName} closely* I keep the peace around these parts.`,
+        ]);
+        this.broadcastDaemonChat(daemon, reaction);
+        daemon.state.mood = "curious";
+        daemon.moodDecayTimer = 0;
+      } else if (daemon.behavior.type === "shopkeeper" && isCompetitor) {
+        const reaction = pick([
+          `*glances at ${otherName}'s setup* Competition, huh? May the best deals win.`,
+          `*mutters* Another shopkeeper in my territory...`,
+          `*adjusts display pointedly* This spot's taken, ${otherName}.`,
+          `Not enough foot traffic for two of us here... just saying.`,
+        ]);
+        this.broadcastDaemonChat(daemon, reaction);
+        daemon.state.mood = "annoyed";
+        daemon.moodDecayTimer = 0;
+      }
     }
   }
 
@@ -3131,6 +3222,21 @@ export class DaemonManager {
   private pickRoamTarget(daemon: DaemonInstance): Vector3 {
     const home = daemon.behavior.homePosition || daemon.state.definition.position;
     const maxRadius = daemon.behavior.roamRadius || 100;
+
+    // 40% chance: stay within turf (especially guards and shopkeepers)
+    const turfBias = daemon.behavior.type === "guard" ? 0.6
+      : daemon.behavior.type === "shopkeeper" ? 0.5 : 0.3;
+    if (Math.random() < turfBias) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.random() * daemon.turfRadius * 0.8;
+      const turfTarget: Vector3 = {
+        x: daemon.turfCenter.x + Math.cos(angle) * dist,
+        y: 0,
+        z: daemon.turfCenter.z + Math.sin(angle) * dist,
+      };
+      const distFromHome = this.distance(turfTarget, home);
+      if (distFromHome <= maxRadius) return turfTarget;
+    }
 
     // 25% chance: gravitate toward a friendly daemon
     if (Math.random() < 0.25) {

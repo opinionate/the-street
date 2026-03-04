@@ -263,6 +263,7 @@ export class DaemonRenderer {
 
     daemon.mood = mood;
     this.updateMoodIndicator(daemon);
+    this.updateMoodVisuals(daemon);
 
     // Spawn emote particles
     const color = MOOD_COLORS[mood] || 0x888888;
@@ -286,6 +287,36 @@ export class DaemonRenderer {
     // Trigger gesture based on mood
     daemon.gestureTimer = 1.5;
     daemon.gesturePhase = 0;
+  }
+
+  /** Update mood-driven visual properties: accent light color, body tint, animation speed */
+  private updateMoodVisuals(daemon: DaemonInstance): void {
+    const moodColor = MOOD_COLORS[daemon.mood] || 0x888888;
+
+    // Accent light shifts color to match mood
+    daemon.accentLight.color.setHex(moodColor);
+
+    // Subtle body emissive tint — very faint mood coloring
+    const bodyMat = daemon.bodyMesh.material as THREE.MeshStandardMaterial;
+    bodyMat.emissive.setHex(moodColor);
+    bodyMat.emissiveIntensity = daemon.mood === "excited" ? 0.08
+      : daemon.mood === "happy" ? 0.04
+      : daemon.mood === "annoyed" ? 0.06
+      : daemon.mood === "curious" ? 0.03
+      : 0.01; // bored/neutral barely glows
+  }
+
+  /** Get animation speed multiplier based on mood */
+  private getMoodSpeedMultiplier(mood: DaemonMood): number {
+    switch (mood) {
+      case "excited": return 1.4;
+      case "happy": return 1.1;
+      case "curious": return 1.05;
+      case "annoyed": return 0.9;
+      case "bored": return 0.6;
+      case "neutral":
+      default: return 1.0;
+    }
   }
 
   update(dt: number): void {
@@ -406,29 +437,31 @@ export class DaemonRenderer {
 
   private animateAction(daemon: DaemonInstance, dt: number): void {
     const action = daemon.action;
+    // Apply mood-based animation speed multiplier
+    const moodDt = dt * this.getMoodSpeedMultiplier(daemon.mood);
 
     switch (action) {
       case "walking":
-        this.animateWalking(daemon, dt);
+        this.animateWalking(daemon, moodDt);
         break;
       case "waving":
-        this.animateWaving(daemon, dt);
+        this.animateWaving(daemon, moodDt);
         break;
       case "laughing":
-        this.animateLaughing(daemon, dt);
+        this.animateLaughing(daemon, moodDt);
         break;
       case "thinking":
-        this.animateThinking(daemon, dt);
+        this.animateThinking(daemon, moodDt);
         break;
       case "talking":
-        this.animateTalking(daemon, dt);
+        this.animateTalking(daemon, moodDt);
         break;
       case "emoting":
-        this.animateEmoting(daemon, dt);
+        this.animateEmoting(daemon, moodDt);
         break;
       case "idle":
       default:
-        this.animateIdle(daemon, dt);
+        this.animateIdle(daemon, moodDt);
         break;
     }
   }

@@ -604,6 +604,7 @@ export class DaemonManager {
   /** Called when a player sends a chat message — daemons may overhear and react */
   onPlayerChat(playerId: string, playerName: string, content: string, position: Vector3): void {
     const now = Date.now();
+    const contentLower = content.toLowerCase();
 
     for (const [_id, daemon] of this.daemons) {
       if (daemon.isMuted) continue;
@@ -614,12 +615,60 @@ export class DaemonManager {
       const dist = this.distance(daemon.state.currentPosition, position);
       if (dist > daemon.behavior.interactionRadius * 1.5) continue;
 
-      // Random chance to react
-      if (Math.random() > OVERHEAR_CHANCE) continue;
+      // Context-aware reaction chance: higher if content matches interests/traits/role
+      let reactionChance = OVERHEAR_CHANCE;
+      let topicMatch: string | null = null;
+
+      // Check if content matches daemon interests
+      const interests = daemon.state.definition.personality?.interests || [];
+      for (const interest of interests) {
+        const words = interest.toLowerCase().split(/\s+/);
+        if (words.some(w => contentLower.includes(w))) {
+          reactionChance = 0.6; // 60% for topic match
+          topicMatch = interest;
+          break;
+        }
+      }
+
+      // Check if content mentions daemon's name
+      if (contentLower.includes(daemon.state.definition.name.toLowerCase())) {
+        reactionChance = 0.8; // 80% when mentioned by name
+        topicMatch = "being mentioned";
+      }
+
+      // Role-specific triggers
+      const type = daemon.behavior.type;
+      if (type === "guard" && /\b(danger|trouble|fight|steal|thief|help|emergency)\b/i.test(content)) {
+        reactionChance = 0.7;
+        topicMatch = "security concern";
+      }
+      if (type === "shopkeeper" && /\b(buy|sell|price|shop|deal|trade|potion|item)\b/i.test(content)) {
+        reactionChance = 0.5;
+        topicMatch = "commerce";
+      }
+
+      // Relationship affects willingness to engage
+      const rel = daemon.relationships.get(playerId);
+      if (rel?.sentiment === "friendly") reactionChance += 0.1;
+      if (rel?.sentiment === "wary") reactionChance -= 0.1;
+
+      if (Math.random() > reactionChance) continue;
 
       daemon.lastOverhearReaction = now;
 
-      // Queue AI reaction
+      // If topic matches but no AI needed, do a quick emote reaction
+      if (topicMatch && Math.random() < 0.4) {
+        const quickReaction = this.getTopicReaction(daemon, topicMatch, playerName);
+        if (quickReaction) {
+          this.broadcastDaemonEmote(daemon, quickReaction.emote, quickReaction.mood);
+          if (quickReaction.chat) {
+            this.broadcastDaemonChat(daemon, quickReaction.chat);
+          }
+          break;
+        }
+      }
+
+      // Queue AI reaction for richer responses
       this.queueAiConversation(async () => {
         try {
           const { generateDaemonResponse } = await import("@the-street/ai-service");
@@ -627,13 +676,19 @@ export class DaemonManager {
           const context = {
             recentMessages: [] as { role: "player" | "daemon"; content: string }[],
             nearbyPlayers: [playerName],
+            relationships: this.getRelationshipContext(daemon),
             currentMood: daemon.state.mood,
+            timeOfDay: this.getTimeOfDay(),
           };
+
+          const overheardPrefix = topicMatch
+            ? `[Overheard ${playerName} talking about ${topicMatch}]: "${content}"`
+            : `[Overheard nearby]: "${content}"`;
 
           const response = await generateDaemonResponse(
             daemon.state.definition,
             playerName,
-            `[Overheard nearby]: "${content}"`,
+            overheardPrefix,
             context,
           );
 
@@ -652,6 +707,39 @@ export class DaemonManager {
 
       break; // Only one daemon reacts per chat message
     }
+  }
+
+  /** Generate a quick non-AI reaction to a topic that matches daemon interests */
+  private getTopicReaction(
+    daemon: DaemonInstance,
+    topic: string,
+    playerName: string,
+  ): { emote: string; mood: DaemonMood; chat?: string } | null {
+    const name = daemon.state.definition.name;
+
+    if (topic === "being mentioned") {
+      return pick([
+        { emote: "*perks up at hearing their name*", mood: "curious" as DaemonMood, chat: `Did someone say ${name}?` },
+        { emote: "*turns toward the voice*", mood: "curious" as DaemonMood, chat: "Hmm? You called?" },
+      ]);
+    }
+
+    if (topic === "security concern") {
+      return { emote: "*snaps to attention*", mood: "curious" as DaemonMood, chat: "Trouble? Where?" };
+    }
+
+    if (topic === "commerce") {
+      return pick([
+        { emote: "*leans in with interest*", mood: "excited" as DaemonMood, chat: "Did I hear someone mention shopping?" },
+        { emote: "*straightens up*", mood: "happy" as DaemonMood, chat: "I've got the best deals right here!" },
+      ]);
+    }
+
+    // Generic interest match
+    return pick([
+      { emote: `*perks up at the mention of ${topic}*`, mood: "excited" as DaemonMood },
+      { emote: `*looks over with interest*`, mood: "curious" as DaemonMood, chat: `Oh, you're into ${topic} too?` },
+    ]);
   }
 
   tick(dt: number, players: PlayerInfo[]): void {

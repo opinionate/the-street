@@ -1451,7 +1451,7 @@ export class DaemonManager {
         continue;
       }
 
-      // Occasional group chatter — one daemon says something to the group
+      // Occasional group chatter — one daemon says something, or trigger group conversation
       for (const [, d] of group) {
         d.gatheringTimer -= dt;
       }
@@ -1461,10 +1461,14 @@ export class DaemonManager {
         const [, spk] = speaker;
         spk.gatheringTimer = GATHER_CHAT_INTERVAL + Math.random() * 15;
 
-        // Pick a casual group remark based on personality
-        const remark = this.pickGroupRemark(spk, group.length);
-        if (remark) {
-          this.broadcastDaemonChat(spk, remark);
+        // 20% chance to start a full AI group conversation instead of a one-liner
+        if (Math.random() < 0.2 && group.length >= 3 && !this.processingAi) {
+          this.startGroupConversation(group);
+        } else {
+          const remark = this.pickGroupRemark(spk, group.length);
+          if (remark) {
+            this.broadcastDaemonChat(spk, remark);
+          }
         }
       }
     }
@@ -1505,6 +1509,84 @@ export class DaemonManager {
     }
 
     return remarks[Math.floor(Math.random() * remarks.length)];
+  }
+
+  /** Start an AI-generated group conversation between 3+ gathered daemons */
+  private startGroupConversation(group: Array<[string, DaemonInstance]>): void {
+    // Set all daemons to talking
+    for (const [, d] of group) {
+      d.state.currentAction = "talking";
+      d.conversationCooldown = 60 + Math.random() * 30;
+    }
+
+    const labels = "ABCDEFGH";
+
+    this.queueAiConversation(async () => {
+      try {
+        const { generateGroupConversation } = await import("@the-street/ai-service");
+
+        const participants = group.map(([, d]) => ({
+          definition: d.state.definition,
+          context: {
+            recentMessages: [] as { role: "player" | "daemon"; content: string }[],
+            relationships: this.getRelationshipContext(d),
+            currentMood: d.state.mood,
+            timeOfDay: this.getTimeOfDay(),
+          },
+        }));
+
+        const lines = await generateGroupConversation(participants, 2);
+
+        if (lines.length === 0) {
+          // Failed — return to idle
+          for (const [, d] of group) {
+            d.state.currentAction = "idle";
+          }
+          return;
+        }
+
+        // Schedule lines with delays
+        let delay = 1.0;
+        for (const line of lines) {
+          const speakerIndex = labels.indexOf(line.speakerId);
+          const speaker = speakerIndex >= 0 && speakerIndex < group.length
+            ? group[speakerIndex] : group[0];
+          const [, spk] = speaker;
+
+          const capturedDelay = delay;
+          setTimeout(() => {
+            spk.state.mood = line.mood;
+            const fullMsg = line.emote ? `${line.emote} ${line.message}` : line.message;
+            this.broadcastDaemonChat(spk, fullMsg);
+          }, capturedDelay * 1000);
+
+          delay += 2.5 + Math.random() * 1.5;
+        }
+
+        // Return all to idle after conversation
+        const totalDuration = delay + 2;
+        setTimeout(() => {
+          for (const [, d] of group) {
+            if (d.state.currentAction === "talking") {
+              d.state.currentAction = "idle";
+            }
+          }
+          // Share gossip among all group members
+          for (let i = 0; i < group.length; i++) {
+            for (let j = i + 1; j < group.length; j++) {
+              this.updateRelationship(group[i][1], group[j][0], group[j][1].state.definition.name, "daemon", group[i][1].state.mood);
+              this.updateRelationship(group[j][1], group[i][0], group[i][1].state.definition.name, "daemon", group[j][1].state.mood);
+            }
+          }
+        }, totalDuration * 1000);
+
+      } catch (err) {
+        console.error("Group conversation generation failed:", err);
+        for (const [, d] of group) {
+          d.state.currentAction = "idle";
+        }
+      }
+    });
   }
 
   // ─── Free Roaming ─────────────────────────────────────────────

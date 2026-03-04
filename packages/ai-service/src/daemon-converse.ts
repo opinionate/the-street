@@ -249,3 +249,100 @@ Return a JSON array (no markdown fences):
     return [];
   }
 }
+
+/** Generate a multi-party conversation between 3+ daemons */
+export async function generateGroupConversation(
+  daemons: Array<{ definition: DaemonDefinition; context: ConversationContext }>,
+  linesPerDaemon: number = 2,
+): Promise<DaemonConversationLine[]> {
+  if (daemons.length < 3) return [];
+
+  const anthropic = getClient();
+  const labels = "ABCDEFGH";
+  const totalLines = daemons.length * linesPerDaemon;
+
+  let npcDescriptions = "";
+  for (let i = 0; i < daemons.length; i++) {
+    const d = daemons[i].definition;
+    const ctx = daemons[i].context;
+    npcDescriptions += `\nNPC ${labels[i]}: ${d.name}
+- Role: ${d.behavior.type}
+- Personality: ${d.personality.traits.join(", ")}
+- Speech style: ${d.personality.speechStyle}
+- Interests: ${d.personality.interests.join(", ")}
+- Quirks: ${d.personality.quirks.join(", ")}
+- Current mood: ${ctx.currentMood}\n`;
+  }
+
+  const speakerOptions = daemons.map((_, i) => `"${labels[i]}"`).join(" | ");
+
+  const system = `You are a dialogue writer for The Street, a persistent shared virtual world.
+Write a lively group conversation between ${daemons.length} NPCs who've gathered together.
+${npcDescriptions}
+RULES:
+- Write exactly ${totalLines} lines total, cycling through speakers naturally
+- Each line must be under 100 characters
+- The conversation should feel like a natural group chat — NPCs react to each other
+- They might agree, disagree, joke, gossip, or bond over shared interests
+- Include optional emotes (*adjusts hat*, *laughs*, etc.)
+- Speakers don't need to go in strict order — they can interject
+- Keep it light, entertaining, and appropriate
+- Never break character
+
+OUTPUT FORMAT:
+Return a JSON array (no markdown fences):
+[
+  { "speaker": ${speakerOptions}, "message": "dialogue line", "mood": "mood_value", "emote": "*optional*" },
+  ...
+]`;
+
+  const names = daemons.map(d => d.definition.name).join(", ");
+
+  const response = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 1024,
+    system,
+    messages: [
+      {
+        role: "user",
+        content: `${names} are all hanging out together on the street. Write their group conversation.`,
+      },
+    ],
+  });
+
+  const textBlock = response.content.find((b) => b.type === "text");
+  if (!textBlock || textBlock.type !== "text") {
+    return [];
+  }
+
+  try {
+    let jsonText = textBlock.text.trim();
+    if (jsonText.startsWith("```")) {
+      jsonText = jsonText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    }
+    const lines = JSON.parse(jsonText) as Array<{
+      speaker: string;
+      message: string;
+      mood: DaemonMood;
+      emote?: string;
+    }>;
+
+    const validMoods: DaemonMood[] = ["happy", "neutral", "bored", "excited", "annoyed", "curious"];
+
+    return lines.slice(0, totalLines).map((line) => {
+      const speakerIndex = labels.indexOf(line.speaker);
+      const daemon = speakerIndex >= 0 && speakerIndex < daemons.length
+        ? daemons[speakerIndex] : daemons[0];
+
+      return {
+        speakerId: line.speaker,
+        speakerName: daemon.definition.name,
+        message: (line.message || "...").slice(0, 150),
+        mood: validMoods.includes(line.mood) ? line.mood : "neutral",
+        emote: line.emote?.slice(0, 60),
+      };
+    });
+  } catch {
+    return [];
+  }
+}

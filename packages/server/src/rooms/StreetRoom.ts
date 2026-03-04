@@ -485,6 +485,13 @@ export class StreetRoom extends Room<StreetRoomState> {
     if (plotInCache) {
       plotInCache.objects.push(obj);
       this.updateDaemonWorldObjects();
+
+      // Notify daemons of the new object
+      this.daemonManager?.onObjectPlaced({
+        name: obj.name || "object",
+        tags: obj.tags || [],
+        position: obj.origin,
+      });
     }
   }
 

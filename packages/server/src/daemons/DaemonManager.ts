@@ -255,6 +255,101 @@ export class DaemonManager {
     this.worldObjects = objects;
   }
 
+  /** React to a new object being placed in the world */
+  onObjectPlaced(obj: WorldObjectInfo): void {
+    for (const [_id, daemon] of this.daemons) {
+      if (daemon.isMuted || daemon.state.currentAction !== "idle") continue;
+
+      const dist = this.distance(daemon.state.currentPosition, obj.position);
+      if (dist > 20) continue; // Only notice objects within 20 units
+
+      // Check if object matches daemon interests
+      const interests = daemon.state.definition.personality?.interests || [];
+      const objText = `${obj.name} ${obj.tags.join(" ")}`.toLowerCase();
+      const matchedInterest = interests.find(i =>
+        i.toLowerCase().split(" ").some(w => w.length > 2 && objText.includes(w)),
+      );
+
+      const delay = 500 + Math.random() * 2000;
+      setTimeout(() => {
+        if (daemon.isMuted) return;
+
+        if (matchedInterest) {
+          // Excited reaction for interest match
+          this.broadcastDaemonEmote(daemon, `*lights up seeing the new ${obj.name}*`, "excited");
+          this.broadcastDaemonChat(daemon, pick([
+            `Whoa! A new ${obj.name}! That's right up my alley!`,
+            `Nice, a ${obj.name}! I love anything to do with ${matchedInterest}.`,
+            `A ${obj.name}? Now that's what I'm talking about!`,
+          ]));
+        } else if (Math.random() < 0.4) {
+          // Generic notice
+          this.broadcastDaemonEmote(daemon, `*notices the new ${obj.name}*`, "curious");
+        }
+      }, delay);
+
+      break; // Only one daemon reacts per object
+    }
+  }
+
+  /** React when a new daemon is added to the world */
+  onDaemonAdded(newDaemonId: string): void {
+    const newDaemon = this.daemons.get(newDaemonId);
+    if (!newDaemon) return;
+
+    for (const [_id, daemon] of this.daemons) {
+      if (daemon === newDaemon || daemon.isMuted) continue;
+      if (daemon.state.currentAction !== "idle") continue;
+
+      const dist = this.distance(daemon.state.currentPosition, newDaemon.state.currentPosition);
+      if (dist > 25) continue;
+
+      const delay = 2000 + Math.random() * 3000;
+      setTimeout(() => {
+        if (daemon.isMuted) return;
+
+        const newcomerName = newDaemon.state.definition.name;
+        const type = daemon.behavior.type;
+
+        if (type === "greeter" || type === "socialite") {
+          this.broadcastDaemonChat(daemon, pick([
+            `Oh, a new face! Welcome, ${newcomerName}!`,
+            `Hey everyone, ${newcomerName} just arrived! Let's make them feel welcome!`,
+            `${newcomerName}! Nice to meet you!`,
+          ]));
+          this.broadcastDaemonEmote(daemon, "*waves enthusiastically at the newcomer*", "excited");
+        } else if (type === "guard") {
+          this.broadcastDaemonEmote(daemon, `*eyes the newcomer ${newcomerName}*`, "curious");
+        } else if (Math.random() < 0.5) {
+          this.broadcastDaemonEmote(daemon, `*glances at the new arrival, ${newcomerName}*`, "curious");
+        }
+      }, delay);
+    }
+  }
+
+  /** React when a daemon is removed from the world — friends mourn */
+  onDaemonRemoved(removedId: string, removedName: string): void {
+    for (const [_id, daemon] of this.daemons) {
+      if (daemon.isMuted) continue;
+
+      const rel = daemon.relationships.get(removedId);
+      if (!rel) continue;
+
+      const delay = 1000 + Math.random() * 2000;
+      setTimeout(() => {
+        if (daemon.isMuted) return;
+
+        if (rel.sentiment === "friendly" || rel.sentiment === "amused") {
+          this.broadcastDaemonEmote(daemon, `*looks sad* ${removedName} is gone...`, "bored");
+          daemon.state.mood = "bored";
+          daemon.moodDecayTimer = 0;
+        } else if (rel.sentiment === "wary") {
+          this.broadcastDaemonEmote(daemon, `*notices ${removedName} is gone* ...good riddance.`, "neutral");
+        }
+      }, delay);
+    }
+  }
+
   /** Get recent activity for a specific daemon */
   getDaemonActivity(daemonId: string, limit = 20): ActivityLogEntry[] {
     return this.activityLog
@@ -437,6 +532,9 @@ export class DaemonManager {
         });
       }, 3000);
     }, 1500);
+
+    // Notify existing daemons about the newcomer
+    setTimeout(() => this.onDaemonAdded(id), 2500);
   }
 
   /** Generate a personality-appropriate arrival announcement */
@@ -475,11 +573,17 @@ export class DaemonManager {
   }
 
   removeDaemon(id: string): void {
+    const daemon = this.daemons.get(id);
+    const removedName = daemon?.state.definition.name || "someone";
+
     this.daemons.delete(id);
     this.broadcast("daemon_despawn", {
       type: "daemon_despawn" as const,
       daemonId: id,
     });
+
+    // Notify remaining daemons about the departure
+    this.onDaemonRemoved(id, removedName);
   }
 
   /** Recall a daemon to its home position */

@@ -362,9 +362,14 @@ async function init() {
       const p = plot.placement;
       const dx = pos.x - p.position.x;
       const dz = pos.z - p.position.z;
+      // Rotate world-space offset into the plot's local frame
+      const cos = Math.cos(-p.rotation);
+      const sin = Math.sin(-p.rotation);
+      const localX = dx * cos - dz * sin;
+      const localZ = dx * sin + dz * cos;
       if (
-        Math.abs(dx) <= p.bounds.width / 2 &&
-        Math.abs(dz) <= p.bounds.depth / 2
+        Math.abs(localX) <= p.bounds.width / 2 &&
+        Math.abs(localZ) <= p.bounds.depth / 2
       ) {
         return plot.uuid;
       }

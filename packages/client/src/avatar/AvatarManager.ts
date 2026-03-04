@@ -5,23 +5,35 @@ const ACCENT_COLORS = [0x00ffff, 0xff00ff, 0x39ff14, 0xff6600, 0xaa44ff, 0xffff0
 
 interface LimbRefs {
   body: THREE.Group;
-  leftArmPivot: THREE.Group;
-  rightArmPivot: THREE.Group;
-  leftLegPivot: THREE.Group;
-  rightLegPivot: THREE.Group;
-  coatBack: THREE.Mesh;
+  // Upper body
+  chest: THREE.Mesh;
+  neck: THREE.Mesh;
   head: THREE.Group;
+  // Arms: upper + lower for elbow bend
+  leftShoulderPivot: THREE.Group;
+  leftElbowPivot: THREE.Group;
+  rightShoulderPivot: THREE.Group;
+  rightElbowPivot: THREE.Group;
+  // Legs: upper + lower for knee bend
+  leftHipPivot: THREE.Group;
+  leftKneePivot: THREE.Group;
+  rightHipPivot: THREE.Group;
+  rightKneePivot: THREE.Group;
+  // Coat tails
+  coatTailLeft: THREE.Mesh;
+  coatTailRight: THREE.Mesh;
 }
 
 interface AvatarInstance {
   group: THREE.Group;
   limbs: LimbRefs;
   targetPosition: THREE.Vector3;
+  prevPosition: THREE.Vector3;
   targetRotation: number;
   currentRotation: number;
-  animState: "idle" | "walk" | "run";
   animPhase: number;
   breathPhase: number;
+  speed: number; // smoothed speed for animation blending
 }
 
 export class AvatarManager {
@@ -33,85 +45,61 @@ export class AvatarManager {
     this.scene = scene;
   }
 
+  /** Notify avatar manager that the local player is moving (call from game loop) */
+  setLocalMoving(isMoving: boolean, isSprinting: boolean): void {
+    if (!this.localPlayerId) return;
+    const avatar = this.avatars.get(this.localPlayerId);
+    if (!avatar) return;
+    avatar.speed = isMoving ? (isSprinting ? 10 : 5) : 0;
+  }
+
   private createAvatar(colorIndex: number): { group: THREE.Group; limbs: LimbRefs } {
     const group = new THREE.Group();
     const accent = ACCENT_COLORS[colorIndex % ACCENT_COLORS.length];
 
-    // -- Materials --
+    // --- Materials ---
     const coatMat = new THREE.MeshPhysicalMaterial({
-      color: 0x0a0a0a,
+      color: 0x0c0c0c,
       roughness: 0.55,
-      metalness: 0.1,
-      clearcoat: 0.3,
-      clearcoatRoughness: 0.4,
-      sheen: 1.0,
-      sheenRoughness: 0.5,
-      sheenColor: new THREE.Color(0x222244),
+      metalness: 0.05,
+      clearcoat: 0.2,
+      clearcoatRoughness: 0.5,
+    });
+    const shirtMat = new THREE.MeshStandardMaterial({
+      color: 0x151515,
+      roughness: 0.8,
+      metalness: 0.0,
     });
     const pantsMat = new THREE.MeshStandardMaterial({
-      color: 0x111111,
+      color: 0x0e0e0e,
       roughness: 0.7,
-      metalness: 0.05,
+      metalness: 0.0,
     });
     const skinMat = new THREE.MeshPhysicalMaterial({
-      color: 0xc8a882,
-      roughness: 0.6,
+      color: 0xc8a07a,
+      roughness: 0.55,
       metalness: 0.0,
-      sheen: 0.3,
-      sheenRoughness: 0.8,
-      sheenColor: new THREE.Color(0xffccaa),
     });
     const bootMat = new THREE.MeshStandardMaterial({
-      color: 0x111111,
-      roughness: 0.4,
-      metalness: 0.3,
+      color: 0x0a0a0a,
+      roughness: 0.35,
+      metalness: 0.2,
     });
     const glassMat = new THREE.MeshStandardMaterial({
       color: 0x000000,
-      roughness: 0.1,
-      metalness: 0.9,
+      roughness: 0.05,
+      metalness: 0.95,
       emissive: accent,
-      emissiveIntensity: 0.6,
+      emissiveIntensity: 0.7,
     });
-
-    // Body group (moves for breathing)
-    const body = new THREE.Group();
-    group.add(body);
-
-    // -- Torso (coat upper) --
-    const torsoGeo = new THREE.CapsuleGeometry(0.22, 0.5, 4, 8);
-    const torso = new THREE.Mesh(torsoGeo, coatMat);
-    torso.position.y = 1.2;
-    torso.scale.set(1, 1, 0.65);
-    torso.castShadow = true;
-    body.add(torso);
-
-    // Collar / lapel ridge
-    const collarGeo = new THREE.CylinderGeometry(0.24, 0.22, 0.08, 8);
-    const collar = new THREE.Mesh(collarGeo, coatMat);
-    collar.position.y = 1.52;
-    collar.scale.set(1, 1, 0.7);
-    body.add(collar);
-
-    // Coat skirt (long, below waist) — tapers outward slightly
-    const coatSkirtGeo = new THREE.CylinderGeometry(0.2, 0.28, 0.7, 8);
-    const coatSkirt = new THREE.Mesh(coatSkirtGeo, coatMat);
-    coatSkirt.position.y = 0.6;
-    coatSkirt.scale.set(1, 1, 0.6);
-    coatSkirt.castShadow = true;
-    body.add(coatSkirt);
-
-    // Coat back flap (animates with movement)
-    const coatBackGeo = new THREE.BoxGeometry(0.35, 0.55, 0.04);
-    const coatBack = new THREE.Mesh(coatBackGeo, coatMat);
-    coatBack.position.set(0, 0.35, 0.12);
-    coatBack.castShadow = true;
-    body.add(coatBack);
-
-    // -- Crossed katanas on back --
+    const hairMat = new THREE.MeshStandardMaterial({
+      color: 0x0a0808,
+      roughness: 0.35,
+      metalness: 0.15,
+    });
     const bladeMat = new THREE.MeshStandardMaterial({
       color: 0xccccdd,
-      roughness: 0.15,
+      roughness: 0.1,
       metalness: 0.95,
     });
     const hiltMat = new THREE.MeshStandardMaterial({
@@ -125,145 +113,253 @@ export class AvatarManager {
       metalness: 0.7,
     });
 
-    for (const side of [-1, 1]) {
-      const katanaGroup = new THREE.Group();
-      katanaGroup.position.set(side * 0.08, 1.25, 0.15);
-      // Cross them: tilt in opposite directions
-      katanaGroup.rotation.z = side * 0.35;
-      katanaGroup.rotation.x = 0.1;
+    const body = new THREE.Group();
+    group.add(body);
 
-      // Blade
-      const bladeGeo = new THREE.BoxGeometry(0.015, 0.65, 0.04);
-      const blade = new THREE.Mesh(bladeGeo, bladeMat);
-      blade.position.y = 0.25;
-      katanaGroup.add(blade);
+    // ===== TORSO =====
+    // Chest — wider at shoulders, narrower at waist (scaled sphere)
+    const chestGeo = new THREE.SphereGeometry(1, 12, 10);
+    const chest = new THREE.Mesh(chestGeo, coatMat);
+    chest.scale.set(0.22, 0.2, 0.12);
+    chest.position.y = 1.28;
+    chest.castShadow = true;
+    body.add(chest);
 
-      // Hilt wrap
-      const hiltGeo = new THREE.CylinderGeometry(0.018, 0.018, 0.18, 6);
-      const hilt = new THREE.Mesh(hiltGeo, hiltMat);
-      hilt.position.y = -0.12;
-      katanaGroup.add(hilt);
+    // Abdomen — narrower, bridging chest to hips
+    const abdomenGeo = new THREE.SphereGeometry(1, 10, 8);
+    const abdomen = new THREE.Mesh(abdomenGeo, coatMat);
+    abdomen.scale.set(0.17, 0.12, 0.1);
+    abdomen.position.y = 1.03;
+    abdomen.castShadow = true;
+    body.add(abdomen);
 
-      // Tsuba (guard)
-      const tsubaGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.012, 8);
-      const tsuba = new THREE.Mesh(tsubaGeo, guardMat);
-      tsuba.position.y = -0.02;
-      katanaGroup.add(tsuba);
+    // Hips
+    const hipsGeo = new THREE.SphereGeometry(1, 10, 8);
+    const hips = new THREE.Mesh(hipsGeo, coatMat);
+    hips.scale.set(0.18, 0.08, 0.1);
+    hips.position.y = 0.88;
+    body.add(hips);
 
-      body.add(katanaGroup);
-    }
+    // ===== NECK =====
+    const neckGeo = new THREE.CylinderGeometry(0.045, 0.05, 0.1, 8);
+    const neck = new THREE.Mesh(neckGeo, skinMat);
+    neck.position.y = 1.52;
+    body.add(neck);
 
-    // -- Head --
+    // ===== HEAD =====
     const headGroup = new THREE.Group();
-    headGroup.position.y = 1.72;
+    headGroup.position.y = 1.65;
     body.add(headGroup);
 
-    // Head shape (slightly elongated capsule)
-    const headGeo = new THREE.CapsuleGeometry(0.14, 0.08, 4, 8);
-    const head = new THREE.Mesh(headGeo, skinMat);
-    head.castShadow = true;
-    headGroup.add(head);
+    // Skull
+    const skullGeo = new THREE.SphereGeometry(0.115, 12, 10);
+    const skull = new THREE.Mesh(skullGeo, skinMat);
+    skull.scale.set(1, 1.1, 1);
+    skull.castShadow = true;
+    headGroup.add(skull);
 
-    // Hair (dark, slicked back)
-    const hairGeo = new THREE.CapsuleGeometry(0.145, 0.06, 4, 8);
-    const hairMat = new THREE.MeshStandardMaterial({
-      color: 0x0a0a0a,
-      roughness: 0.3,
-      metalness: 0.2,
-    });
+    // Jaw — subtle chin
+    const jawGeo = new THREE.SphereGeometry(0.07, 8, 6);
+    const jaw = new THREE.Mesh(jawGeo, skinMat);
+    jaw.position.set(0, -0.07, -0.04);
+    jaw.scale.set(1, 0.6, 0.8);
+    headGroup.add(jaw);
+
+    // Hair — slicked back
+    const hairGeo = new THREE.SphereGeometry(0.12, 10, 8);
     const hair = new THREE.Mesh(hairGeo, hairMat);
-    hair.position.set(0, 0.02, 0.01);
-    hair.scale.set(1.02, 1, 1.05);
+    hair.scale.set(1.05, 1.0, 1.15);
+    hair.position.set(0, 0.02, 0.02);
     headGroup.add(hair);
 
+    // Hair back extension
+    const hairBackGeo = new THREE.SphereGeometry(0.06, 8, 6);
+    const hairBack = new THREE.Mesh(hairBackGeo, hairMat);
+    hairBack.scale.set(1.2, 0.6, 1);
+    hairBack.position.set(0, -0.02, 0.08);
+    headGroup.add(hairBack);
+
     // Sunglasses — narrow wraparound
-    const lensGeo = new THREE.BoxGeometry(0.28, 0.05, 0.04);
+    const lensGeo = new THREE.BoxGeometry(0.22, 0.04, 0.03);
     const lens = new THREE.Mesh(lensGeo, glassMat);
-    lens.position.set(0, 0.0, -0.14);
+    lens.position.set(0, 0.01, -0.11);
     headGroup.add(lens);
 
-    // Subtle glow around glasses
-    const glowLight = new THREE.PointLight(accent, 0.3, 2, 2);
-    glowLight.position.set(0, 0, -0.2);
+    // Glasses glow
+    const glowLight = new THREE.PointLight(accent, 0.4, 2.5, 2);
+    glowLight.position.set(0, 0.01, -0.18);
     headGroup.add(glowLight);
 
-    // -- Arms (pivoted at shoulders for swing animation) --
-    const armLength = 0.55;
+    // ===== COAT DETAILS =====
+    // Collar — turned up
+    const collarLGeo = new THREE.BoxGeometry(0.04, 0.1, 0.08);
+    const collarL = new THREE.Mesh(collarLGeo, coatMat);
+    collarL.position.set(-0.1, 1.52, -0.07);
+    collarL.rotation.z = -0.2;
+    body.add(collarL);
+    const collarR = new THREE.Mesh(collarLGeo, coatMat);
+    collarR.position.set(0.1, 1.52, -0.07);
+    collarR.rotation.z = 0.2;
+    body.add(collarR);
 
-    const leftArmPivot = new THREE.Group();
-    leftArmPivot.position.set(-0.3, 1.4, 0);
-    body.add(leftArmPivot);
+    // Coat tails — two separate flaps that animate
+    const tailGeo = new THREE.BoxGeometry(0.14, 0.45, 0.025);
+    const coatTailLeft = new THREE.Mesh(tailGeo, coatMat);
+    coatTailLeft.position.set(-0.07, 0.55, 0.1);
+    coatTailLeft.castShadow = true;
+    body.add(coatTailLeft);
+    const coatTailRight = new THREE.Mesh(tailGeo, coatMat);
+    coatTailRight.position.set(0.07, 0.55, 0.1);
+    coatTailRight.castShadow = true;
+    body.add(coatTailRight);
 
-    // Upper arm + forearm as single unit
-    const leftArmGeo = new THREE.CapsuleGeometry(0.055, armLength, 4, 6);
-    const leftArm = new THREE.Mesh(leftArmGeo, coatMat);
-    leftArm.position.y = -armLength / 2 - 0.05;
-    leftArm.castShadow = true;
-    leftArmPivot.add(leftArm);
+    // ===== CROSSED KATANAS =====
+    for (const side of [-1, 1]) {
+      const kGroup = new THREE.Group();
+      kGroup.position.set(side * 0.06, 1.2, 0.14);
+      kGroup.rotation.z = side * 0.3;
+      kGroup.rotation.x = 0.12;
 
-    // Left hand
-    const handGeo = new THREE.SphereGeometry(0.04, 6, 6);
-    const leftHand = new THREE.Mesh(handGeo, skinMat);
-    leftHand.position.y = -armLength - 0.08;
-    leftArmPivot.add(leftHand);
+      const bladeGeo = new THREE.BoxGeometry(0.012, 0.6, 0.03);
+      const blade = new THREE.Mesh(bladeGeo, bladeMat);
+      blade.position.y = 0.22;
+      kGroup.add(blade);
 
-    const rightArmPivot = new THREE.Group();
-    rightArmPivot.position.set(0.3, 1.4, 0);
-    body.add(rightArmPivot);
+      const hiltGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.16, 6);
+      const hilt = new THREE.Mesh(hiltGeo, hiltMat);
+      hilt.position.y = -0.1;
+      kGroup.add(hilt);
 
-    const rightArm = new THREE.Mesh(leftArmGeo.clone(), coatMat);
-    rightArm.position.y = -armLength / 2 - 0.05;
-    rightArm.castShadow = true;
-    rightArmPivot.add(rightArm);
+      const tsubaGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.01, 8);
+      const tsuba = new THREE.Mesh(tsubaGeo, guardMat);
+      tsuba.position.y = -0.01;
+      kGroup.add(tsuba);
 
-    const rightHand = new THREE.Mesh(handGeo, skinMat);
-    rightHand.position.y = -armLength - 0.08;
-    rightArmPivot.add(rightHand);
+      body.add(kGroup);
+    }
 
-    // -- Legs (pivoted at hips) --
-    const legLength = 0.45;
+    // ===== LEFT ARM =====
+    const leftShoulderPivot = new THREE.Group();
+    leftShoulderPivot.position.set(-0.24, 1.38, 0);
+    body.add(leftShoulderPivot);
 
-    const leftLegPivot = new THREE.Group();
-    leftLegPivot.position.set(-0.1, 0.75, 0);
-    body.add(leftLegPivot);
+    // Upper arm
+    const upperArmGeo = new THREE.CapsuleGeometry(0.04, 0.22, 4, 8);
+    const lUpperArm = new THREE.Mesh(upperArmGeo, coatMat);
+    lUpperArm.position.y = -0.15;
+    lUpperArm.castShadow = true;
+    leftShoulderPivot.add(lUpperArm);
 
-    const leftThighGeo = new THREE.CapsuleGeometry(0.065, legLength, 4, 6);
-    const leftThigh = new THREE.Mesh(leftThighGeo, pantsMat);
-    leftThigh.position.y = -legLength / 2 - 0.02;
-    leftThigh.castShadow = true;
-    leftLegPivot.add(leftThigh);
+    // Elbow pivot
+    const leftElbowPivot = new THREE.Group();
+    leftElbowPivot.position.y = -0.3;
+    leftShoulderPivot.add(leftElbowPivot);
+
+    // Forearm
+    const forearmGeo = new THREE.CapsuleGeometry(0.035, 0.2, 4, 8);
+    const lForearm = new THREE.Mesh(forearmGeo, coatMat);
+    lForearm.position.y = -0.13;
+    lForearm.castShadow = true;
+    leftElbowPivot.add(lForearm);
+
+    // Hand
+    const handGeo = new THREE.SphereGeometry(0.03, 6, 6);
+    const lHand = new THREE.Mesh(handGeo, skinMat);
+    lHand.position.y = -0.27;
+    leftElbowPivot.add(lHand);
+
+    // ===== RIGHT ARM =====
+    const rightShoulderPivot = new THREE.Group();
+    rightShoulderPivot.position.set(0.24, 1.38, 0);
+    body.add(rightShoulderPivot);
+
+    const rUpperArm = new THREE.Mesh(upperArmGeo.clone(), coatMat);
+    rUpperArm.position.y = -0.15;
+    rUpperArm.castShadow = true;
+    rightShoulderPivot.add(rUpperArm);
+
+    const rightElbowPivot = new THREE.Group();
+    rightElbowPivot.position.y = -0.3;
+    rightShoulderPivot.add(rightElbowPivot);
+
+    const rForearm = new THREE.Mesh(forearmGeo.clone(), coatMat);
+    rForearm.position.y = -0.13;
+    rForearm.castShadow = true;
+    rightElbowPivot.add(rForearm);
+
+    const rHand = new THREE.Mesh(handGeo.clone(), skinMat);
+    rHand.position.y = -0.27;
+    rightElbowPivot.add(rHand);
+
+    // ===== LEFT LEG =====
+    const leftHipPivot = new THREE.Group();
+    leftHipPivot.position.set(-0.09, 0.84, 0);
+    body.add(leftHipPivot);
+
+    const thighGeo = new THREE.CapsuleGeometry(0.055, 0.28, 4, 8);
+    const lThigh = new THREE.Mesh(thighGeo, pantsMat);
+    lThigh.position.y = -0.2;
+    lThigh.castShadow = true;
+    leftHipPivot.add(lThigh);
+
+    const leftKneePivot = new THREE.Group();
+    leftKneePivot.position.y = -0.38;
+    leftHipPivot.add(leftKneePivot);
+
+    const shinGeo = new THREE.CapsuleGeometry(0.045, 0.26, 4, 8);
+    const lShin = new THREE.Mesh(shinGeo, pantsMat);
+    lShin.position.y = -0.17;
+    lShin.castShadow = true;
+    leftKneePivot.add(lShin);
 
     // Boot
-    const bootGeo = new THREE.BoxGeometry(0.1, 0.18, 0.16);
-    const leftBoot = new THREE.Mesh(bootGeo, bootMat);
-    leftBoot.position.set(0, -legLength - 0.1, -0.02);
-    leftBoot.castShadow = true;
-    leftLegPivot.add(leftBoot);
+    const bootGeo = new THREE.BoxGeometry(0.09, 0.08, 0.14);
+    const lBoot = new THREE.Mesh(bootGeo, bootMat);
+    lBoot.position.set(0, -0.35, -0.01);
+    lBoot.castShadow = true;
+    leftKneePivot.add(lBoot);
 
-    const rightLegPivot = new THREE.Group();
-    rightLegPivot.position.set(0.1, 0.75, 0);
-    body.add(rightLegPivot);
+    // ===== RIGHT LEG =====
+    const rightHipPivot = new THREE.Group();
+    rightHipPivot.position.set(0.09, 0.84, 0);
+    body.add(rightHipPivot);
 
-    const rightThigh = new THREE.Mesh(leftThighGeo.clone(), pantsMat);
-    rightThigh.position.y = -legLength / 2 - 0.02;
-    rightThigh.castShadow = true;
-    rightLegPivot.add(rightThigh);
+    const rThigh = new THREE.Mesh(thighGeo.clone(), pantsMat);
+    rThigh.position.y = -0.2;
+    rThigh.castShadow = true;
+    rightHipPivot.add(rThigh);
 
-    const rightBoot = new THREE.Mesh(bootGeo, bootMat);
-    rightBoot.position.set(0, -legLength - 0.1, -0.02);
-    rightBoot.castShadow = true;
-    rightLegPivot.add(rightBoot);
+    const rightKneePivot = new THREE.Group();
+    rightKneePivot.position.y = -0.38;
+    rightHipPivot.add(rightKneePivot);
+
+    const rShin = new THREE.Mesh(shinGeo.clone(), pantsMat);
+    rShin.position.y = -0.17;
+    rShin.castShadow = true;
+    rightKneePivot.add(rShin);
+
+    const rBoot = new THREE.Mesh(bootGeo.clone(), bootMat);
+    rBoot.position.set(0, -0.35, -0.01);
+    rBoot.castShadow = true;
+    rightKneePivot.add(rBoot);
 
     return {
       group,
       limbs: {
         body,
-        leftArmPivot,
-        rightArmPivot,
-        leftLegPivot,
-        rightLegPivot,
-        coatBack,
+        chest,
+        neck,
         head: headGroup,
+        leftShoulderPivot,
+        leftElbowPivot,
+        rightShoulderPivot,
+        rightElbowPivot,
+        leftHipPivot,
+        leftKneePivot,
+        rightHipPivot,
+        rightKneePivot,
+        coatTailLeft,
+        coatTailRight,
       },
     };
   }
@@ -281,16 +377,13 @@ export class AvatarManager {
     this.avatars.set(state.userId, {
       group,
       limbs,
-      targetPosition: new THREE.Vector3(
-        state.position.x,
-        state.position.y,
-        state.position.z
-      ),
+      targetPosition: new THREE.Vector3(state.position.x, state.position.y, state.position.z),
+      prevPosition: new THREE.Vector3(state.position.x, state.position.y, state.position.z),
       targetRotation: state.rotation,
       currentRotation: state.rotation,
-      animState: "idle",
       animPhase: 0,
-      breathPhase: Math.random() * Math.PI * 2, // stagger breathing
+      breathPhase: Math.random() * Math.PI * 2,
+      speed: 0,
     });
   }
 
@@ -308,7 +401,6 @@ export class AvatarManager {
     avatar.targetRotation = rotation;
   }
 
-  /** Set the local player's position directly (no interpolation) */
   setLocalPlayerPosition(position: Vec3, rotation: number): void {
     if (!this.localPlayerId) return;
     const avatar = this.avatars.get(this.localPlayerId);
@@ -335,87 +427,110 @@ export class AvatarManager {
     for (const [userId, avatar] of this.avatars) {
       const { limbs } = avatar;
 
-      // --- Remote player interpolation ---
+      // --- Remote player: interpolation + speed detection ---
       if (userId !== this.localPlayerId) {
+        avatar.prevPosition.copy(avatar.group.position);
         avatar.group.position.lerp(avatar.targetPosition, Math.min(dt * 10, 1));
 
         // Smooth rotation (shortest path)
         let rotDiff = avatar.targetRotation - avatar.currentRotation;
-        // Normalize to [-PI, PI]
         while (rotDiff > Math.PI) rotDiff -= Math.PI * 2;
         while (rotDiff < -Math.PI) rotDiff += Math.PI * 2;
         avatar.currentRotation += rotDiff * Math.min(dt * 10, 1);
         avatar.group.rotation.y = avatar.currentRotation;
 
-        // Determine animation state
-        const dist = avatar.group.position.distanceTo(avatar.targetPosition);
-        if (dist > 0.5) {
-          avatar.animState = "run";
-        } else if (dist > 0.05) {
-          avatar.animState = "walk";
-        } else {
-          avatar.animState = "idle";
-        }
-      } else {
-        // Local player: detect movement from input manager state
-        // We infer walk/run from whether position is changing
-        const dist = avatar.group.position.distanceTo(avatar.targetPosition);
-        if (dist > 0.3) {
-          avatar.animState = "run";
-        } else if (dist > 0.01) {
-          avatar.animState = "walk";
-        } else {
-          avatar.animState = "idle";
-        }
+        // Measure actual movement speed
+        const moved = avatar.group.position.distanceTo(avatar.prevPosition);
+        const measuredSpeed = dt > 0 ? moved / dt : 0;
+        avatar.speed += (measuredSpeed - avatar.speed) * Math.min(dt * 8, 1);
       }
+      // Local player: speed is set externally via setLocalMoving()
 
       // --- Animation ---
-      const isMoving = avatar.animState !== "idle";
-      const speed = avatar.animState === "run" ? 10 : 6;
-      const swingAmplitude = avatar.animState === "run" ? 0.7 : 0.4;
-      const armSwingAmplitude = avatar.animState === "run" ? 0.8 : 0.45;
+      const spd = avatar.speed;
+      const isMoving = spd > 0.3;
+      const runBlend = Math.min(Math.max((spd - 3) / 7, 0), 1); // 0=walk, 1=run
 
+      // Phase advances with speed
       if (isMoving) {
-        avatar.animPhase += dt * speed;
+        const phaseSpeed = 5 + runBlend * 6; // faster phase at run speed
+        avatar.animPhase += dt * phaseSpeed;
       } else {
-        // Ease limbs back to rest
-        avatar.animPhase *= 0.85;
+        // Smoothly return limbs to rest
+        avatar.animPhase *= 1 - Math.min(dt * 6, 1);
       }
 
-      const phase = avatar.animPhase;
+      const p = avatar.animPhase;
+      const sinP = Math.sin(p);
+      const cosP = Math.cos(p);
 
-      // Leg swing (opposing)
-      limbs.leftLegPivot.rotation.x = Math.sin(phase) * swingAmplitude;
-      limbs.rightLegPivot.rotation.x = Math.sin(phase + Math.PI) * swingAmplitude;
+      // -- Legs: hip swing + knee bend --
+      const hipSwing = (0.3 + runBlend * 0.4) * (isMoving ? 1 : 0);
+      const kneeMax = 0.4 + runBlend * 0.6;
 
-      // Arm swing (opposing legs, natural gait)
-      limbs.leftArmPivot.rotation.x = Math.sin(phase + Math.PI) * armSwingAmplitude;
-      limbs.rightArmPivot.rotation.x = Math.sin(phase) * armSwingAmplitude;
+      // Left leg
+      const leftHipAngle = sinP * hipSwing;
+      limbs.leftHipPivot.rotation.x = leftHipAngle;
+      // Knee bends backward on the back-swing (when hip angle is positive = leg behind)
+      const leftKneeBend = Math.max(0, sinP) * kneeMax * (isMoving ? 1 : 0);
+      limbs.leftKneePivot.rotation.x = leftKneeBend;
 
-      // Coat back flap reacts to movement
-      const coatFlap = isMoving ? Math.sin(phase * 2) * 0.08 : 0;
-      limbs.coatBack.rotation.x = coatFlap + (isMoving ? 0.15 : 0);
+      // Right leg (opposite phase)
+      const rightHipAngle = -sinP * hipSwing;
+      limbs.rightHipPivot.rotation.x = rightHipAngle;
+      const rightKneeBend = Math.max(0, -sinP) * kneeMax * (isMoving ? 1 : 0);
+      limbs.rightKneePivot.rotation.x = rightKneeBend;
 
-      // Subtle body lean forward when moving
-      limbs.body.rotation.x = isMoving ? -0.05 : 0;
+      // -- Arms: shoulder swing + elbow bend --
+      const armSwing = (0.25 + runBlend * 0.45) * (isMoving ? 1 : 0);
+      const elbowBend = 0.3 + runBlend * 0.5;
 
-      // Vertical bob (foot-strike feel)
+      // Arms oppose the legs (natural gait)
+      limbs.leftShoulderPivot.rotation.x = -sinP * armSwing;
+      limbs.leftElbowPivot.rotation.x = -(0.15 + Math.max(0, -sinP) * elbowBend * (isMoving ? 1 : 0));
+
+      limbs.rightShoulderPivot.rotation.x = sinP * armSwing;
+      limbs.rightElbowPivot.rotation.x = -(0.15 + Math.max(0, sinP) * elbowBend * (isMoving ? 1 : 0));
+
+      // -- Torso: lean + sway --
+      if (isMoving) {
+        limbs.body.rotation.x = -(0.03 + runBlend * 0.05); // lean forward
+        limbs.body.rotation.z = Math.sin(p) * 0.02; // subtle lateral sway
+        limbs.chest.rotation.y = sinP * 0.04; // shoulder twist
+      } else {
+        limbs.body.rotation.x *= 0.9;
+        limbs.body.rotation.z *= 0.9;
+        limbs.chest.rotation.y *= 0.9;
+      }
+
+      // -- Coat tails flap with movement --
+      if (isMoving) {
+        const flapAmt = 0.05 + runBlend * 0.15;
+        limbs.coatTailLeft.rotation.x = 0.1 + Math.sin(p * 1.5) * flapAmt;
+        limbs.coatTailRight.rotation.x = 0.1 + Math.sin(p * 1.5 + 0.5) * flapAmt;
+      } else {
+        limbs.coatTailLeft.rotation.x *= 0.92;
+        limbs.coatTailRight.rotation.x *= 0.92;
+      }
+
+      // -- Vertical bob (foot-strike, double frequency of step cycle) --
       if (isMoving && userId !== this.localPlayerId) {
-        avatar.group.position.y =
-          Math.abs(Math.sin(phase * 2)) * 0.04;
+        avatar.group.position.y = Math.abs(Math.sin(p * 2)) * (0.02 + runBlend * 0.03);
       }
 
-      // --- Idle breathing ---
-      avatar.breathPhase += dt * 1.8;
-      const breathOffset = Math.sin(avatar.breathPhase) * 0.008;
-      limbs.body.position.y = breathOffset;
+      // -- Idle breathing --
+      avatar.breathPhase += dt * 1.5;
+      const breath = Math.sin(avatar.breathPhase);
+      limbs.body.position.y = breath * 0.005;
+      limbs.chest.scale.z = 0.12 + breath * 0.003; // chest expand/contract
 
-      // Subtle head bob on idle
+      // Head micro-movements on idle
       if (!isMoving) {
-        limbs.head.rotation.x = Math.sin(avatar.breathPhase * 0.7) * 0.015;
-        limbs.head.rotation.z = Math.sin(avatar.breathPhase * 0.5) * 0.01;
+        limbs.head.rotation.x = Math.sin(avatar.breathPhase * 0.6) * 0.012;
+        limbs.head.rotation.z = Math.sin(avatar.breathPhase * 0.4) * 0.008;
       } else {
-        limbs.head.rotation.x = 0;
+        // Slight head bob with steps
+        limbs.head.rotation.x = Math.sin(p * 2) * 0.015;
         limbs.head.rotation.z = 0;
       }
     }

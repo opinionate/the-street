@@ -420,6 +420,10 @@ async function init() {
         { x: localPosition.x, y: localPosition.y, z: localPosition.z },
         localRotation
       );
+      avatarManager.setLocalMoving(
+        inputManager.isMoving(),
+        inputManager.state.sprint
+      );
 
       // Send position to server at SEND_RATE
       sendTimer += dt;
@@ -437,6 +441,7 @@ async function init() {
     } else {
       // Consume mouse to prevent accumulation
       inputManager.consumeMouse();
+      avatarManager.setLocalMoving(false, false);
     }
 
     // Update current plot based on player position

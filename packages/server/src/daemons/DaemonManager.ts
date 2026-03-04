@@ -2368,6 +2368,12 @@ export class DaemonManager {
   ): void {
     const convA = daemonA.daemonConversations.get(idB);
     const convB = daemonB.daemonConversations.get(idA);
+
+    // Analyze conversation to form opinions
+    if (convA?.pendingLines.length) {
+      this.analyzeConversationSentiment(daemonA, daemonB, convA.pendingLines);
+    }
+
     if (convA) convA.isActive = false;
     if (convB) convB.isActive = false;
 
@@ -2382,6 +2388,94 @@ export class DaemonManager {
 
     // Share gossip about known players
     this.shareGossip(daemonA, daemonB);
+  }
+
+  /** Analyze conversation content and update daemon-daemon sentiment */
+  private analyzeConversationSentiment(
+    daemonA: DaemonInstance,
+    daemonB: DaemonInstance,
+    lines: Array<{ speakerDaemonId: string; message: string; mood: DaemonMood }>,
+  ): void {
+    // Count positive and negative signals
+    let positiveSignals = 0;
+    let negativeSignals = 0;
+
+    const positiveWords = ["haha", "love", "great", "friend", "wonderful", "agree", "exactly", "fun", "nice", "cool", "awesome", "yes!", "cheers", "thanks", "welcome"];
+    const negativeWords = ["hmph", "rude", "annoying", "disagree", "whatever", "ugh", "boring", "wrong", "no.", "stop", "leave", "dislike"];
+
+    for (const line of lines) {
+      const msg = line.message.toLowerCase();
+
+      // Mood signals
+      if (line.mood === "happy" || line.mood === "excited") positiveSignals++;
+      if (line.mood === "annoyed" || line.mood === "bored") negativeSignals++;
+
+      // Word signals
+      for (const word of positiveWords) {
+        if (msg.includes(word)) { positiveSignals++; break; }
+      }
+      for (const word of negativeWords) {
+        if (msg.includes(word)) { negativeSignals++; break; }
+      }
+
+      // Emote signals (laughing, waving = positive)
+      if (msg.includes("laugh") || msg.includes("chuckle") || msg.includes("smile") || msg.includes("grin")) {
+        positiveSignals++;
+      }
+      if (msg.includes("scoff") || msg.includes("roll") || msg.includes("frown") || msg.includes("glare")) {
+        negativeSignals++;
+      }
+    }
+
+    // Determine sentiment shift
+    const delta = positiveSignals - negativeSignals;
+    const aId = daemonA.state.daemonId;
+    const bId = daemonB.state.daemonId;
+    const aName = daemonA.state.definition.name;
+    const bName = daemonB.state.definition.name;
+
+    // Update A's opinion of B
+    this.shiftDaemonSentiment(daemonA, bId, bName, delta);
+    // Update B's opinion of A
+    this.shiftDaemonSentiment(daemonB, aId, aName, delta);
+  }
+
+  /** Shift a daemon's sentiment toward another entity based on interaction quality */
+  private shiftDaemonSentiment(daemon: DaemonInstance, targetId: string, targetName: string, delta: number): void {
+    let rel = daemon.relationships.get(targetId);
+    if (!rel) {
+      rel = {
+        targetName,
+        targetType: "daemon",
+        sentiment: "neutral",
+        interactionCount: 0,
+        gossip: [],
+        lastUpdated: Date.now(),
+      };
+      daemon.relationships.set(targetId, rel);
+    }
+
+    rel.interactionCount++;
+    rel.lastUpdated = Date.now();
+
+    // Sentiment ladder: wary < neutral < curious < amused < friendly
+    const ladder: Sentiment[] = ["wary", "neutral", "curious", "amused", "friendly"];
+    const currentIdx = ladder.indexOf(rel.sentiment as Sentiment);
+    if (currentIdx < 0) return;
+
+    if (delta >= 3 && currentIdx < ladder.length - 1) {
+      // Strong positive: move up one step
+      rel.sentiment = ladder[currentIdx + 1];
+    } else if (delta >= 1 && currentIdx < ladder.length - 1 && Math.random() < 0.3) {
+      // Mild positive: 30% chance to move up
+      rel.sentiment = ladder[currentIdx + 1];
+    } else if (delta <= -3 && currentIdx > 0) {
+      // Strong negative: move down one step
+      rel.sentiment = ladder[currentIdx - 1];
+    } else if (delta <= -1 && currentIdx > 0 && Math.random() < 0.3) {
+      // Mild negative: 30% chance to move down
+      rel.sentiment = ladder[currentIdx - 1];
+    }
   }
 
   // ─── Idle Chatter ─────────────────────────────────────────────

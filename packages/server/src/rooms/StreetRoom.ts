@@ -274,6 +274,15 @@ export class StreetRoom extends Room<StreetRoomState> {
       userId: player.userId,
     });
 
+    // Let daemons react to the departure
+    if (this.daemonManager) {
+      this.daemonManager.onPlayerLeave(
+        player.userId,
+        player.displayName,
+        { x: player.posX, y: player.posY, z: player.posZ },
+      );
+    }
+
     this.state.players.delete(client.sessionId);
     this.playerVisits.delete(client.sessionId);
   }

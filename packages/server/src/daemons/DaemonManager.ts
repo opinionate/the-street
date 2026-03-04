@@ -397,6 +397,58 @@ export class DaemonManager {
     daemon.isMuted = muted;
   }
 
+  /** Called when a player leaves the world — daemons who know them react */
+  onPlayerLeave(playerId: string, playerName: string, position: Vector3): void {
+    for (const [, daemon] of this.daemons) {
+      if (daemon.isMuted) continue;
+      if (daemon.state.currentAction !== "idle") continue;
+
+      const dist = this.distance(daemon.state.currentPosition, position);
+      if (dist > 30) continue; // Only nearby daemons notice
+
+      const rel = daemon.relationships.get(playerId);
+      if (!rel || rel.interactionCount < 1) continue; // Only daemons who know the player
+
+      let farewell: string;
+      let mood: DaemonMood;
+
+      switch (rel.sentiment) {
+        case "friendly":
+          farewell = [
+            `Bye, ${playerName}! Come back soon!`,
+            `*waves goodbye to ${playerName}*`,
+            `See you around, ${playerName}!`,
+          ][Math.floor(Math.random() * 3)];
+          mood = "happy";
+          break;
+        case "wary":
+          farewell = [
+            `*watches ${playerName} leave with relief*`,
+            `Hmph. ${playerName} is gone.`,
+          ][Math.floor(Math.random() * 2)];
+          mood = "neutral";
+          break;
+        case "curious":
+          farewell = `*wonders where ${playerName} went...*`;
+          mood = "curious";
+          break;
+        case "amused":
+          farewell = `Ha, there goes ${playerName}. Never a dull moment.`;
+          mood = "happy";
+          break;
+        default:
+          farewell = `*notices ${playerName} has left*`;
+          mood = "neutral";
+      }
+
+      daemon.state.mood = mood;
+      daemon.moodDecayTimer = 0;
+      this.broadcastDaemonChat(daemon, farewell);
+
+      break; // Only one daemon reacts to a departure
+    }
+  }
+
   /** Called when a world event happens near daemons (object placed, player runs past, etc.) */
   onWorldEvent(eventType: "object_placed" | "object_removed" | "player_sprint", position: Vector3, playerName?: string): void {
     for (const [_id, daemon] of this.daemons) {

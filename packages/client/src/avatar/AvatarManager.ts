@@ -1,7 +1,14 @@
 import * as THREE from "three";
 import type { PlayerState, Vector3 as Vec3 } from "@the-street/shared";
+import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
 
 const ACCENT_COLORS = [0x00ffff, 0xff00ff, 0x39ff14, 0xff6600, 0xaa44ff, 0xffff00];
+
+interface ChatBubble {
+  sprite: THREE.Sprite;
+  createdAt: number;
+  duration: number;
+}
 
 interface LimbRefs {
   body: THREE.Group;
@@ -34,6 +41,7 @@ interface AvatarInstance {
   animPhase: number;
   breathPhase: number;
   speed: number; // smoothed speed for animation blending
+  chatBubbles: ChatBubble[];
 }
 
 export class AvatarManager {
@@ -364,6 +372,34 @@ export class AvatarManager {
     };
   }
 
+  private createNameLabel(name: string): THREE.Sprite {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = 256;
+    canvas.height = 48;
+
+    ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+    ctx.beginPath();
+    ctx.roundRect(0, 0, 256, 48, 8);
+    ctx.fill();
+
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 22px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(name, 128, 24, 240);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(1.5, 0.28, 1);
+    return sprite;
+  }
+
   addPlayer(state: PlayerState): void {
     if (this.avatars.has(state.userId)) return;
 
@@ -371,6 +407,11 @@ export class AvatarManager {
     group.name = `avatar_${state.userId}`;
     group.position.set(state.position.x, state.position.y, state.position.z);
     group.rotation.y = state.rotation;
+
+    // Name label above head
+    const nameSprite = this.createNameLabel(state.displayName);
+    nameSprite.position.set(0, 1.95, 0);
+    group.add(nameSprite);
 
     this.scene.add(group);
 
@@ -384,6 +425,7 @@ export class AvatarManager {
       animPhase: 0,
       breathPhase: Math.random() * Math.PI * 2,
       speed: 0,
+      chatBubbles: [],
     });
   }
 
@@ -421,6 +463,77 @@ export class AvatarManager {
     if (!this.localPlayerId) return 0;
     const avatar = this.avatars.get(this.localPlayerId);
     return avatar ? avatar.group.rotation.y : 0;
+  }
+
+  /** Show a chat bubble floating above a player's head */
+  showChatBubble(userId: string, senderName: string, content: string): void {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+
+    // Create canvas for the bubble
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = 512;
+    canvas.height = 128;
+
+    // Measure text to wrap
+    ctx.font = "bold 22px system-ui, sans-serif";
+    const nameWidth = ctx.measureText(senderName).width;
+    ctx.font = "20px system-ui, sans-serif";
+
+    const maxTextWidth = 480;
+    const displayText = content.length > 60 ? content.slice(0, 57) + "..." : content;
+
+    // Background
+    ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+    ctx.beginPath();
+    ctx.roundRect(4, 4, 504, 120, 12);
+    ctx.fill();
+
+    // Border
+    ctx.strokeStyle = "rgba(0, 255, 255, 0.4)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Name
+    ctx.fillStyle = "#00ffcc";
+    ctx.font = "bold 22px system-ui, sans-serif";
+    ctx.textBaseline = "top";
+    ctx.fillText(senderName, 16, 14, maxTextWidth);
+
+    // Message text
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "20px system-ui, sans-serif";
+    ctx.fillText(displayText, 16, 44, maxTextWidth);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(3, 0.75, 1);
+
+    // Stack above previous bubbles
+    const stackOffset = avatar.chatBubbles.length * 0.85;
+    sprite.position.set(0, 2.1 + stackOffset, 0);
+    avatar.group.add(sprite);
+
+    const bubble: ChatBubble = {
+      sprite,
+      createdAt: Date.now(),
+      duration: CHAT_DISPLAY_DURATION * 1000,
+    };
+    avatar.chatBubbles.push(bubble);
+
+    // Cap at 3 visible bubbles
+    while (avatar.chatBubbles.length > 3) {
+      const old = avatar.chatBubbles.shift()!;
+      old.sprite.parent?.remove(old.sprite);
+      old.sprite.material.map?.dispose();
+      old.sprite.material.dispose();
+    }
   }
 
   update(dt: number): void {
@@ -532,6 +645,27 @@ export class AvatarManager {
         // Slight head bob with steps
         limbs.head.rotation.x = Math.sin(p * 2) * 0.015;
         limbs.head.rotation.z = 0;
+      }
+
+      // -- Chat bubbles: fade and cleanup --
+      const now = Date.now();
+      for (let i = avatar.chatBubbles.length - 1; i >= 0; i--) {
+        const bubble = avatar.chatBubbles[i];
+        const age = now - bubble.createdAt;
+        if (age >= bubble.duration) {
+          // Remove expired bubble
+          bubble.sprite.parent?.remove(bubble.sprite);
+          bubble.sprite.material.map?.dispose();
+          bubble.sprite.material.dispose();
+          avatar.chatBubbles.splice(i, 1);
+        } else {
+          // Fade out in the last 20% of duration
+          const fadeStart = bubble.duration * 0.8;
+          if (age > fadeStart) {
+            const fadeProgress = (age - fadeStart) / (bubble.duration - fadeStart);
+            bubble.sprite.material.opacity = 1 - fadeProgress;
+          }
+        }
       }
     }
   }

@@ -12,7 +12,7 @@ import type {
 import { buildSystemPrompt } from "./system-prompt.js";
 
 const MAX_RETRIES = 3;
-const MODEL = "claude-sonnet-4-20250514";
+const MODEL = "claude-sonnet-4-6";
 
 let client: Anthropic | null = null;
 

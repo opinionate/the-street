@@ -92,6 +92,9 @@ importers:
       '@the-street/ai-service':
         specifier: workspace:*
         version: link:../ai-service
+      '@the-street/asset-pipeline':
+        specifier: workspace:*
+        version: link:../asset-pipeline
       '@the-street/shared':
         specifier: workspace:*
         version: link:../shared

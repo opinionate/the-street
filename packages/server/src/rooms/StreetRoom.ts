@@ -261,6 +261,18 @@ export class StreetRoom extends Room<StreetRoomState> {
     player.posZ = data.position.z;
     player.rotation = data.rotation;
 
+    // Broadcast to other clients
+    this.broadcast(
+      "player_move",
+      {
+        type: "player_move" as const,
+        userId: player.userId,
+        position: data.position,
+        rotation: data.rotation,
+      },
+      { except: client },
+    );
+
     // Track plot entry/exit
     this.updatePlotVisit(client.sessionId, data.position).catch(() => {});
   }
@@ -541,9 +553,14 @@ export class StreetRoom extends Room<StreetRoomState> {
       const p = plot.placement;
       const dx = position.x - p.position.x;
       const dz = position.z - p.position.z;
+      // Rotate world-space offset into the plot's local frame
+      const cos = Math.cos(-p.rotation);
+      const sin = Math.sin(-p.rotation);
+      const localX = dx * cos - dz * sin;
+      const localZ = dx * sin + dz * cos;
       if (
-        Math.abs(dx) <= p.bounds.width / 2 &&
-        Math.abs(dz) <= p.bounds.depth / 2
+        Math.abs(localX) <= p.bounds.width / 2 &&
+        Math.abs(localZ) <= p.bounds.depth / 2
       ) {
         return plot.uuid;
       }

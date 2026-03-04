@@ -101,6 +101,7 @@ async function init() {
     },
     onChat(senderId, senderName, content, _position) {
       chatUI.addMessage(senderId, senderName, content);
+      avatarManager.showChatBubble(senderId, senderName, content);
     },
     onObjectPlaced(objectId, plotUUID, objectDefinition) {
       const plot = plotSnapshots.find(p => p.uuid === plotUUID);

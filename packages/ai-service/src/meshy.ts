@@ -51,7 +51,7 @@ export async function startMeshPreview(description: string): Promise<string> {
     body: JSON.stringify({
       mode: "preview",
       prompt: description,
-      ai_model: "meshy-4",
+      ai_model: "meshy-6",
       target_polycount: 30000,
     }),
   });

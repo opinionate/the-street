@@ -990,15 +990,68 @@ export class DaemonManager {
   }
 
   private tickSocialite(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
-    // Socialites actively seek out other daemons
-    // The conversation detection happens in detectDaemonProximity
-    // They also greet players
     this.tickGreeter(daemon, dt, players);
 
     // If bored and no active conversations, lower conversation cooldown faster
     if (daemon.state.mood === "bored" && daemon.conversationCooldown > 0) {
-      daemon.conversationCooldown -= dt * 2; // Double speed toward next conversation
+      daemon.conversationCooldown -= dt * 2;
     }
+
+    // Actively seek out other daemons to chat with
+    if (daemon.state.currentAction === "idle" && daemon.conversationCooldown <= 0 && !daemon.isReturningHome) {
+      const target = this.findConversationTarget(daemon);
+      if (target) {
+        // Walk toward the target daemon
+        const dist = this.distance(daemon.state.currentPosition, target.state.currentPosition);
+        if (dist > 5) {
+          // Too far — walk toward them
+          this.moveToward(daemon, target.state.currentPosition, ROAM_SPEED * 1.2, dt);
+        }
+        // If close enough, detectDaemonProximity will handle starting the conversation
+      }
+    }
+  }
+
+  /** Find the best daemon to walk toward for a conversation */
+  private findConversationTarget(daemon: DaemonInstance): DaemonInstance | null {
+    const now = Date.now();
+    let bestTarget: DaemonInstance | null = null;
+    let bestScore = -Infinity;
+
+    for (const [otherId, other] of this.daemons) {
+      if (other === daemon) continue;
+      if (other.isMuted) continue;
+      if (other.behavior.canConverseWithDaemons === false) continue;
+      if (other.state.currentAction === "talking" || other.state.currentAction === "thinking") continue;
+
+      // Check pair cooldown
+      const conv = daemon.daemonConversations.get(otherId);
+      if (conv && now - conv.lastConversation < DAEMON_CHAT_COOLDOWN_MS) continue;
+
+      const dist = this.distance(daemon.state.currentPosition, other.state.currentPosition);
+      if (dist > 80) continue; // Don't walk across the entire map
+
+      // Score: closer is better, friendly relationship is better, socialites prefer each other
+      let score = 100 - dist;
+
+      const rel = daemon.relationships.get(otherId);
+      if (rel) {
+        if (rel.sentiment === "friendly") score += 30;
+        else if (rel.sentiment === "curious") score += 20;
+        else if (rel.sentiment === "amused") score += 25;
+      } else {
+        score += 10; // Slight bonus for unknown daemons (curiosity)
+      }
+
+      if (other.behavior.type === "socialite") score += 15; // Socialites gravitate to each other
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestTarget = other;
+      }
+    }
+
+    return bestTarget;
   }
 
   // ─── Free Roaming ─────────────────────────────────────────────

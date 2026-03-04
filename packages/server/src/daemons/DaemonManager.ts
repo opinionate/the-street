@@ -37,6 +37,7 @@ interface Relationship {
   sentiment: Sentiment;
   interactionCount: number;
   gossip: string[];        // Things heard about this entity from others
+  topicHistory: string[];  // Topics this person likes talking about (learned from interactions)
   lastUpdated: number;
 }
 
@@ -940,6 +941,11 @@ export class DaemonManager {
         // Update relationship with player
         this.updateRelationship(daemon, playerId, resolvedPlayerName, "player", response.mood);
 
+        // Learn topics from player message
+        if (playerMessage) {
+          this.learnTopics(daemon, playerId, playerMessage);
+        }
+
         // Broadcast emote if present
         if (response.emote) {
           this.broadcastDaemonEmote(daemon, response.emote, response.mood);
@@ -1325,7 +1331,7 @@ export class DaemonManager {
     // Generate the remark based on role, relationship, and context
     const playerName = closestPlayer.displayName || "stranger";
     const relationship = daemon.relationships.get(closestPlayer.userId);
-    const remark = this.pickProactiveRemark(daemon, playerName, relationship?.sentiment || "neutral");
+    const remark = this.pickProactiveRemark(daemon, playerName, relationship?.sentiment || "neutral", relationship);
     if (!remark) return;
 
     // Broadcast as chat targeted to this player
@@ -1339,11 +1345,25 @@ export class DaemonManager {
     daemon: DaemonInstance,
     playerName: string,
     sentiment: Sentiment | string,
+    relationship?: Relationship,
   ): string | null {
     const type = daemon.behavior.type;
     const time = this.lastTimeOfDay;
     const traits = daemon.state.definition.personality.traits;
     const interests = daemon.state.definition.personality.interests;
+
+    // Topic-aware remarks for returning players with learned preferences
+    if (relationship?.topicHistory && relationship.topicHistory.length > 0 && sentiment === "friendly") {
+      const topic = relationship.topicHistory[Math.floor(Math.random() * relationship.topicHistory.length)];
+      if (Math.random() < 0.5) {
+        return pick([
+          `${playerName}! I was just thinking about ${topic} — your favorite!`,
+          `Hey ${playerName}, got some news about ${topic} you might like.`,
+          `Oh ${playerName}! Anything new on the ${topic} front?`,
+          `${playerName}, still into ${topic}? I've been looking into it myself.`,
+        ]);
+      }
+    }
 
     // Friendly players get warmer remarks
     if (sentiment === "friendly") {
@@ -2904,6 +2924,7 @@ export class DaemonManager {
         sentiment: "neutral",
         interactionCount: 0,
         gossip: [],
+        topicHistory: [],
         lastUpdated: Date.now(),
       };
       daemon.relationships.set(targetId, rel);
@@ -3007,6 +3028,7 @@ export class DaemonManager {
         sentiment: "neutral",
         interactionCount: 0,
         gossip: [],
+        topicHistory: [],
         lastUpdated: Date.now(),
       };
       daemon.relationships.set(targetId, rel);
@@ -3043,6 +3065,11 @@ export class DaemonManager {
     parts.push(`[Memory: You've spoken to ${playerName} ${rel.interactionCount} time${rel.interactionCount > 1 ? "s" : ""}.`);
     parts.push(`You feel ${rel.sentiment} toward them.`);
 
+    // Include learned topics
+    if (rel.topicHistory && rel.topicHistory.length > 0) {
+      parts.push(`They seem interested in: ${rel.topicHistory.join(", ")}.`);
+    }
+
     // Include gossip about this player
     if (rel.gossip.length > 0) {
       parts.push(`You've heard: ${rel.gossip.slice(-2).join("; ")}.`);
@@ -3065,6 +3092,40 @@ export class DaemonManager {
 
     parts.push("]");
     return parts.join(" ");
+  }
+
+  /** Extract topics from player messages and store in relationship */
+  private learnTopics(daemon: DaemonInstance, playerId: string, message: string): void {
+    const rel = daemon.relationships.get(playerId);
+    if (!rel) return;
+
+    const daemonInterests = daemon.state.definition.personality?.interests || [];
+    const msgLower = message.toLowerCase();
+
+    // Check if message mentions any of the daemon's interests
+    for (const interest of daemonInterests) {
+      const words = interest.toLowerCase().split(/\s+/);
+      if (words.some(w => w.length > 3 && msgLower.includes(w))) {
+        if (!rel.topicHistory.includes(interest)) {
+          rel.topicHistory.push(interest);
+          // Keep bounded
+          if (rel.topicHistory.length > 5) rel.topicHistory.shift();
+        }
+      }
+    }
+
+    // Also extract common nouns/topics from the message
+    const topicPatterns = /\b(about|like|love|enjoy|into|interested in|tell me about)\s+(\w+(?:\s+\w+)?)/gi;
+    let match;
+    while ((match = topicPatterns.exec(message)) !== null) {
+      const topic = match[2].toLowerCase().trim();
+      if (topic.length > 2 && topic.length < 30 && !["you", "me", "the", "this", "that", "it"].includes(topic)) {
+        if (!rel.topicHistory.includes(topic)) {
+          rel.topicHistory.push(topic);
+          if (rel.topicHistory.length > 5) rel.topicHistory.shift();
+        }
+      }
+    }
   }
 
   private getRelationshipContext(daemon: DaemonInstance): Array<{
@@ -3101,16 +3162,17 @@ export class DaemonManager {
       if (rel.targetType !== "player") continue;
       if (rel.interactionCount < 2) continue;
 
-      let targetRel = target.relationships.get(targetId);
-      if (!targetRel) {
-        targetRel = {
-          targetName: rel.targetName,
-          targetType: "player",
-          sentiment: "neutral",
-          interactionCount: 0,
-          gossip: [],
-          lastUpdated: Date.now(),
-        };
+      const existingRel = target.relationships.get(targetId);
+      const targetRel = existingRel || {
+        targetName: rel.targetName,
+        targetType: "player" as const,
+        sentiment: "neutral" as Sentiment,
+        interactionCount: 0,
+        gossip: [] as string[],
+        topicHistory: [] as string[],
+        lastUpdated: Date.now(),
+      };
+      if (!existingRel) {
         target.relationships.set(targetId, targetRel);
       }
 
@@ -3294,6 +3356,7 @@ export class DaemonManager {
               sentiment,
               interactionCount: mem.interaction_count || 1,
               gossip,
+              topicHistory: [],
               lastUpdated: new Date(mem.last_interaction).getTime(),
             });
           }
@@ -3329,6 +3392,7 @@ export class DaemonManager {
             sentiment,
             interactionCount: drel.interaction_count || 1,
             gossip,
+            topicHistory: [],
             lastUpdated: new Date(drel.last_interaction).getTime(),
           });
         }

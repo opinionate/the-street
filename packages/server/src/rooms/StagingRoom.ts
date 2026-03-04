@@ -1,4 +1,6 @@
-import { Room, Client } from "colyseus";
+import colyseus from "colyseus";
+const { Room } = colyseus;
+type Client = InstanceType<typeof colyseus.Room>["clients"][number];
 import { Schema, MapSchema, type } from "@colyseus/schema";
 import { getPool } from "../database/pool.js";
 import type { WorldObject } from "@the-street/shared";

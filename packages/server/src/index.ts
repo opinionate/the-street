@@ -1,7 +1,8 @@
 import express from "express";
 import cors from "cors";
 import { createServer } from "node:http";
-import { Server } from "colyseus";
+import colyseus from "colyseus";
+const { Server } = colyseus;
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import { monitor } from "@colyseus/monitor";
 

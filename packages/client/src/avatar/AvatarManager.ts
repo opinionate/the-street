@@ -535,46 +535,71 @@ export class AvatarManager {
     return avatar ? avatar.group.rotation.y : 0;
   }
 
+  /** Get all player IDs (excluding local player) */
+  getOtherPlayerIds(): string[] {
+    return Array.from(this.avatars.keys()).filter(id => id !== this.localPlayerId);
+  }
+
+  /** Get a player's position by ID */
+  getPlayerPosition(userId: string): THREE.Vector3 | null {
+    const avatar = this.avatars.get(userId);
+    return avatar ? avatar.group.position.clone() : null;
+  }
+
+  /** Get a player's display name */
+  getPlayerName(userId: string): string | null {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return null;
+    // Find the name label sprite and extract text (stored in group name)
+    return avatar.group.name.replace("avatar_", "") || null;
+  }
+
   /** Show a chat bubble floating above a player's head */
   showChatBubble(userId: string, senderName: string, content: string): void {
     const avatar = this.avatars.get(userId);
     if (!avatar) return;
 
-    // Create canvas for the bubble
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
-    canvas.width = 512;
-    canvas.height = 128;
+    const canvasWidth = 512;
+    const padding = 16;
+    const maxTextWidth = canvasWidth - padding * 2;
 
-    // Measure text to wrap
-    ctx.font = "bold 22px system-ui, sans-serif";
-    const nameWidth = ctx.measureText(senderName).width;
+    // Word-wrap the full message
     ctx.font = "20px system-ui, sans-serif";
+    const lines = this.wrapText(ctx, content, maxTextWidth);
 
-    const maxTextWidth = 480;
-    const displayText = content.length > 60 ? content.slice(0, 57) + "..." : content;
+    const nameLineHeight = 28;
+    const textLineHeight = 24;
+    const topPad = 14;
+    const bottomPad = 14;
+    const canvasHeight = topPad + nameLineHeight + lines.length * textLineHeight + bottomPad;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
 
-    // Background
-    ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+    // Background — neutral gray
+    ctx.fillStyle = "rgba(30, 30, 30, 0.85)";
     ctx.beginPath();
-    ctx.roundRect(4, 4, 504, 120, 12);
+    ctx.roundRect(4, 4, canvasWidth - 8, canvasHeight - 8, 12);
     ctx.fill();
 
-    // Border
-    ctx.strokeStyle = "rgba(0, 255, 255, 0.4)";
+    // Border — subtle white
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
     ctx.lineWidth = 2;
     ctx.stroke();
 
     // Name
-    ctx.fillStyle = "#00ffcc";
+    ctx.fillStyle = "#ffffff";
     ctx.font = "bold 22px system-ui, sans-serif";
     ctx.textBaseline = "top";
-    ctx.fillText(senderName, 16, 14, maxTextWidth);
+    ctx.fillText(senderName, padding, topPad, maxTextWidth);
 
-    // Message text
-    ctx.fillStyle = "#ffffff";
+    // Message lines
+    ctx.fillStyle = "#eeeeee";
     ctx.font = "20px system-ui, sans-serif";
-    ctx.fillText(displayText, 16, 44, maxTextWidth);
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], padding, topPad + nameLineHeight + i * textLineHeight, maxTextWidth);
+    }
 
     const texture = new THREE.CanvasTexture(canvas);
     const mat = new THREE.SpriteMaterial({
@@ -583,10 +608,11 @@ export class AvatarManager {
       depthTest: false,
     });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(3, 0.75, 1);
+    const spriteHeight = (canvasHeight / canvasWidth) * 3;
+    sprite.scale.set(3, spriteHeight, 1);
 
     // Stack above previous bubbles
-    const stackOffset = avatar.chatBubbles.length * 0.85;
+    const stackOffset = avatar.chatBubbles.length * (spriteHeight + 0.1);
     sprite.position.set(0, 2.1 + stackOffset, 0);
     avatar.group.add(sprite);
 
@@ -604,6 +630,26 @@ export class AvatarManager {
       old.sprite.material.map?.dispose();
       old.sprite.material.dispose();
     }
+  }
+
+  /** Word-wrap text into lines that fit within maxWidth */
+  private wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let currentLine = "";
+
+    for (const word of words) {
+      const testLine = currentLine ? currentLine + " " + word : word;
+      const width = ctx.measureText(testLine).width;
+      if (width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    return lines.length > 0 ? lines : [""];
   }
 
   update(dt: number): void {

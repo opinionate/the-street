@@ -28,12 +28,12 @@ export class StreetScene {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     document.body.appendChild(this.renderer.domElement);
 
-    // Lighting
-    const ambient = new THREE.AmbientLight(0x8888aa, 1.2);
+    // Lighting — bright enough to see avatar detail
+    const ambient = new THREE.AmbientLight(0xccccdd, 2.0);
     this.scene.add(ambient);
 
-    // Cool directional light from above (moonlight feel)
-    const moon = new THREE.DirectionalLight(0x8899cc, 1.5);
+    // Main directional light (warm-white, bright)
+    const moon = new THREE.DirectionalLight(0xccccff, 2.5);
     moon.position.set(50, 200, 50);
     moon.castShadow = true;
     moon.shadow.mapSize.width = 2048;
@@ -46,13 +46,13 @@ export class StreetScene {
     moon.shadow.camera.bottom = -250;
     this.scene.add(moon);
 
-    // Fill light from opposite side to reduce harsh shadows
-    const fill = new THREE.DirectionalLight(0x6666aa, 0.6);
+    // Warm fill light from opposite side
+    const fill = new THREE.DirectionalLight(0xddccaa, 1.2);
     fill.position.set(-80, 100, -60);
     this.scene.add(fill);
 
-    // Neon accent light from below
-    const neonUp = new THREE.HemisphereLight(0x334466, 0xff00ff, 0.4);
+    // Hemisphere light — sky/ground ambient
+    const neonUp = new THREE.HemisphereLight(0x8899cc, 0x554466, 0.8);
     this.scene.add(neonUp);
 
     this.clock = new THREE.Clock();

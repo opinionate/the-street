@@ -189,43 +189,47 @@ export class DaemonRenderer {
 
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
-    canvas.width = 512;
-    canvas.height = 128;
+    const canvasWidth = 512;
+    const padding = 16;
+    const maxTextWidth = canvasWidth - padding * 2;
 
-    const displayText = content.length > 70 ? content.slice(0, 67) + "..." : content;
-    const isDaemonChat = !!targetDaemonId;
+    // Word-wrap the full message text
+    ctx.font = "18px system-ui, sans-serif";
+    const lines = this.wrapText(ctx, content, maxTextWidth);
 
-    // Background — different tint for daemon-daemon chat
-    ctx.fillStyle = isDaemonChat ? "rgba(40, 0, 40, 0.85)" : "rgba(0, 40, 0, 0.85)";
+    // Calculate canvas height dynamically
+    const nameLineHeight = 26;
+    const textLineHeight = 22;
+    const topPad = 14;
+    const bottomPad = 14;
+    const canvasHeight = topPad + nameLineHeight + lines.length * textLineHeight + bottomPad;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+
+    // Background — neutral gray
+    ctx.fillStyle = "rgba(30, 30, 30, 0.85)";
     ctx.beginPath();
-    ctx.roundRect(4, 4, 504, 120, 12);
+    ctx.roundRect(4, 4, canvasWidth - 8, canvasHeight - 8, 12);
     ctx.fill();
 
-    // Border
-    const borderColor = isDaemonChat ? "rgba(170, 68, 255, 0.5)" : "rgba(68, 255, 136, 0.5)";
-    ctx.strokeStyle = borderColor;
+    // Border — subtle white
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
     ctx.lineWidth = 2;
     ctx.stroke();
 
     // Name
-    ctx.fillStyle = isDaemonChat ? "#aa44ff" : "#44ff88";
+    const isDaemonChat = !!targetDaemonId;
+    ctx.fillStyle = isDaemonChat ? "#cc99ff" : "#88ddaa";
     ctx.font = "bold 20px system-ui, sans-serif";
     ctx.textBaseline = "top";
-    ctx.fillText(daemonName, 16, 14, 480);
+    ctx.fillText(daemonName, padding, topPad, maxTextWidth);
 
-    // Mood emoji
-    const moodEmoji = MOOD_EMOJIS[daemon.mood] || "";
-    if (moodEmoji) {
-      ctx.fillStyle = "#888888";
-      ctx.font = "16px system-ui, sans-serif";
-      const nameWidth = ctx.measureText(daemonName).width;
-      ctx.fillText(moodEmoji, 20 + nameWidth + 8, 16);
-    }
-
-    // Message
+    // Message lines
     ctx.fillStyle = "#ffffff";
     ctx.font = "18px system-ui, sans-serif";
-    ctx.fillText(displayText, 16, 48, 480);
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], padding, topPad + nameLineHeight + i * textLineHeight, maxTextWidth);
+    }
 
     const texture = new THREE.CanvasTexture(canvas);
     const mat = new THREE.SpriteMaterial({
@@ -234,9 +238,10 @@ export class DaemonRenderer {
       depthTest: false,
     });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(3, 0.75, 1);
+    const spriteHeight = (canvasHeight / canvasWidth) * 3;
+    sprite.scale.set(3, spriteHeight, 1);
 
-    const stackOffset = daemon.chatBubbles.length * 0.85;
+    const stackOffset = daemon.chatBubbles.length * (spriteHeight + 0.1);
     sprite.position.set(0, 2.4 + stackOffset, 0);
     daemon.group.add(sprite);
 
@@ -257,6 +262,26 @@ export class DaemonRenderer {
     // Trigger talking gesture
     daemon.gestureTimer = 2.0;
     daemon.gesturePhase = 0;
+  }
+
+  /** Word-wrap text into lines that fit within maxWidth */
+  private wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let currentLine = "";
+
+    for (const word of words) {
+      const testLine = currentLine ? currentLine + " " + word : word;
+      const width = ctx.measureText(testLine).width;
+      if (width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    return lines.length > 0 ? lines : [""];
   }
 
   showDaemonThought(daemonId: string, thought: string): void {
@@ -551,6 +576,34 @@ export class DaemonRenderer {
   /** Get the name of a daemon by ID */
   getDaemonName(daemonId: string): string | null {
     return this.daemonNames.get(daemonId) || null;
+  }
+
+  /** Get all daemon IDs */
+  getAllDaemonIds(): string[] {
+    return Array.from(this.daemons.keys());
+  }
+
+  /** Get daemon position by ID */
+  getDaemonPosition(daemonId: string): THREE.Vector3 | null {
+    const daemon = this.daemons.get(daemonId);
+    return daemon ? daemon.group.position.clone() : null;
+  }
+
+  /** Get daemon info for the targeting info card */
+  getDaemonInfo(daemonId: string): {
+    name: string;
+    role: string;
+    mood: string;
+    action: string;
+  } | null {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return null;
+    return {
+      name: daemon.state.definition.name,
+      role: daemon.behaviorType,
+      mood: daemon.mood,
+      action: daemon.action,
+    };
   }
 
   /** Get daemon IDs near a world position */

@@ -93,6 +93,8 @@ interface DaemonInstance {
   turfRadius: number;               // how far they consider "theirs"
   turfTimer: number;                // countdown to next territorial check
   timeAwayFromTurf: number;         // how long they've been away from home turf
+  // Global per-player chat cooldown (across all systems)
+  lastChatToPlayer: Map<string, number>;
   // Control
   isMuted: boolean;
   isRecalled: boolean;
@@ -111,7 +113,8 @@ const MOOD_DECAY_INTERVAL = 60;    // mood trends toward bored after 60s of no i
 const CONVERSATION_EXCHANGES = 3;  // lines per daemon in a conversation
 const OVERHEAR_CHANCE = 0.15;      // 15% chance a daemon reacts to nearby chat
 const OVERHEAR_COOLDOWN_MS = 30_000; // 30s cooldown per daemon for overhear reactions
-const PROACTIVE_COOLDOWN_MS = 120_000; // 2 min cooldown per player for proactive remarks
+const PROACTIVE_COOLDOWN_MS = 300_000; // 5 min cooldown per player for proactive remarks
+const GLOBAL_PLAYER_CHAT_COOLDOWN_MS = 60_000; // 60s global cooldown per player across all chat systems
 const DAY_CYCLE_SECONDS = 600;     // 10 real minutes = 1 in-game day
 const CONTAGION_RADIUS = 15;       // units — mood spreads within this radius
 const CONTAGION_INTERVAL = 8;      // check every 8 seconds
@@ -262,6 +265,7 @@ export class DaemonManager {
       turfRadius: behavior.type === "guard" ? 25 : behavior.type === "shopkeeper" ? 15 : 20,
       turfTimer: 20 + Math.random() * 20,
       timeAwayFromTurf: 0,
+      lastChatToPlayer: new Map(),
       isMuted: false,
       isRecalled: false,
     };
@@ -403,12 +407,23 @@ export class DaemonManager {
   }
 
   /** Broadcast daemon chat and log it */
+  /** Check if a daemon has recently chatted at a specific player (global cooldown) */
+  private isPlayerChatOnCooldown(daemon: DaemonInstance, playerId: string): boolean {
+    const lastChat = daemon.lastChatToPlayer.get(playerId) || 0;
+    return Date.now() - lastChat < GLOBAL_PLAYER_CHAT_COOLDOWN_MS;
+  }
+
   private broadcastDaemonChat(
     daemon: DaemonInstance,
     content: string,
     targetUserId?: string,
     targetDaemonId?: string,
   ): void {
+    // Track global per-player cooldown
+    if (targetUserId) {
+      daemon.lastChatToPlayer.set(targetUserId, Date.now());
+    }
+
     this.broadcast("daemon_chat", {
       type: "daemon_chat" as const,
       daemonId: daemon.state.daemonId,
@@ -1874,6 +1889,7 @@ export class DaemonManager {
       // Check per-player cooldown
       const lastRemark = daemon.proactiveCooldowns.get(player.userId) || 0;
       if (now - lastRemark < PROACTIVE_COOLDOWN_MS) continue;
+      if (this.isPlayerChatOnCooldown(daemon, player.userId)) continue;
 
       if (dist < closestDist) {
         closestDist = dist;
@@ -2199,7 +2215,7 @@ export class DaemonManager {
     if (daemon.thoughtTimer > 0) return;
 
     // Reset: thoughts every 45-120s, less frequent at night
-    daemon.thoughtTimer = (45 + Math.random() * 75) * getTimeChattinessFactor(this.lastTimeOfDay);
+    daemon.thoughtTimer = (80 + Math.random() * 100) * getTimeChattinessFactor(this.lastTimeOfDay);
 
     const thought = this.generateThought(daemon, players);
     if (!thought) return;
@@ -2428,8 +2444,8 @@ export class DaemonManager {
       (p) => this.distance(daemon.state.currentPosition, p.position) < daemon.behavior.interactionRadius * 2,
     );
     daemon.spontaneousGestureTimer = (hasNearby
-      ? 12 + Math.random() * 20  // More active when watched
-      : 30 + Math.random() * 40  // Less active when alone
+      ? 25 + Math.random() * 35  // More active when watched
+      : 50 + Math.random() * 60  // Less active when alone
     ) * chattiness;
 
     // Try object-aware gesture first (30% chance if nearby objects match interests)
@@ -2710,7 +2726,7 @@ export class DaemonManager {
     if (daemon.isMuted) return;
     const radius = daemon.behavior.interactionRadius;
     const now = Date.now();
-    const COOLDOWN_MS = 30_000;
+    const COOLDOWN_MS = 120_000; // 2 min between greetings per player
 
     for (const player of players) {
       const dist = this.distance(daemon.state.currentPosition, player.position);
@@ -2718,6 +2734,7 @@ export class DaemonManager {
 
       const lastGreet = daemon.greetCooldowns.get(player.userId) || 0;
       if (now - lastGreet < COOLDOWN_MS) continue;
+      if (this.isPlayerChatOnCooldown(daemon, player.userId)) continue;
 
       daemon.greetCooldowns.set(player.userId, now);
       daemon.state.currentAction = "waving";
@@ -4422,7 +4439,7 @@ export class DaemonManager {
 
     this.broadcastDaemonChat(daemon, msg);
 
-    daemon.idleTimer = 15 + Math.random() * 20;
+    daemon.idleTimer = 30 + Math.random() * 40;
   }
 
   /** Generate an observation about the environment */

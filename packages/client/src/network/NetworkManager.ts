@@ -10,7 +10,7 @@ import type {
 } from "@the-street/shared";
 
 export interface NetworkCallbacks {
-  onWorldSnapshot: (players: PlayerState[], plots: PlotSnapshot[], daemons?: DaemonState[]) => void;
+  onWorldSnapshot: (yourUserId: string, players: PlayerState[], plots: PlotSnapshot[], daemons?: DaemonState[]) => void;
   onPlayerJoin: (player: PlayerState) => void;
   onPlayerLeave: (userId: string) => void;
   onPlayerMove: (userId: string, position: Vector3, rotation: number) => void;
@@ -64,7 +64,7 @@ export class NetworkManager {
     if (!this.room) return;
 
     this.room.onMessage("world_snapshot", (data) => {
-      this.callbacks.onWorldSnapshot(data.players, data.plots, data.daemons);
+      this.callbacks.onWorldSnapshot(data.yourUserId, data.players, data.plots, data.daemons);
     });
 
     this.room.onMessage("player_join", (data) => {

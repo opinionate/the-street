@@ -228,6 +228,7 @@ export class StreetRoom extends Room<StreetRoomState> {
 
     client.send("world_snapshot", {
       type: "world_snapshot" as const,
+      yourUserId: auth.userId,
       players,
       plots: this.plotCache,
       daemons: this.daemonManager?.getDaemonStates() || [],

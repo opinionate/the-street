@@ -20,6 +20,7 @@ export class InputManager {
   onChatToggle: (() => void) | null = null;
   onInteract: (() => void) | null = null;
   onZoom: ((delta: number) => void) | null = null;
+  onTabTarget: ((reverse: boolean) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -60,6 +61,10 @@ export class InputManager {
     if (e.key === "Enter") {
       e.preventDefault();
       this.onChatToggle?.();
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      this.onTabTarget?.(e.shiftKey);
     }
     if (e.key.toLowerCase() === "e") {
       this.onInteract?.();

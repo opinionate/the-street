@@ -1,45 +1,63 @@
-import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
+export type ChatMessageType = "player" | "daemon-chat" | "daemon-emote" | "daemon-thought";
 
 interface ChatMessage {
   senderId: string;
   senderName: string;
   content: string;
   timestamp: number;
+  type: ChatMessageType;
   element: HTMLDivElement;
 }
+
+const MAX_MESSAGES = 50;
+
+const TYPE_STYLES: Record<ChatMessageType, { nameColor: string; textColor: string; fontStyle: string }> = {
+  "player":        { nameColor: "#ffffff", textColor: "#ffffff",  fontStyle: "normal" },
+  "daemon-chat":   { nameColor: "#66ff99", textColor: "#ccffcc",  fontStyle: "normal" },
+  "daemon-emote":  { nameColor: "#999999", textColor: "#aaaaaa",  fontStyle: "italic" },
+  "daemon-thought":{ nameColor: "#6699ff", textColor: "#99bbff",  fontStyle: "italic" },
+};
 
 export class ChatUI {
   private container: HTMLDivElement;
   private input: HTMLInputElement;
   private messageList: HTMLDivElement;
   private messages: ChatMessage[] = [];
-  private visible = false;
+  private inputFocused = false;
 
   onSendMessage: ((content: string) => void) | null = null;
 
   constructor() {
-    // Container
+    // Container — always visible
     this.container = document.createElement("div");
     this.container.id = "chat-ui";
     this.container.style.cssText = `
       position: fixed;
-      bottom: 20px;
-      left: 20px;
-      width: 400px;
+      bottom: 12px;
+      left: 12px;
+      width: 420px;
       z-index: 100;
       pointer-events: none;
+      display: flex;
+      flex-direction: column;
     `;
 
-    // Message list
+    // Message list — always visible, scrollable
     this.messageList = document.createElement("div");
     this.messageList.style.cssText = `
-      max-height: 200px;
+      max-height: 220px;
       overflow-y: auto;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
+      background: rgba(0, 0, 0, 0.4);
+      border-radius: 6px;
+      padding: 6px;
+      pointer-events: auto;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.2) transparent;
     `;
     this.container.appendChild(this.messageList);
 
-    // Input
+    // Input — always visible
     this.input = document.createElement("input");
     this.input.type = "text";
     this.input.placeholder = "Press Enter to chat...";
@@ -47,26 +65,34 @@ export class ChatUI {
     this.input.style.cssText = `
       width: 100%;
       padding: 8px 12px;
-      background: rgba(0, 0, 0, 0.7);
+      background: rgba(0, 0, 0, 0.6);
       border: 1px solid rgba(255, 255, 255, 0.2);
       border-radius: 4px;
       color: white;
       font-family: system-ui, sans-serif;
       font-size: 14px;
       outline: none;
-      display: none;
       pointer-events: auto;
+      box-sizing: border-box;
     `;
     this.input.addEventListener("keydown", (e) => {
       e.stopPropagation();
       if (e.key === "Enter" && this.input.value.trim()) {
         this.onSendMessage?.(this.input.value.trim());
         this.input.value = "";
-        this.hide();
+        this.input.blur();
+        this.inputFocused = false;
       }
       if (e.key === "Escape") {
-        this.hide();
+        this.input.blur();
+        this.inputFocused = false;
       }
+    });
+    this.input.addEventListener("focus", () => {
+      this.inputFocused = true;
+    });
+    this.input.addEventListener("blur", () => {
+      this.inputFocused = false;
     });
     this.container.appendChild(this.input);
 
@@ -74,20 +100,18 @@ export class ChatUI {
   }
 
   show(): void {
-    this.visible = true;
-    this.input.style.display = "block";
+    this.inputFocused = true;
     this.input.focus();
   }
 
   hide(): void {
-    this.visible = false;
-    this.input.style.display = "none";
+    this.inputFocused = false;
     this.input.blur();
     this.input.value = "";
   }
 
   toggle(): void {
-    if (this.visible) {
+    if (this.inputFocused) {
       this.hide();
     } else {
       this.show();
@@ -95,22 +119,35 @@ export class ChatUI {
   }
 
   isVisible(): boolean {
-    return this.visible;
+    return this.inputFocused;
   }
 
-  addMessage(senderId: string, senderName: string, content: string): void {
+  addMessage(
+    senderId: string,
+    senderName: string,
+    content: string,
+    type: ChatMessageType = "player",
+  ): void {
+    const style = TYPE_STYLES[type];
     const el = document.createElement("div");
     el.style.cssText = `
-      padding: 4px 8px;
-      margin-bottom: 4px;
-      background: rgba(0, 0, 0, 0.5);
-      border-radius: 4px;
-      color: white;
+      padding: 3px 6px;
+      margin-bottom: 2px;
+      color: ${style.textColor};
       font-family: system-ui, sans-serif;
       font-size: 13px;
-      transition: opacity 0.5s;
+      font-style: ${style.fontStyle};
+      line-height: 1.3;
+      word-wrap: break-word;
     `;
-    el.innerHTML = `<strong>${this.escapeHtml(senderName)}</strong>: ${this.escapeHtml(content)}`;
+
+    const prefix = type === "daemon-emote"
+      ? `* ${this.escapeHtml(senderName)} `
+      : type === "daemon-thought"
+      ? `${this.escapeHtml(senderName)} thinks: `
+      : `<span style="color:${style.nameColor};font-weight:bold">${this.escapeHtml(senderName)}</span>: `;
+
+    el.innerHTML = prefix + this.escapeHtml(content);
     this.messageList.appendChild(el);
 
     const msg: ChatMessage = {
@@ -118,22 +155,19 @@ export class ChatUI {
       senderName,
       content,
       timestamp: Date.now(),
+      type,
       element: el,
     };
     this.messages.push(msg);
 
-    // Auto-scroll
-    this.messageList.scrollTop = this.messageList.scrollHeight;
+    // Cap at MAX_MESSAGES
+    while (this.messages.length > MAX_MESSAGES) {
+      const old = this.messages.shift()!;
+      old.element.remove();
+    }
 
-    // Fade out after duration
-    setTimeout(() => {
-      el.style.opacity = "0";
-      setTimeout(() => {
-        el.remove();
-        const idx = this.messages.indexOf(msg);
-        if (idx >= 0) this.messages.splice(idx, 1);
-      }, 500);
-    }, CHAT_DISPLAY_DURATION * 1000);
+    // Auto-scroll to bottom
+    this.messageList.scrollTop = this.messageList.scrollHeight;
   }
 
   private escapeHtml(text: string): string {

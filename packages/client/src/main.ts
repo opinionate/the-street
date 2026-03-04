@@ -8,6 +8,7 @@ import { InputManager } from "./input/InputManager.js";
 import { CameraController } from "./camera/CameraController.js";
 import { NetworkManager } from "./network/NetworkManager.js";
 import { ChatUI } from "./ui/ChatUI.js";
+import { TargetingSystem } from "./ui/TargetingSystem.js";
 import { CreationPanel } from "./ui/CreationPanel.js";
 import { GalleryPanel } from "./ui/GalleryPanel.js";
 import { AvatarPanel } from "./ui/AvatarPanel.js";
@@ -52,6 +53,7 @@ async function init() {
   const avatarPanel = new AvatarPanel();
   const daemonPanel = new DaemonPanel();
   const daemonChatUI = new DaemonChatUI();
+  const targetingSystem = new TargetingSystem(streetScene.scene, avatarManager, daemonRenderer);
 
   // Build button (B key) / Gallery (G key)
   document.addEventListener("keydown", (e) => {
@@ -60,7 +62,9 @@ async function init() {
       document.activeElement?.tagName === "TEXTAREA"
     ) return;
 
-    if (e.key.toLowerCase() === "b") {
+    if (e.key === "Escape") {
+      targetingSystem.deselect();
+    } else if (e.key.toLowerCase() === "b") {
       creationPanel.toggle();
     } else if (e.key.toLowerCase() === "g") {
       galleryPanel.toggle();
@@ -83,7 +87,8 @@ async function init() {
     import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:2567`;
 
   const network = new NetworkManager(wsUrl, {
-    onWorldSnapshot(players, plots, daemons) {
+    onWorldSnapshot(yourUserId, players, plots, daemons) {
+      avatarManager.localPlayerId = yourUserId;
       for (const p of players) {
         avatarManager.addPlayer(p);
       }
@@ -150,12 +155,17 @@ async function init() {
     },
     onDaemonChat(daemonId, daemonName, content, _targetUserId, targetDaemonId) {
       daemonRenderer.showDaemonChat(daemonId, daemonName, content, targetDaemonId);
+      chatUI.addMessage(daemonId, daemonName, content, "daemon-chat");
     },
     onDaemonEmote(daemonId, emote, mood) {
       daemonRenderer.showDaemonEmote(daemonId, emote, mood);
+      const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
+      chatUI.addMessage(daemonId, name, emote, "daemon-emote");
     },
     onDaemonThought(daemonId, thought) {
       daemonRenderer.showDaemonThought(daemonId, thought);
+      const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
+      chatUI.addMessage(daemonId, name, thought, "daemon-thought");
     },
   });
 
@@ -191,6 +201,15 @@ async function init() {
   // Daemon chat send handler
   daemonChatUI.onSendMessage = (daemonId, message) => {
     network.sendDaemonInteract(daemonId, message || undefined);
+  };
+
+  // Tab targeting
+  inputManager.onTabTarget = (reverse) => {
+    if (reverse) {
+      targetingSystem.cyclePrevious();
+    } else {
+      targetingSystem.cycleNext();
+    }
   };
 
   // Zoom wiring
@@ -548,18 +567,7 @@ async function init() {
   // Try to connect (non-blocking — game works offline for dev)
   try {
     await network.connect();
-    const sessionId = network.getSessionId();
-    if (sessionId) {
-      avatarManager.localPlayerId = sessionId;
-      avatarManager.addPlayer({
-        userId: sessionId,
-        displayName: "You",
-        avatarDefinition: { avatarIndex: 0 },
-        position: spawn,
-        rotation: 0,
-        velocity: { x: 0, y: 0, z: 0 },
-      });
-    }
+    // localPlayerId is set by onWorldSnapshot callback using yourUserId
   } catch {
     console.warn("Could not connect to server — running in offline mode");
     // Add local avatar anyway for dev
@@ -685,6 +693,7 @@ async function init() {
     avatarManager.update(dt);
     daemonRenderer.update(dt);
     objectRenderer.update(elapsedTime);
+    targetingSystem.update();
     const playerPos = avatarManager.getLocalPlayerPosition();
     if (playerPos) {
       cameraController.update(playerPos, dt);
@@ -706,7 +715,7 @@ async function init() {
     z-index: 50;
   `;
   info.innerHTML =
-    "Click to look around | WASD to move | Shift to run | Enter to chat | B to build | G gallery | V avatar | N daemons";
+    "Click to look around | WASD to move | Shift to run | Enter to chat | Tab to target | B to build | G gallery | V avatar | N daemons";
   document.body.appendChild(info);
 
   streetScene.start();

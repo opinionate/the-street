@@ -12,11 +12,19 @@ function getClient(): Anthropic {
   return client;
 }
 
+interface RelationshipInfo {
+  name: string;
+  type: "player" | "daemon";
+  sentiment: string;
+  gossip?: string[];
+}
+
 interface ConversationContext {
   recentMessages: { role: "player" | "daemon"; content: string }[];
   nearbyObjects?: string[];
   nearbyPlayers?: string[];
   nearbyDaemons?: string[];
+  relationships?: RelationshipInfo[];
   timeOfDay?: string;
   currentMood: DaemonMood;
 }
@@ -56,6 +64,7 @@ SURROUNDINGS:
 ${context.nearbyPlayers?.length ? `- Nearby players: ${context.nearbyPlayers.join(", ")}` : "- No players nearby"}
 ${context.nearbyDaemons?.length ? `- Other NPCs nearby: ${context.nearbyDaemons.join(", ")}` : ""}
 ${context.nearbyObjects?.length ? `- Nearby objects: ${context.nearbyObjects.join(", ")}` : ""}
+${context.relationships?.length ? `\nRELATIONSHIPS:\n${context.relationships.map(r => `- ${r.name} (${r.type}): ${r.sentiment}${r.gossip?.length ? ` — you've heard: ${r.gossip.join("; ")}` : ""}`).join("\n")}` : ""}
 
 RULES:
 - Stay in character at all times
@@ -169,11 +178,15 @@ NPC B: ${daemonB.name}
 - Current mood: ${contextB.currentMood}
 - Backstory: ${daemonB.personality.backstory}
 
+${contextA.relationships?.length ? `\n${daemonA.name}'s relationships:\n${contextA.relationships.map(r => `- Knows ${r.name} (${r.sentiment})${r.gossip?.length ? `: "${r.gossip[0]}"` : ""}`).join("\n")}` : ""}
+${contextB.relationships?.length ? `\n${daemonB.name}'s relationships:\n${contextB.relationships.map(r => `- Knows ${r.name} (${r.sentiment})${r.gossip?.length ? `: "${r.gossip[0]}"` : ""}`).join("\n")}` : ""}
+
 RULES:
 - Write exactly ${exchanges} exchanges (${exchanges * 2} lines total, alternating speakers)
 - Each line must be under 120 characters
 - The conversation should feel natural and reflect their personalities
-- They might find common ground, disagree, or just chat casually
+- They might find common ground, disagree, share gossip about players they've met, or just chat casually
+- If they know common players, they might share opinions or stories about them
 - Include optional emotes (*adjusts hat*, *laughs*, etc.)
 - Their moods should shift naturally through the conversation
 - Never break character or mention being AI

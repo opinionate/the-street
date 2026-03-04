@@ -23,6 +23,17 @@ interface ConversationMemory {
   lastInteraction: number;
 }
 
+type Sentiment = "friendly" | "neutral" | "wary" | "curious" | "amused";
+
+interface Relationship {
+  targetName: string;      // Player name or daemon name
+  targetType: "player" | "daemon";
+  sentiment: Sentiment;
+  interactionCount: number;
+  gossip: string[];        // Things heard about this entity from others
+  lastUpdated: number;
+}
+
 interface DaemonDaemonConversation {
   otherDaemonId: string;
   lastConversation: number;
@@ -50,6 +61,8 @@ interface DaemonInstance {
   // Daemon-daemon
   daemonConversations: Map<string, DaemonDaemonConversation>; // otherDaemonId -> state
   conversationCooldown: number; // global cooldown before seeking new conversation
+  // Relationships & gossip
+  relationships: Map<string, Relationship>; // targetId -> relationship
   // Overhear
   lastOverhearReaction: number;
   // Control
@@ -146,6 +159,7 @@ export class DaemonManager {
       isReturningHome: false,
       daemonConversations: new Map(),
       conversationCooldown: 10 + Math.random() * 20, // stagger initial conversations
+      relationships: new Map(),
       lastOverhearReaction: 0,
       isMuted: false,
       isRecalled: false,
@@ -369,6 +383,7 @@ export class DaemonManager {
         const context = {
           recentMessages: memory!.messages.slice(-6),
           nearbyDaemons,
+          relationships: this.getRelationshipContext(daemon),
           currentMood: daemon.state.mood,
         };
 
@@ -394,6 +409,9 @@ export class DaemonManager {
         if (memory!.messages.length > 20) {
           memory!.messages = memory!.messages.slice(-12);
         }
+
+        // Update relationship with player
+        this.updateRelationship(daemon, playerId, resolvedPlayerName, "player", response.mood);
 
         // Broadcast emote if present
         if (response.emote) {
@@ -810,11 +828,13 @@ export class DaemonManager {
         const contextA = {
           recentMessages: [] as { role: "player" | "daemon"; content: string }[],
           nearbyDaemons: [daemonB.state.definition.name],
+          relationships: this.getRelationshipContext(daemonA),
           currentMood: daemonA.state.mood,
         };
         const contextB = {
           recentMessages: [] as { role: "player" | "daemon"; content: string }[],
           nearbyDaemons: [daemonA.state.definition.name],
+          relationships: this.getRelationshipContext(daemonB),
           currentMood: daemonB.state.mood,
         };
 
@@ -930,6 +950,9 @@ export class DaemonManager {
       daemonB.state.currentAction = "idle";
       daemonB.state.targetDaemonId = undefined;
     }
+
+    // Share gossip about known players
+    this.shareGossip(daemonA, daemonB);
   }
 
   // ─── Idle Chatter ─────────────────────────────────────────────
@@ -993,6 +1016,128 @@ export class DaemonManager {
       }
     }
     return names;
+  }
+
+  // ─── Relationships & Gossip ──────────────────────────────────
+
+  private updateRelationship(
+    daemon: DaemonInstance,
+    targetId: string,
+    targetName: string,
+    targetType: "player" | "daemon",
+    mood: DaemonMood,
+  ): void {
+    let rel = daemon.relationships.get(targetId);
+    if (!rel) {
+      rel = {
+        targetName,
+        targetType,
+        sentiment: "neutral",
+        interactionCount: 0,
+        gossip: [],
+        lastUpdated: Date.now(),
+      };
+      daemon.relationships.set(targetId, rel);
+    }
+
+    rel.interactionCount++;
+    rel.lastUpdated = Date.now();
+    rel.targetName = targetName; // Update in case name changed
+
+    // Mood influences sentiment
+    if (mood === "happy" || mood === "excited") {
+      if (rel.sentiment === "neutral") rel.sentiment = "friendly";
+      else if (rel.sentiment === "wary") rel.sentiment = "neutral";
+    } else if (mood === "annoyed") {
+      if (rel.sentiment === "neutral") rel.sentiment = "wary";
+      else if (rel.sentiment === "friendly") rel.sentiment = "neutral";
+    } else if (mood === "curious") {
+      rel.sentiment = "curious";
+    } else if (mood === "bored" && rel.interactionCount > 3) {
+      // They're getting bored of repeated interactions
+      rel.sentiment = "neutral";
+    }
+
+    // High interaction count tends toward friendly
+    if (rel.interactionCount >= 5 && rel.sentiment === "neutral") {
+      rel.sentiment = "friendly";
+    }
+  }
+
+  private getRelationshipContext(daemon: DaemonInstance): Array<{
+    name: string;
+    type: "player" | "daemon";
+    sentiment: string;
+    gossip?: string[];
+  }> {
+    const result: Array<{ name: string; type: "player" | "daemon"; sentiment: string; gossip?: string[] }> = [];
+    for (const [_id, rel] of daemon.relationships) {
+      result.push({
+        name: rel.targetName,
+        type: rel.targetType,
+        sentiment: rel.sentiment,
+        gossip: rel.gossip.length > 0 ? rel.gossip.slice(-2) : undefined,
+      });
+    }
+    return result.slice(0, 8); // Max 8 relationships in context
+  }
+
+  /** After a daemon-daemon conversation, share gossip about known players */
+  private shareGossip(daemonA: DaemonInstance, daemonB: DaemonInstance): void {
+    // A tells B about players A knows
+    for (const [targetId, relA] of daemonA.relationships) {
+      if (relA.targetType !== "player") continue;
+      if (relA.interactionCount < 2) continue; // Only gossip about people you've actually talked to
+
+      let relB = daemonB.relationships.get(targetId);
+      if (!relB) {
+        relB = {
+          targetName: relA.targetName,
+          targetType: "player",
+          sentiment: "neutral",
+          interactionCount: 0,
+          gossip: [],
+          lastUpdated: Date.now(),
+        };
+        daemonB.relationships.set(targetId, relB);
+      }
+
+      // A shares their opinion as gossip
+      const gossipLine = `${daemonA.state.definition.name} says ${relA.targetName} is ${relA.sentiment}`;
+      if (!relB.gossip.includes(gossipLine)) {
+        relB.gossip.push(gossipLine);
+        if (relB.gossip.length > 5) relB.gossip.shift();
+      }
+    }
+
+    // B tells A about players B knows
+    for (const [targetId, relB] of daemonB.relationships) {
+      if (relB.targetType !== "player") continue;
+      if (relB.interactionCount < 2) continue;
+
+      let relA = daemonA.relationships.get(targetId);
+      if (!relA) {
+        relA = {
+          targetName: relB.targetName,
+          targetType: "player",
+          sentiment: "neutral",
+          interactionCount: 0,
+          gossip: [],
+          lastUpdated: Date.now(),
+        };
+        daemonA.relationships.set(targetId, relA);
+      }
+
+      const gossipLine = `${daemonB.state.definition.name} says ${relB.targetName} is ${relB.sentiment}`;
+      if (!relA.gossip.includes(gossipLine)) {
+        relA.gossip.push(gossipLine);
+        if (relA.gossip.length > 5) relA.gossip.shift();
+      }
+    }
+
+    // Update daemon-daemon relationships
+    this.updateRelationship(daemonA, daemonB.state.daemonId, daemonB.state.definition.name, "daemon", daemonA.state.mood);
+    this.updateRelationship(daemonB, daemonA.state.daemonId, daemonA.state.definition.name, "daemon", daemonB.state.mood);
   }
 
   private distance(a: Vector3, b: Vector3): number {

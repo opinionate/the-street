@@ -10,8 +10,8 @@ export class StreetScene {
 
   constructor() {
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x87ceeb); // sky blue
-    this.scene.fog = new THREE.Fog(0x87ceeb, 200, 500);
+    this.scene.background = new THREE.Color(0x050508); // void black
+    this.scene.fog = new THREE.Fog(0x050508, 150, 400);
 
     this.camera = new THREE.PerspectiveCamera(
       60,
@@ -29,21 +29,26 @@ export class StreetScene {
     document.body.appendChild(this.renderer.domElement);
 
     // Lighting
-    const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+    const ambient = new THREE.AmbientLight(0x1a1a2e, 0.4);
     this.scene.add(ambient);
 
-    const sun = new THREE.DirectionalLight(0xffffff, 1.0);
-    sun.position.set(100, 200, 100);
-    sun.castShadow = true;
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
-    sun.shadow.camera.near = 0.5;
-    sun.shadow.camera.far = 500;
-    sun.shadow.camera.left = -250;
-    sun.shadow.camera.right = 250;
-    sun.shadow.camera.top = 250;
-    sun.shadow.camera.bottom = -250;
-    this.scene.add(sun);
+    // Cool directional light from above (moonlight feel)
+    const moon = new THREE.DirectionalLight(0x4466aa, 0.6);
+    moon.position.set(50, 200, 50);
+    moon.castShadow = true;
+    moon.shadow.mapSize.width = 2048;
+    moon.shadow.mapSize.height = 2048;
+    moon.shadow.camera.near = 0.5;
+    moon.shadow.camera.far = 500;
+    moon.shadow.camera.left = -250;
+    moon.shadow.camera.right = 250;
+    moon.shadow.camera.top = 250;
+    moon.shadow.camera.bottom = -250;
+    this.scene.add(moon);
+
+    // Neon accent light from below
+    const neonUp = new THREE.HemisphereLight(0x0d0d1a, 0xff00ff, 0.15);
+    this.scene.add(neonUp);
 
     this.clock = new THREE.Clock();
 

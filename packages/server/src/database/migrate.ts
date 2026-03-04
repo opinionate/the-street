@@ -159,6 +159,28 @@ const MIGRATIONS: { name: string; up: string }[] = [
       );
     `,
   },
+  {
+    name: "009_create_generated_objects",
+    up: `
+      CREATE TABLE IF NOT EXISTS generated_objects (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        tags TEXT[],
+        object_definition JSONB NOT NULL,
+        preview_task_id TEXT,
+        refine_task_id TEXT,
+        glb_url TEXT,
+        thumbnail_url TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_by TEXT NOT NULL DEFAULT 'dev-user',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_generated_objects_status ON generated_objects(status);
+      CREATE INDEX IF NOT EXISTS idx_generated_objects_created ON generated_objects(created_at DESC);
+    `,
+  },
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

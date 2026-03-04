@@ -1,7 +1,7 @@
 import colyseus from "colyseus";
-const { Room, Client } = colyseus;
-type Client = InstanceType<typeof colyseus.Room>["clients"][number];
-import { Schema, MapSchema, type } from "@colyseus/schema";
+const { Room } = colyseus;
+type Client = InstanceType<typeof colyseus.Room>["clients"] extends { toArray(): (infer C)[] } ? C : any;
+import { Schema, MapSchema, defineTypes } from "@colyseus/schema";
 import { getPool } from "../database/pool.js";
 import { checkChatRateLimit } from "../middleware/rate-limit.js";
 import {
@@ -22,21 +22,36 @@ import type {
 
 // Colyseus schema for syncing player state
 export class PlayerSchema extends Schema {
-  @type("string") userId: string = "";
-  @type("string") displayName: string = "";
-  @type("number") avatarIndex: number = 0;
-  @type("number") posX: number = 0;
-  @type("number") posY: number = 0;
-  @type("number") posZ: number = 0;
-  @type("number") rotation: number = 0;
-  @type("number") velX: number = 0;
-  @type("number") velY: number = 0;
-  @type("number") velZ: number = 0;
+  userId: string = "";
+  displayName: string = "";
+  avatarIndex: number = 0;
+  posX: number = 0;
+  posY: number = 0;
+  posZ: number = 0;
+  rotation: number = 0;
+  velX: number = 0;
+  velY: number = 0;
+  velZ: number = 0;
 }
+defineTypes(PlayerSchema, {
+  userId: "string",
+  displayName: "string",
+  avatarIndex: "number",
+  posX: "number",
+  posY: "number",
+  posZ: "number",
+  rotation: "number",
+  velX: "number",
+  velY: "number",
+  velZ: "number",
+});
 
 export class StreetRoomState extends Schema {
-  @type({ map: PlayerSchema }) players = new MapSchema<PlayerSchema>();
+  players = new MapSchema<PlayerSchema>();
 }
+defineTypes(StreetRoomState, {
+  players: { map: PlayerSchema },
+});
 
 // Max movement speed in units/tick for anti-cheat
 const MAX_SPEED = 15; // units per tick at 20Hz

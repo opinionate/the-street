@@ -1,20 +1,27 @@
 import colyseus from "colyseus";
 const { Room } = colyseus;
 type Client = InstanceType<typeof colyseus.Room>["clients"][number];
-import { Schema, MapSchema, type } from "@colyseus/schema";
+import { Schema, MapSchema, defineTypes } from "@colyseus/schema";
 import { getPool } from "../database/pool.js";
 import type { WorldObject } from "@the-street/shared";
 
 export class StagingObjectSchema extends Schema {
-  @type("string") id: string = "";
-  @type("string") name: string = "";
-  @type("string") definition: string = ""; // JSON-serialized WorldObject
+  id: string = "";
+  name: string = "";
+  definition: string = ""; // JSON-serialized WorldObject
 }
+defineTypes(StagingObjectSchema, {
+  id: "string",
+  name: "string",
+  definition: "string",
+});
 
 export class StagingRoomState extends Schema {
-  @type({ map: StagingObjectSchema })
   objects = new MapSchema<StagingObjectSchema>();
 }
+defineTypes(StagingRoomState, {
+  objects: { map: StagingObjectSchema },
+});
 
 export class StagingRoom extends Room<StagingRoomState> {
   private creatorId: string = "";

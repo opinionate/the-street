@@ -3,9 +3,38 @@ export class CreationPanel {
   private input: HTMLTextAreaElement;
   private button: HTMLButtonElement;
   private status: HTMLDivElement;
+  private plotInfoEl: HTMLDivElement;
+  private plotUuid: string | null = null;
   private visible = false;
 
   onGenerate: ((description: string) => Promise<void>) | null = null;
+
+  /** Update the status text from outside */
+  setStatus(text: string, color: string = "#4488ff"): void {
+    this.status.textContent = text;
+    this.status.style.color = color;
+  }
+
+  /** Update plot context — controls whether building is enabled */
+  setPlotInfo(plotUuid: string | null, ownerName: string | null): void {
+    this.plotUuid = plotUuid;
+    if (plotUuid && ownerName) {
+      this.plotInfoEl.textContent = `Building on: ${ownerName}'s plot`;
+      this.plotInfoEl.style.color = "#44ff88";
+      this.button.disabled = false;
+      this.button.style.opacity = "1";
+    } else {
+      this.plotInfoEl.textContent = "Walk to a plot to build";
+      this.plotInfoEl.style.color = "rgba(255, 255, 255, 0.4)";
+      this.button.disabled = true;
+      this.button.style.opacity = "0.5";
+    }
+  }
+
+  /** Get the currently active plot UUID (null if not on a plot) */
+  getPlotUuid(): string | null {
+    return this.plotUuid;
+  }
 
   constructor() {
     this.container = document.createElement("div");
@@ -34,6 +63,19 @@ export class CreationPanel {
       margin-bottom: 12px;
     `;
     this.container.appendChild(title);
+
+    // Plot info
+    this.plotInfoEl = document.createElement("div");
+    this.plotInfoEl.style.cssText = `
+      font-size: 12px;
+      margin-bottom: 8px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.05);
+      color: rgba(255, 255, 255, 0.4);
+    `;
+    this.plotInfoEl.textContent = "Walk to a plot to build";
+    this.container.appendChild(this.plotInfoEl);
 
     // Text input
     this.input = document.createElement("textarea");
@@ -71,6 +113,7 @@ export class CreationPanel {
     // Create button
     this.button = document.createElement("button");
     this.button.textContent = "Build";
+    this.button.disabled = true;
     this.button.style.cssText = `
       margin-top: 8px;
       width: 100%;
@@ -82,6 +125,7 @@ export class CreationPanel {
       font-size: 14px;
       font-weight: bold;
       cursor: pointer;
+      opacity: 0.5;
     `;
     this.button.addEventListener("click", () => this.handleGenerate());
     this.container.appendChild(this.button);
@@ -108,6 +152,12 @@ export class CreationPanel {
   show(): void {
     this.visible = true;
     this.container.style.display = "block";
+    // Release pointer lock so user can type
+    if (document.pointerLockElement) {
+      document.exitPointerLock();
+    }
+    // Focus after a tick (pointer lock release is async)
+    setTimeout(() => this.input.focus(), 50);
   }
 
   hide(): void {
@@ -143,8 +193,10 @@ export class CreationPanel {
       this.status.textContent = `Error: ${message}. Try again or revise your description.`;
       this.status.style.color = "#ff4444";
     } finally {
-      this.button.disabled = false;
       this.button.textContent = "Build";
+      // Re-enable only if still on a plot (user may have moved off during generation)
+      this.button.disabled = !this.plotUuid;
+      this.button.style.opacity = this.plotUuid ? "1" : "0.5";
     }
   }
 }

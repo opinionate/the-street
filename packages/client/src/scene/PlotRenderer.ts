@@ -32,26 +32,28 @@ export class PlotRenderer {
 
     const { width, depth, height } = placement.bounds;
 
-    // Wireframe boundary box
+    // Wireframe boundary box — neon cyan
     const boxGeo = new THREE.BoxGeometry(width, height, depth);
     const edges = new THREE.EdgesGeometry(boxGeo);
     const lineMat = new THREE.LineBasicMaterial({
-      color: 0x4488ff,
-      opacity: 0.3,
+      color: 0x00ffff,
+      opacity: 0.15,
       transparent: true,
     });
     const wireframe = new THREE.LineSegments(edges, lineMat);
     wireframe.position.y = height / 2; // bottom at ground
     group.add(wireframe);
 
-    // Floor pad
+    // Floor pad — dark with faint neon glow
     const padGeo = new THREE.PlaneGeometry(width, depth);
     padGeo.rotateX(-Math.PI / 2);
     const padMat = new THREE.MeshStandardMaterial({
-      color: 0x888888,
-      roughness: 0.8,
-      metalness: 0.1,
-      opacity: 0.4,
+      color: 0x0d0d18,
+      roughness: 0.6,
+      metalness: 0.3,
+      emissive: 0x110022,
+      emissiveIntensity: 0.2,
+      opacity: 0.6,
       transparent: true,
     });
     const pad = new THREE.Mesh(padGeo, padMat);

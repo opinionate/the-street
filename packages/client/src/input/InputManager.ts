@@ -19,6 +19,7 @@ export class InputManager {
 
   onChatToggle: (() => void) | null = null;
   onInteract: (() => void) | null = null;
+  onZoom: ((delta: number) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -38,16 +39,15 @@ export class InputManager {
     document.addEventListener("keydown", this.onKeyDown.bind(this));
     document.addEventListener("keyup", this.onKeyUp.bind(this));
     document.addEventListener("mousemove", this.onMouseMove.bind(this));
+    document.addEventListener("wheel", this.onWheel.bind(this), { passive: false });
     canvas.addEventListener("click", this.requestPointerLock.bind(this));
     document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this));
   }
 
   private onKeyDown(e: KeyboardEvent): void {
-    // Don't capture keys when chat input is focused
-    if (
-      document.activeElement &&
-      (document.activeElement as HTMLElement).tagName === "INPUT"
-    ) {
+    // Don't capture keys when text inputs are focused
+    const tag = (document.activeElement as HTMLElement)?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA") {
       if (e.key === "Escape") {
         (document.activeElement as HTMLElement).blur();
       }
@@ -78,6 +78,13 @@ export class InputManager {
     if (this.pointerLocked) {
       this.state.mouseX += e.movementX;
       this.state.mouseY += e.movementY;
+    }
+  }
+
+  private onWheel(e: WheelEvent): void {
+    if (this.pointerLocked) {
+      e.preventDefault();
+      this.onZoom?.(e.deltaY);
     }
   }
 

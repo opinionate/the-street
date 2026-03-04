@@ -28,7 +28,7 @@ export function getPlotPosition(
   const angle = index * angleStep;
   const centerX = Math.cos(angle) * config.ringRadius;
   const centerZ = Math.sin(angle) * config.ringRadius;
-  const facingAngle = angle + Math.PI; // face inward toward street center
+  const facingAngle = -(angle + Math.PI / 2); // one edge aligned with street tangent, depth faces inward
 
   return {
     position: { x: centerX, y: 0, z: centerZ },

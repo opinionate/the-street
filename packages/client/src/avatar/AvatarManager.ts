@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type { PlayerState, Vector3 as Vec3 } from "@the-street/shared";
 
-const AVATAR_COLORS = [0x4488ff, 0xff4488, 0x44ff88, 0xffaa44, 0xaa44ff, 0x44aaff];
+const AVATAR_COLORS = [0x00ffff, 0xff00ff, 0x39ff14, 0xff6600, 0xaa44ff, 0xffff00];
 
 interface AvatarInstance {
   group: THREE.Group;
@@ -25,29 +25,71 @@ export class AvatarManager {
     const group = new THREE.Group();
     const color = AVATAR_COLORS[colorIndex % AVATAR_COLORS.length];
 
-    // Body (cylinder)
-    const bodyGeo = new THREE.CylinderGeometry(0.3, 0.3, 1.2, 8);
     const bodyMat = new THREE.MeshStandardMaterial({
       color,
-      roughness: 0.6,
-      metalness: 0.1,
+      roughness: 0.4,
+      metalness: 0.3,
+      emissive: color,
+      emissiveIntensity: 0.15,
     });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.position.y = 1.0;
-    body.castShadow = true;
-    group.add(body);
-
-    // Head (sphere)
-    const headGeo = new THREE.SphereGeometry(0.25, 8, 8);
-    const headMat = new THREE.MeshStandardMaterial({
-      color: 0xffccaa,
+    const skinMat = new THREE.MeshStandardMaterial({
+      color: 0xddbbaa,
       roughness: 0.7,
       metalness: 0.0,
     });
-    const head = new THREE.Mesh(headGeo, headMat);
-    head.position.y = 1.85;
+
+    // Torso
+    const torsoGeo = new THREE.BoxGeometry(0.5, 0.7, 0.25);
+    const torso = new THREE.Mesh(torsoGeo, bodyMat);
+    torso.position.y = 1.15;
+    torso.castShadow = true;
+    group.add(torso);
+
+    // Head
+    const headGeo = new THREE.BoxGeometry(0.3, 0.35, 0.3);
+    const head = new THREE.Mesh(headGeo, skinMat);
+    head.position.y = 1.7;
     head.castShadow = true;
     group.add(head);
+
+    // Visor (face indicator — shows facing direction)
+    const visorGeo = new THREE.BoxGeometry(0.28, 0.1, 0.05);
+    const visorMat = new THREE.MeshStandardMaterial({
+      color,
+      emissive: color,
+      emissiveIntensity: 0.8,
+      roughness: 0.2,
+      metalness: 0.6,
+    });
+    const visor = new THREE.Mesh(visorGeo, visorMat);
+    visor.position.set(0, 1.72, -0.16);
+    group.add(visor);
+
+    // Left arm
+    const armGeo = new THREE.BoxGeometry(0.12, 0.6, 0.12);
+    const leftArm = new THREE.Mesh(armGeo, bodyMat);
+    leftArm.position.set(-0.36, 1.1, 0);
+    leftArm.castShadow = true;
+    group.add(leftArm);
+
+    // Right arm
+    const rightArm = new THREE.Mesh(armGeo, bodyMat);
+    rightArm.position.set(0.36, 1.1, 0);
+    rightArm.castShadow = true;
+    group.add(rightArm);
+
+    // Left leg
+    const legGeo = new THREE.BoxGeometry(0.15, 0.6, 0.15);
+    const leftLeg = new THREE.Mesh(legGeo, bodyMat);
+    leftLeg.position.set(-0.13, 0.45, 0);
+    leftLeg.castShadow = true;
+    group.add(leftLeg);
+
+    // Right leg
+    const rightLeg = new THREE.Mesh(legGeo, bodyMat);
+    rightLeg.position.set(0.13, 0.45, 0);
+    rightLeg.castShadow = true;
+    group.add(rightLeg);
 
     return group;
   }

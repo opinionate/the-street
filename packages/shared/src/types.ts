@@ -139,7 +139,17 @@ export interface PlayerState {
 
 // --- Daemons ---
 
-export type DaemonBehaviorType = "greeter" | "shopkeeper" | "guide" | "guard";
+export type DaemonBehaviorType = "greeter" | "shopkeeper" | "guide" | "guard" | "roamer" | "socialite";
+
+export type DaemonMood = "happy" | "neutral" | "bored" | "excited" | "annoyed" | "curious";
+
+export interface DaemonPersonality {
+  traits: string[];           // ["friendly", "curious", "witty"]
+  backstory: string;          // Brief background story
+  speechStyle: string;        // "formal", "casual", "poetic", "gruff", etc.
+  interests: string[];        // Topics they enjoy discussing
+  quirks: string[];           // Catchphrases, unusual behaviors
+}
 
 export interface DaemonBehavior {
   type: DaemonBehaviorType;
@@ -149,6 +159,10 @@ export interface DaemonBehavior {
   responses?: Record<string, string>;
   patrolPath?: Vector3[];
   idleMessages?: string[];
+  roamingEnabled?: boolean;   // Can leave home plot to wander the street
+  roamRadius?: number;        // Max distance from home (default: full ring)
+  homePosition?: Vector3;     // Where to return to when recalled
+  canConverseWithDaemons?: boolean; // Can talk to other daemons (default true)
 }
 
 export interface DaemonDefinition {
@@ -156,18 +170,23 @@ export interface DaemonDefinition {
   description: string;
   appearance: AvatarAppearance;
   behavior: DaemonBehavior;
+  personality: DaemonPersonality;
   plotUuid: string;
   position: Vector3;
   rotation: number;
 }
+
+export type DaemonAction = "idle" | "walking" | "talking" | "waving" | "thinking" | "laughing" | "emoting";
 
 export interface DaemonState {
   daemonId: string;
   definition: DaemonDefinition;
   currentPosition: Vector3;
   currentRotation: number;
-  currentAction: "idle" | "walking" | "talking" | "waving";
+  currentAction: DaemonAction;
   targetPlayerId?: string;
+  targetDaemonId?: string;    // For daemon-daemon interaction
+  mood: DaemonMood;
 }
 
 // --- Building Codes ---

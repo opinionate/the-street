@@ -8,3 +8,5 @@ export { generateAvatar } from "./avatar-generate.js";
 export type { AvatarGenerationResult } from "./avatar-generate.js";
 export { generateDaemon } from "./daemon-generate.js";
 export type { DaemonGenerationResult } from "./daemon-generate.js";
+export { generateDaemonResponse, generateDaemonConversation } from "./daemon-converse.js";
+export type { DaemonResponse, DaemonConversationLine } from "./daemon-converse.js";

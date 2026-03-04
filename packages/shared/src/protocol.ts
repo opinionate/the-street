@@ -6,6 +6,7 @@ import type {
   InteractionType,
   AvatarDefinition,
   DaemonState,
+  DaemonMood,
 } from "./types.js";
 
 // Client -> Server messages
@@ -25,7 +26,9 @@ export type ClientMessage =
       stateKey: string;
       stateValue: unknown;
     }
-  | { type: "daemon_interact"; daemonId: string };
+  | { type: "daemon_interact"; daemonId: string; message?: string }
+  | { type: "daemon_recall"; daemonId: string }
+  | { type: "daemon_toggle_roam"; daemonId: string; enabled: boolean };
 
 // Server -> Client messages
 export type ServerMessage =
@@ -66,7 +69,8 @@ export type ServerMessage =
   | { type: "daemon_spawn"; daemon: DaemonState }
   | { type: "daemon_despawn"; daemonId: string }
   | { type: "daemon_move"; daemonId: string; position: Vector3; rotation: number; action: string }
-  | { type: "daemon_chat"; daemonId: string; daemonName: string; content: string; targetUserId?: string };
+  | { type: "daemon_chat"; daemonId: string; daemonName: string; content: string; targetUserId?: string; targetDaemonId?: string }
+  | { type: "daemon_emote"; daemonId: string; emote: string; mood: DaemonMood };
 
 // Message type constants for Colyseus
 export const MSG = {
@@ -85,10 +89,13 @@ export const MSG = {
   WORLD_SNAPSHOT: "world_snapshot",
   PLAYER_AVATAR_UPDATE: "player_avatar_update",
   DAEMON_INTERACT: "daemon_interact",
+  DAEMON_RECALL: "daemon_recall",
+  DAEMON_TOGGLE_ROAM: "daemon_toggle_roam",
   DAEMON_SPAWN: "daemon_spawn",
   DAEMON_DESPAWN: "daemon_despawn",
   DAEMON_MOVE: "daemon_move",
   DAEMON_CHAT: "daemon_chat",
+  DAEMON_EMOTE: "daemon_emote",
 } as const;
 
 // Rate limits

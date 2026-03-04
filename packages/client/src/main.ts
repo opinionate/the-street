@@ -146,9 +146,37 @@ async function init() {
     onDaemonMove(daemonId, position, rotation, action) {
       daemonRenderer.moveDaemon(daemonId, position, rotation, action);
     },
-    onDaemonChat(daemonId, daemonName, content, _targetUserId) {
-      daemonRenderer.showDaemonChat(daemonId, daemonName, content);
+    onDaemonChat(daemonId, daemonName, content, _targetUserId, targetDaemonId) {
+      daemonRenderer.showDaemonChat(daemonId, daemonName, content, targetDaemonId);
     },
+    onDaemonEmote(daemonId, emote, mood) {
+      daemonRenderer.showDaemonEmote(daemonId, emote, mood);
+    },
+  });
+
+  // Click-to-interact with daemons via raycasting
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+
+  streetScene.renderer.domElement.addEventListener("click", (event) => {
+    if (!inputManager.isPointerLocked()) return;
+
+    // Screen center for pointer-locked clicks
+    pointer.set(0, 0);
+    raycaster.setFromCamera(pointer, streetScene.camera);
+
+    // Check daemon meshes
+    const nearbyDaemonIds = daemonRenderer.getDaemonsNear(localPosition, 10);
+    for (const daemonId of nearbyDaemonIds) {
+      const daemonGroup = streetScene.scene.getObjectByName(`daemon_${daemonId}`);
+      if (!daemonGroup) continue;
+
+      const intersects = raycaster.intersectObject(daemonGroup, true);
+      if (intersects.length > 0) {
+        network.sendDaemonInteract(daemonId);
+        break;
+      }
+    }
   });
 
   // Zoom wiring
@@ -255,6 +283,18 @@ async function init() {
         const err = await res.json().catch(() => ({ error: "Creation failed" }));
         throw new Error(err.error || "Creation failed");
       }
+      const result = await res.json();
+
+      // Spawn the daemon locally so it's visible immediately
+      const def = fullDefinition as any;
+      daemonRenderer.spawnDaemon({
+        daemonId: result.id,
+        definition: def,
+        currentPosition: def.position || { x: localPosition.x, y: 0, z: localPosition.z },
+        currentRotation: def.rotation || localRotation,
+        currentAction: "idle",
+      });
+
       // Reload daemon list for this plot
       loadPlotDaemons(plotUuid);
     } catch (err) {

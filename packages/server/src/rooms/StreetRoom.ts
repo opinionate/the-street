@@ -73,6 +73,12 @@ interface PlotVisit {
   enteredAt: Date;
 }
 
+// Module-level reference so the REST API can reach the daemon manager
+let activeDaemonManager: DaemonManager | null = null;
+export function getActiveDaemonManager(): DaemonManager | null {
+  return activeDaemonManager;
+}
+
 export class StreetRoom extends Room<StreetRoomState> {
   private tickInterval: ReturnType<typeof setInterval> | null = null;
   private saveInterval: ReturnType<typeof setInterval> | null = null;
@@ -103,6 +109,12 @@ export class StreetRoom extends Room<StreetRoomState> {
     this.onMessage("daemon_interact", (client, data) =>
       this.handleDaemonInteract(client, data),
     );
+    this.onMessage("daemon_recall", (client, data) =>
+      this.handleDaemonRecall(client, data),
+    );
+    this.onMessage("daemon_toggle_roam", (client, data) =>
+      this.handleDaemonToggleRoam(client, data),
+    );
 
     // Initialize daemon manager
     this.daemonManager = new DaemonManager(
@@ -112,6 +124,7 @@ export class StreetRoom extends Room<StreetRoomState> {
         if (client) client.send(type, data);
       },
     );
+    activeDaemonManager = this.daemonManager;
 
     // Server tick at 20Hz
     this.tickInterval = setInterval(() => this.tick(), 1000 / TICK_RATE);
@@ -260,6 +273,7 @@ export class StreetRoom extends Room<StreetRoomState> {
   override onDispose(): void {
     if (this.tickInterval) clearInterval(this.tickInterval);
     if (this.saveInterval) clearInterval(this.saveInterval);
+    activeDaemonManager = null;
   }
 
   private handleMove(
@@ -493,11 +507,47 @@ export class StreetRoom extends Room<StreetRoomState> {
 
   private handleDaemonInteract(
     client: Client,
-    data: { daemonId: string },
+    data: { daemonId: string; message?: string },
   ): void {
     const player = this.state.players.get(client.sessionId);
     if (!player || !this.daemonManager) return;
-    this.daemonManager.handleInteract(data.daemonId, player.userId, client.sessionId);
+    this.daemonManager.handleInteract(data.daemonId, player.userId, client.sessionId, data.message);
+  }
+
+  private async handleDaemonRecall(
+    client: Client,
+    data: { daemonId: string },
+  ): Promise<void> {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || !this.daemonManager) return;
+
+    // Verify ownership
+    const pool = getPool();
+    const { rows } = await pool.query(
+      "SELECT id FROM daemons WHERE id = $1 AND owner_id = $2",
+      [data.daemonId, player.userId],
+    );
+    if (rows.length === 0) return;
+
+    this.daemonManager.recallDaemon(data.daemonId);
+  }
+
+  private async handleDaemonToggleRoam(
+    client: Client,
+    data: { daemonId: string; enabled: boolean },
+  ): Promise<void> {
+    const player = this.state.players.get(client.sessionId);
+    if (!player || !this.daemonManager) return;
+
+    // Verify ownership
+    const pool = getPool();
+    const { rows } = await pool.query(
+      "SELECT id FROM daemons WHERE id = $1 AND owner_id = $2",
+      [data.daemonId, player.userId],
+    );
+    if (rows.length === 0) return;
+
+    this.daemonManager.setRoaming(data.daemonId, data.enabled);
   }
 
   private tick(): void {

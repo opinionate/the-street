@@ -3,6 +3,7 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { RATE_LIMITS } from "@the-street/shared";
 import { getPool } from "../database/pool.js";
+import { getActiveDaemonManager } from "../rooms/StreetRoom.js";
 
 const MAX_DAEMONS_PER_PLOT = 2;
 const router = Router();
@@ -93,6 +94,12 @@ router.post(
         ],
       );
 
+      // Notify running DaemonManager so the daemon appears for all connected clients
+      const dm = getActiveDaemonManager();
+      if (dm) {
+        dm.addDaemon(rows[0].id, definition, definition.behavior);
+      }
+
       res.json({ id: rows[0].id, success: true });
     } catch (err) {
       console.error("POST /api/daemons/create error:", err);
@@ -156,6 +163,12 @@ router.delete(
       if (rowCount === 0) {
         res.status(404).json({ error: "Daemon not found or not owned by you" });
         return;
+      }
+
+      // Notify running DaemonManager to despawn for all connected clients
+      const dm = getActiveDaemonManager();
+      if (dm) {
+        dm.removeDaemon(daemonId);
       }
 
       res.json({ success: true });

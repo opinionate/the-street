@@ -6,6 +6,7 @@ import type {
   WorldObject,
   AvatarDefinition,
   DaemonState,
+  DaemonMood,
 } from "@the-street/shared";
 
 export interface NetworkCallbacks {
@@ -33,7 +34,8 @@ export interface NetworkCallbacks {
   onDaemonSpawn?: (daemon: DaemonState) => void;
   onDaemonDespawn?: (daemonId: string) => void;
   onDaemonMove?: (daemonId: string, position: Vector3, rotation: number, action: string) => void;
-  onDaemonChat?: (daemonId: string, daemonName: string, content: string, targetUserId?: string) => void;
+  onDaemonChat?: (daemonId: string, daemonName: string, content: string, targetUserId?: string, targetDaemonId?: string) => void;
+  onDaemonEmote?: (daemonId: string, emote: string, mood: DaemonMood) => void;
 }
 
 export class NetworkManager {
@@ -118,7 +120,11 @@ export class NetworkManager {
     });
 
     this.room.onMessage("daemon_chat", (data) => {
-      this.callbacks.onDaemonChat?.(data.daemonId, data.daemonName, data.content, data.targetUserId);
+      this.callbacks.onDaemonChat?.(data.daemonId, data.daemonName, data.content, data.targetUserId, data.targetDaemonId);
+    });
+
+    this.room.onMessage("daemon_emote", (data) => {
+      this.callbacks.onDaemonEmote?.(data.daemonId, data.emote, data.mood);
     });
 
     this.room.onError((code, message) => {
@@ -150,8 +156,16 @@ export class NetworkManager {
     this.room?.send("object_remove", { objectId });
   }
 
-  sendDaemonInteract(daemonId: string): void {
-    this.room?.send("daemon_interact", { daemonId });
+  sendDaemonInteract(daemonId: string, message?: string): void {
+    this.room?.send("daemon_interact", { daemonId, message });
+  }
+
+  sendDaemonRecall(daemonId: string): void {
+    this.room?.send("daemon_recall", { daemonId });
+  }
+
+  sendDaemonToggleRoam(daemonId: string, enabled: boolean): void {
+    this.room?.send("daemon_toggle_roam", { daemonId, enabled });
   }
 
   getSessionId(): string | null {

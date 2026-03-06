@@ -117,7 +117,7 @@ export async function generateDaemon(
 
   // Validate behavior
   const beh = result.definition.behavior;
-  if (!["greeter", "shopkeeper", "guide", "guard", "roamer", "socialite"].includes(beh.type)) {
+  if (!beh.type || !["greeter", "shopkeeper", "guide", "guard", "roamer", "socialite"].includes(beh.type)) {
     beh.type = "greeter";
   }
   if (!beh.interactionRadius || beh.interactionRadius < 3 || beh.interactionRadius > 10) {
@@ -134,7 +134,7 @@ export async function generateDaemon(
   }
   // Default roaming based on type
   if (beh.roamingEnabled === undefined) {
-    beh.roamingEnabled = ["roamer", "socialite", "guide"].includes(beh.type);
+    beh.roamingEnabled = ["roamer", "socialite", "guide"].includes(beh.type ?? "");
   }
   if (beh.canConverseWithDaemons === undefined) {
     beh.canConverseWithDaemons = true;

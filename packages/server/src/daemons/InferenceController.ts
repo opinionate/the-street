@@ -21,6 +21,7 @@ import type {
 } from "@the-street/shared";
 import { getClient, stripJsonFences } from "@the-street/ai-service";
 import { getRedis } from "../database/redis.js";
+import { appendLogEntry } from "../services/ActivityLogService.js";
 
 // Haiku for conversation turns, sonnet for compilation
 const CONVERSATION_MODEL = "claude-haiku-4-5-20251001";
@@ -340,6 +341,17 @@ function formatEvent(event: DaemonEvent): string {
 // --- Main inference call ---
 
 export async function runInference(options: InferenceCallOptions): Promise<InferenceResult> {
+  const result = await runInferenceInternal(options);
+
+  // Persist log entry to database (fire-and-forget to avoid blocking inference)
+  appendLogEntry(result.logEntry).catch((err) => {
+    console.error("[ActivityLog] Failed to persist log entry:", err);
+  });
+
+  return result;
+}
+
+async function runInferenceInternal(options: InferenceCallOptions): Promise<InferenceResult> {
   const { manifest, event, session } = options;
   const startTime = Date.now();
 

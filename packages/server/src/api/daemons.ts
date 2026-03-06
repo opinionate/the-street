@@ -2,9 +2,10 @@ import { Router } from "express";
 import { requireAuth, requireRole, isAdmin, type AuthedRequest } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { RATE_LIMITS } from "@the-street/shared";
-import type { PersonalityManifest } from "@the-street/shared";
+import type { PersonalityManifest, LogEntryType } from "@the-street/shared";
 import { getPool } from "../database/pool.js";
 import { getActiveDaemonManager } from "../rooms/StreetRoom.js";
+import { queryActivityLog, getTokenSummary } from "../services/ActivityLogService.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1033,6 +1034,77 @@ router.put(
       console.error("PUT /api/daemons/:id error:", err);
       const message = err instanceof Error ? err.message : "Update failed";
       res.status(500).json({ error: message });
+    }
+  },
+);
+
+// GET /api/daemons/:id/activity-log — Paginated activity log
+router.get(
+  "/:id/activity-log",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const daemonId = req.params.id as string;
+      const types = req.query.types
+        ? (req.query.types as string).split(",") as LogEntryType[]
+        : undefined;
+      const visitorId = req.query.visitorId as string | undefined;
+      const after = req.query.after ? Number(req.query.after) : undefined;
+      const before = req.query.before ? Number(req.query.before) : undefined;
+      const sessionId = req.query.sessionId as string | undefined;
+      const limit = req.query.limit ? Number(req.query.limit) : undefined;
+      const cursor = req.query.cursor as string | undefined;
+
+      const result = await queryActivityLog({
+        daemonId,
+        types,
+        visitorId,
+        after,
+        before,
+        sessionId,
+        limit,
+        cursor,
+      });
+
+      res.json(result);
+    } catch (err) {
+      console.error("GET /api/daemons/:id/activity-log error:", err);
+      res.status(500).json({ error: "Failed to query activity log" });
+    }
+  },
+);
+
+// GET /api/daemons/:id/token-summary — Token usage breakdown
+router.get(
+  "/:id/token-summary",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const daemonId = req.params.id as string;
+      const window = (req.query.window as string) || "30d";
+
+      if (!["30d", "90d", "all"].includes(window)) {
+        res.status(400).json({ error: "window must be 30d, 90d, or all" });
+        return;
+      }
+
+      const result = await getTokenSummary(daemonId, window as "30d" | "90d" | "all");
+      res.json(result);
+    } catch (err) {
+      console.error("GET /api/daemons/:id/token-summary error:", err);
+      res.status(500).json({ error: "Failed to get token summary" });
     }
   },
 );

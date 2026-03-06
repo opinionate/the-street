@@ -22,6 +22,7 @@ import { AdminPanel } from "./ui/AdminPanel.js";
 import { AnimationPanel } from "./ui/AnimationPanel.js";
 import { AnimationConverterTool } from "./ui/AnimationConverterTool.js";
 import { DefaultModelUploader } from "./ui/DefaultModelUploader.js";
+import { ActivityLogViewer } from "./ui/ActivityLogViewer.js";
 import type { UserRole } from "@the-street/shared";
 import * as THREE from "three";
 
@@ -825,6 +826,11 @@ async function init() {
         avatarManager.reloadDefaultModels();
       };
       adminPanel.appendSection(defaultModelUploader.element);
+
+      // Activity log viewer
+      const activityLogViewer = new ActivityLogViewer(apiUrl, authFetch);
+      activityLogViewer.loadDaemons();
+      adminPanel.appendSection(activityLogViewer.element);
     })();
   }
 
@@ -859,6 +865,11 @@ async function init() {
       avatarManager.reloadDefaultModels();
     };
     adminPanel.appendSection(defaultModelUploader.element);
+
+    // Activity log viewer (dev mode)
+    const activityLogViewer = new ActivityLogViewer(apiUrl, authFetch);
+    activityLogViewer.loadDaemons();
+    adminPanel.appendSection(activityLogViewer.element);
   }
 
   if (authManager) {

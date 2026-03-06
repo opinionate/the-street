@@ -22,6 +22,7 @@ import {
   getVisitorImpression,
   summarizeAndPersistImpression,
 } from "../services/VisitorImpressionStore.js";
+import { summarizeAndPersistDaemonRelationship } from "../services/DaemonRelationshipStore.js";
 
 interface PlayerInfo {
   userId: string;
@@ -453,7 +454,7 @@ export class DaemonManager {
           this.persistRelationship(daemonId, session.participantId).catch(() => {});
         }
         if (session.participantType === "daemon") {
-          // Update daemon-daemon relationship tracking
+          // Update in-memory daemon-daemon relationship tracking
           const daemon = this.daemons.get(daemonId);
           const otherDaemon = this.daemons.get(session.participantId);
           if (daemon && otherDaemon) {
@@ -474,6 +475,18 @@ export class DaemonManager {
                 lastUpdated: Date.now(),
               });
             }
+            // Persist to DB with AI summarization
+            const summary = turns.map((t) => `${t.role}: ${t.content}`).join("\n").slice(0, 500);
+            summarizeAndPersistDaemonRelationship(
+              daemonId,
+              daemon.state.definition.name,
+              session.participantId,
+              otherDaemon.state.definition.name,
+              session,
+              summary,
+            ).catch((err) => {
+              console.error(`[SessionManager] Daemon relationship persistence failed for ${daemonId} <-> ${session.participantId}:`, err);
+            });
           }
         }
       },

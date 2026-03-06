@@ -30,6 +30,7 @@ import { monitor } from "@colyseus/monitor";
 import { getPool, closePool } from "./database/pool.js";
 import { closeRedis } from "./database/redis.js";
 import { runMigrations } from "./database/migrate.js";
+import { archiveOldLogEntries } from "./services/ActivityLogService.js";
 import { StreetRoom } from "./rooms/StreetRoom.js";
 import { StagingRoom } from "./rooms/StagingRoom.js";
 
@@ -53,6 +54,11 @@ async function main(): Promise<void> {
   const pool = getPool();
   await runMigrations(pool);
   console.log("Database migrations complete");
+
+  // Archive old activity log entries (180-day retention)
+  archiveOldLogEntries().catch((err) => {
+    console.error("[Startup] Failed to archive old log entries:", err);
+  });
 
   // Seed dev user + plots in development mode
   if (process.env.NODE_ENV === "development") {

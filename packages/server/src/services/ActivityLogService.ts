@@ -179,6 +179,43 @@ export async function getTokenSummary(
   return { window, totalTokensIn, totalTokensOut, totalCalls, breakdown };
 }
 
+// --- Log Retention (180-day archive) ---
+
+/**
+ * Archive log entries older than 180 days to daemon_activity_log_archive.
+ * Call periodically (e.g., daily cron or on server startup).
+ */
+export async function archiveOldLogEntries(): Promise<number> {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Move old entries to archive
+    const { rowCount } = await client.query(
+      `WITH archived AS (
+         DELETE FROM daemon_activity_log
+         WHERE timestamp < NOW() - INTERVAL '180 days'
+         RETURNING *
+       )
+       INSERT INTO daemon_activity_log_archive
+       SELECT * FROM archived`,
+    );
+
+    await client.query("COMMIT");
+    const count = rowCount ?? 0;
+    if (count > 0) {
+      console.log(`[ActivityLog] Archived ${count} log entries older than 180 days`);
+    }
+    return count;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // --- Row mapping ---
 
 function rowToLogEntry(row: Record<string, unknown>): LogEntry {

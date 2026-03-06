@@ -557,6 +557,18 @@ const MIGRATIONS: { name: string; up: string }[] = [
         ON daemon_relationships(target_daemon_id);
     `,
   },
+  {
+    name: "030_create_daemon_activity_log_archive",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_activity_log_archive (
+        LIKE daemon_activity_log INCLUDING ALL
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemon_activity_log_archive_daemon
+        ON daemon_activity_log_archive(daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_activity_log_archive_timestamp
+        ON daemon_activity_log_archive(timestamp);
+    `,
+  },
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

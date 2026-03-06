@@ -6,6 +6,7 @@ export class ActivityLogViewer {
   readonly element: HTMLElement;
   private logContainer: HTMLDivElement;
   private daemonSelect: HTMLSelectElement;
+  private visitorFilterInput: HTMLInputElement;
   private loadMoreBtn: HTMLButtonElement;
   private statusEl: HTMLDivElement;
   private summaryEl: HTMLDivElement;
@@ -14,6 +15,7 @@ export class ActivityLogViewer {
   private fetchFn: (url: string, options?: RequestInit) => Promise<Response>;
   private nextCursor: string | null = null;
   private currentDaemonId: string | null = null;
+  private currentVisitorFilter: string | null = null;
 
   constructor(
     apiUrl: string,
@@ -58,6 +60,44 @@ export class ActivityLogViewer {
     });
     header.appendChild(this.daemonSelect);
     wrapper.appendChild(header);
+
+    // Visitor ID filter bar
+    const filterBar = document.createElement("div");
+    filterBar.style.cssText = "display:flex;gap:6px;margin-bottom:8px;align-items:center;";
+    this.visitorFilterInput = document.createElement("input");
+    this.visitorFilterInput.type = "text";
+    this.visitorFilterInput.placeholder = "Filter by visitor ID...";
+    this.visitorFilterInput.style.cssText = `
+      flex: 1; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 4px; color: rgba(255,255,255,0.7);
+      font-size: 11px; padding: 4px 8px; font-family: monospace;
+    `;
+    const filterBtn = document.createElement("button");
+    filterBtn.textContent = "Filter";
+    filterBtn.style.cssText = `
+      background: rgba(68,170,255,0.15); border: 1px solid rgba(68,170,255,0.3);
+      border-radius: 4px; color: #44aaff; font-size: 11px; padding: 4px 10px; cursor: pointer;
+    `;
+    filterBtn.addEventListener("click", () => {
+      this.currentVisitorFilter = this.visitorFilterInput.value.trim() || null;
+      this.loadLog(true);
+    });
+    const clearBtn = document.createElement("button");
+    clearBtn.textContent = "Clear";
+    clearBtn.style.cssText = `
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 4px; color: rgba(255,255,255,0.4); font-size: 11px; padding: 4px 8px; cursor: pointer;
+    `;
+    clearBtn.addEventListener("click", () => {
+      this.visitorFilterInput.value = "";
+      this.currentVisitorFilter = null;
+      this.loadLog(true);
+    });
+    filterBar.appendChild(this.visitorFilterInput);
+    filterBar.appendChild(filterBtn);
+    filterBar.appendChild(clearBtn);
+    wrapper.appendChild(filterBar);
 
     // Token summary area
     this.summaryEl = document.createElement("div");
@@ -130,6 +170,9 @@ export class ActivityLogViewer {
       let url = `${this.apiUrl}/api/daemons/${this.currentDaemonId}/activity-log?limit=30`;
       if (this.nextCursor) {
         url += `&cursor=${encodeURIComponent(this.nextCursor)}`;
+      }
+      if (this.currentVisitorFilter) {
+        url += `&visitorId=${encodeURIComponent(this.currentVisitorFilter)}`;
       }
 
       const res = await this.fetchFn(url);

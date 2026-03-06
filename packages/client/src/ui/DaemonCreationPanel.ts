@@ -29,6 +29,7 @@ export class DaemonCreationPanel {
   private statusEl: HTMLDivElement;
   private visible = false;
   private draft: DraftState | null = null;
+  private stagedEmotes: { file: File; label: string }[] = [];
 
   // Callbacks wired in main.ts
   onCreateDraft: (() => Promise<{ id: string }>) | null = null;
@@ -278,6 +279,7 @@ export class DaemonCreationPanel {
     const wrap = document.createElement("div");
     const emoteUploads = this.draft?.uploads.filter(u => u.uploadType === "emote") || [];
 
+    // Already-uploaded emotes
     if (emoteUploads.length > 0) {
       const list = document.createElement("div");
       list.style.cssText = "margin-bottom: 8px;";
@@ -295,54 +297,135 @@ export class DaemonCreationPanel {
       wrap.appendChild(list);
     }
 
-    // Add emote form
-    const addRow = document.createElement("div");
-    addRow.style.cssText = "display: flex; gap: 8px; align-items: center;";
-
-    const labelInput = document.createElement("input");
-    labelInput.type = "text";
-    labelInput.placeholder = "Emote label (e.g. wave, dance)";
-    labelInput.style.cssText = this.inputStyle() + "flex: 1;";
-    labelInput.addEventListener("keydown", (e) => e.stopPropagation());
-    addRow.appendChild(labelInput);
-
+    // Hidden multi-select file input
     const fileInput = document.createElement("input");
     fileInput.type = "file";
     fileInput.accept = ".fbx";
+    fileInput.multiple = true;
     fileInput.style.display = "none";
     wrap.appendChild(fileInput);
 
-    const addBtn = this.makeButton("+ Add Emote FBX", "#4488ff");
-    addBtn.style.cssText += "font-size: 12px; padding: 6px 12px;";
-    addBtn.addEventListener("click", () => {
-      if (!labelInput.value.trim()) {
-        this.setStatus("Enter an emote label first", true);
-        return;
-      }
-      fileInput.click();
-    });
-    addRow.appendChild(addBtn);
-    wrap.appendChild(addRow);
+    // Staged emotes list
+    const stagedContainer = document.createElement("div");
+    stagedContainer.style.cssText = "margin-bottom: 8px;";
+    this.renderStagedEmotes(stagedContainer);
+    wrap.appendChild(stagedContainer);
 
-    fileInput.addEventListener("change", async () => {
-      const file = fileInput.files?.[0];
-      const label = labelInput.value.trim();
-      if (!file || !label || !this.draft || !this.onUploadEmote) return;
-      fileInput.value = "";
-      addBtn.disabled = true;
-      addBtn.textContent = "Uploading...";
-      try {
-        await this.onUploadEmote(this.draft.draftId, file, label);
-        labelInput.value = "";
+    // Button row
+    const btnRow = document.createElement("div");
+    btnRow.style.cssText = "display: flex; gap: 8px; align-items: center;";
+
+    const selectBtn = this.makeButton("Select Emote Files (.fbx)", "#4488ff");
+    selectBtn.style.cssText += "font-size: 12px; padding: 6px 12px;";
+    selectBtn.addEventListener("click", () => fileInput.click());
+    btnRow.appendChild(selectBtn);
+
+    if (this.stagedEmotes.length > 0) {
+      const uploadAllBtn = this.makeButton(`Upload All (${this.stagedEmotes.length})`, "#44ff88");
+      uploadAllBtn.style.cssText += "font-size: 12px; padding: 6px 12px;";
+      uploadAllBtn.addEventListener("click", async () => {
+        if (!this.draft || !this.onUploadEmote || this.stagedEmotes.length === 0) return;
+
+        // Validate all labels
+        const emptyLabel = this.stagedEmotes.find(s => !s.label.trim());
+        if (emptyLabel) {
+          this.setStatus(`Enter a label for "${emptyLabel.file.name}"`, true);
+          return;
+        }
+
+        uploadAllBtn.disabled = true;
+        selectBtn.disabled = true;
+        const total = this.stagedEmotes.length;
+
+        // Upload sequentially
+        while (this.stagedEmotes.length > 0) {
+          const idx = total - this.stagedEmotes.length;
+          const staged = this.stagedEmotes[0];
+          uploadAllBtn.textContent = `Uploading ${idx + 1}/${total}...`;
+          this.setStatus(`Uploading emote ${idx + 1}/${total}: ${staged.label}`);
+          try {
+            await this.onUploadEmote(this.draft.draftId, staged.file, staged.label.trim());
+            this.stagedEmotes.shift();
+          } catch (err) {
+            this.setStatus(`Upload failed for "${staged.label}": ${err instanceof Error ? err.message : "Unknown"}`, true);
+            uploadAllBtn.disabled = false;
+            selectBtn.disabled = false;
+            uploadAllBtn.textContent = `Upload All (${this.stagedEmotes.length})`;
+            this.renderStagedEmotes(stagedContainer);
+            return;
+          }
+        }
+
         await this.loadDraft(this.draft.draftId);
-      } catch (err) {
-        this.setStatus(`Emote upload failed: ${err instanceof Error ? err.message : "Unknown"}`, true);
-        addBtn.disabled = false;
-        addBtn.textContent = "+ Add Emote FBX";
+      });
+      btnRow.appendChild(uploadAllBtn);
+    }
+
+    wrap.appendChild(btnRow);
+
+    // File selection handler — stage selected files
+    fileInput.addEventListener("change", () => {
+      const files = fileInput.files;
+      if (!files || files.length === 0) return;
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        // Auto-derive label from filename: strip extension, lowercase, replace non-alphanumeric with _
+        const label = file.name.replace(/\.fbx$/i, "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+        this.stagedEmotes.push({ file, label });
       }
+      fileInput.value = "";
+      // Re-render the section to show staged files and Upload All button
+      this.renderDraftEditor();
     });
 
     return wrap;
+  }
+
+  private renderStagedEmotes(container: HTMLElement): void {
+    container.innerHTML = "";
+    if (this.stagedEmotes.length === 0) return;
+
+    const heading = document.createElement("div");
+    heading.textContent = "Staged for upload:";
+    heading.style.cssText = "font-size: 11px; color: rgba(255,255,255,0.4); margin-bottom: 4px;";
+    container.appendChild(heading);
+
+    for (let i = 0; i < this.stagedEmotes.length; i++) {
+      const staged = this.stagedEmotes[i];
+      const row = document.createElement("div");
+      row.style.cssText = "display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px;";
+
+      // Filename
+      const filename = document.createElement("span");
+      filename.textContent = staged.file.name;
+      filename.style.cssText = "color: rgba(255,255,255,0.5); font-size: 12px; min-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;";
+      row.appendChild(filename);
+
+      // Label input
+      const labelInput = document.createElement("input");
+      labelInput.type = "text";
+      labelInput.value = staged.label;
+      labelInput.placeholder = "slash command label";
+      labelInput.style.cssText = this.inputStyle() + "flex: 1; font-size: 12px; padding: 4px 8px;";
+      labelInput.addEventListener("keydown", (e) => e.stopPropagation());
+      const idx = i;
+      labelInput.addEventListener("input", () => {
+        this.stagedEmotes[idx].label = labelInput.value;
+      });
+      row.appendChild(labelInput);
+
+      // Remove button
+      const removeBtn = document.createElement("button");
+      removeBtn.textContent = "\u00D7";
+      removeBtn.style.cssText = "background: none; border: none; color: #ff4444; font-size: 16px; cursor: pointer; padding: 0 4px; opacity: 0.7;";
+      removeBtn.addEventListener("click", () => {
+        this.stagedEmotes.splice(idx, 1);
+        this.renderDraftEditor();
+      });
+      row.appendChild(removeBtn);
+
+      container.appendChild(row);
+    }
   }
 
   // --- Prompt Section ---

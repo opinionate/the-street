@@ -101,7 +101,7 @@ Return a single JSON object (no markdown fences, no extra text):
 
 ANIMATED EMOTES:
 You can trigger a 3D animation by setting "animatedEmoteId" to one of: ${availableEmotes.join(", ")}
-Use these sparingly and when they fit the conversation (e.g., "dance" when happy, "wave" when greeting).` : ""}`;
+When a player asks you to perform an action that matches one of these (e.g., "breakdance" → "dance", "say hi" → "wave"), you SHOULD set animatedEmoteId. Also use them naturally when they fit your mood or the conversation.` : ""}`;
 }
 
 /** Generate an AI response for a daemon talking to a player */

@@ -52,15 +52,9 @@ conversationLength must be exactly one of: "brief", "moderate", "extended".`;
 
 const EMOTE_SUGGESTION_ADDENDUM = `
 
-Additionally, for each emote label provided, suggest a short promptDescription (1 sentence) that describes how this daemon would perform that emote, given their personality.
+Additionally, add a "suggestedEmoteDescriptions" field mapping each emote label to a brief in-character description (max 10 words each).
 
-Add a "suggestedEmoteDescriptions" field to your output:
-{
-  ...expanded fields...,
-  "suggestedEmoteDescriptions": {
-    "emote-label": "How this daemon performs this emote, in character"
-  }
-}`;
+Example: "suggestedEmoteDescriptions": { "wave": "Gives a lazy two-finger salute" }`;
 
 function buildReexpansionContext(
   existing: Partial<ExpandedManifestFields>,
@@ -106,7 +100,7 @@ export async function expandPrompt(options: ExpandPromptOptions): Promise<Expand
 
   const response = await anthropic.messages.create({
     model: MODEL,
-    max_tokens: 2048,
+    max_tokens: 8192,
     system: systemPrompt,
     messages: [{ role: "user", content: userMessage }],
   });
@@ -117,7 +111,21 @@ export async function expandPrompt(options: ExpandPromptOptions): Promise<Expand
   }
 
   const jsonText = stripJsonFences(textBlock.text.trim());
-  const raw = JSON.parse(jsonText) as Record<string, unknown>;
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(jsonText) as Record<string, unknown>;
+  } catch (parseErr) {
+    // AI response was likely truncated (stop_reason: max_tokens) — attempt repair
+    console.warn(`[prompt-expand] JSON parse failed (stop_reason=${response.stop_reason}), attempting repair...`);
+    console.warn(`[prompt-expand] Last 200 chars: ${jsonText.slice(-200)}`);
+    const repaired = repairTruncatedJson(jsonText);
+    try {
+      raw = JSON.parse(repaired) as Record<string, unknown>;
+    } catch {
+      // If repair also fails, throw original error with context
+      throw new Error(`AI returned invalid JSON (stop_reason=${response.stop_reason}): ${(parseErr as Error).message}`);
+    }
+  }
 
   const expandedFields = validateExpandedFields(raw);
 
@@ -220,4 +228,111 @@ function validateConversationLength(value: unknown): "brief" | "moderate" | "ext
     return value;
   }
   return "moderate";
+}
+
+/**
+ * Attempt to repair JSON truncated mid-output (e.g. from max_tokens cutoff).
+ * Strategy: walk backward from the truncation point to find the last complete
+ * key-value pair, then close any open containers.
+ */
+function repairTruncatedJson(text: string): string {
+  // Find the last position where a complete value ends.
+  // Walk backward to find the last complete string, number, boolean, null, ], or }
+  // that is part of a valid key-value pair.
+  let repaired = text;
+
+  // First, check if we're inside an unterminated string
+  let inString = false;
+  for (let i = 0; i < repaired.length; i++) {
+    if (repaired[i] === "\\" && inString) {
+      i++; // skip escaped char
+      continue;
+    }
+    if (repaired[i] === '"') {
+      inString = !inString;
+    }
+  }
+
+  if (inString) {
+    // Strip any trailing incomplete escape sequence (e.g. truncated after \)
+    // so that appending " actually closes the string instead of creating \"
+    while (repaired.endsWith("\\")) {
+      repaired = repaired.slice(0, -1);
+    }
+    repaired += '"';
+  }
+
+  // Now strip any trailing incomplete key-value pair.
+  // After closing a string, we might have: ..."value", "orphanKey": "closedVal"
+  // or ..."value", "orphanKey" (key with no value)
+  // Strategy: repeatedly trim trailing junk until we have valid-looking JSON tail.
+
+  // Remove trailing content that looks like an incomplete pair:
+  //   - trailing comma + whitespace
+  //   - a dangling key (quoted string followed by colon with no/incomplete value)
+  //   - a dangling value after a colon
+  for (let attempt = 0; attempt < 5; attempt++) {
+    repaired = repaired.replace(/,\s*$/, "");
+
+    // Remove dangling "key": "value" or "key": partial at the end
+    // Pattern: comma or { followed by "key": <something incomplete>
+    // We look for a trailing "key": that doesn't end with a complete value
+    const danglingKeyValue = repaired.match(/,\s*"[^"]*"\s*:\s*"[^"]*"\s*$/);
+    if (danglingKeyValue) {
+      // Check if removing it helps by counting braces
+      const without = repaired.slice(0, repaired.length - danglingKeyValue[0].length);
+      // Only remove if the remaining braces/brackets are unbalanced
+      if (countOpen(without).braces > 0 || countOpen(without).brackets > 0) {
+        // It's fine, keep it — it's a complete pair, we just need closing braces
+        break;
+      }
+    }
+
+    // Remove a dangling "key":  (with no value after colon)
+    const danglingKey = repaired.match(/,?\s*"[^"]*"\s*:\s*$/);
+    if (danglingKey) {
+      repaired = repaired.slice(0, repaired.length - danglingKey[0].length);
+      continue;
+    }
+
+    // Remove a lone trailing quoted string that looks like an orphan key (no colon after it)
+    const orphanString = repaired.match(/,\s*"[^"]*"\s*$/);
+    if (orphanString) {
+      repaired = repaired.slice(0, repaired.length - orphanString[0].length);
+      continue;
+    }
+
+    break;
+  }
+
+  repaired = repaired.replace(/,\s*$/, "");
+
+  // Close any open containers
+  const { braces, brackets } = countOpen(repaired);
+  for (let i = 0; i < brackets; i++) repaired += "]";
+  for (let i = 0; i < braces; i++) repaired += "}";
+
+  return repaired;
+}
+
+function countOpen(text: string): { braces: number; brackets: number } {
+  let braces = 0;
+  let brackets = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\\" && inString) {
+      i++;
+      continue;
+    }
+    if (text[i] === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (text[i] === "{") braces++;
+    else if (text[i] === "}") braces--;
+    else if (text[i] === "[") brackets++;
+    else if (text[i] === "]") brackets--;
+  }
+  return { braces, brackets };
 }

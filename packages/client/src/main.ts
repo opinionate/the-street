@@ -21,6 +21,7 @@ import { LoginUI } from "./ui/LoginUI.js";
 import { AdminPanel } from "./ui/AdminPanel.js";
 import { DaemonCreationPanel } from "./ui/DaemonCreationPanel.js";
 import { DaemonPlacementPanel } from "./ui/DaemonPlacementPanel.js";
+import { DaemonDirectoryPanel } from "./ui/DaemonDirectoryPanel.js";
 import { AnimationPanel } from "./ui/AnimationPanel.js";
 import { AnimationConverterTool } from "./ui/AnimationConverterTool.js";
 import { DefaultModelUploader } from "./ui/DefaultModelUploader.js";
@@ -33,6 +34,7 @@ const RUN_SPEED = 36;
 const SEND_RATE = 1 / 20; // 20Hz position updates to server
 const JUMP_VELOCITY = 6;
 const GRAVITY = -15;
+const JUMP_WINDUP = 0.15; // seconds of crouch animation before launching
 const ACCEL = 12;   // ~0.1s to full walk speed
 const DECEL = 8;    // ~0.15s slide on release
 const TURN_SPEED = 3.0; // keyboard turning ~170°/s
@@ -110,6 +112,7 @@ async function init() {
   const avatarPanel = new AvatarPanel();
   const daemonPanel = new DaemonPanel();
   const daemonChatUI = new DaemonChatUI();
+  const daemonDirectoryPanel = new DaemonDirectoryPanel();
   const targetingSystem = new TargetingSystem(streetScene.scene, avatarManager, daemonRenderer);
 
   // Block mouse input from reaching the game when UI panels are open
@@ -121,7 +124,8 @@ async function init() {
     adminPanel.isVisible ||
     daemonCreationPanel.isVisible() ||
     daemonPlacementPanel.isVisible() ||
-    daemonChatUI.isVisible();
+    daemonChatUI.isVisible() ||
+    daemonDirectoryPanel.isVisible;
 
   // Build button (B key) / Gallery (G key)
   // Escape handler uses capture phase so it fires before any element can stopPropagation
@@ -141,6 +145,7 @@ async function init() {
       else if (avatarPanel.isVisible()) { avatarPanel.hide(); }
       else if (daemonPanel.isVisible()) { daemonPanel.hide(); }
       else if (adminPanel.isVisible) { adminPanel.hide(); }
+      else if (daemonDirectoryPanel.isVisible) { daemonDirectoryPanel.hide(); }
       else if (creationPanel.isVisible()) { creationPanel.hide(); }
       else if (galleryPanel.isVisible()) { galleryPanel.hide(); }
       else { targetingSystem.deselect(); }
@@ -162,8 +167,9 @@ async function init() {
       galleryPanel.toggle();
     } else if (e.key.toLowerCase() === "v") {
       avatarPanel.toggle();
-    } else if (e.key.toLowerCase() === "n") {
-      daemonPanel.toggle();
+    } else if (e.key === "F10") {
+      e.preventDefault();
+      daemonDirectoryPanel.toggle();
     } else if (e.key === "F9" && userRole === "super_admin") {
       adminPanel.toggle();
     }
@@ -181,6 +187,7 @@ async function init() {
   let velocityZ = 0;
   let wasJumping = false;
   let landingTimer = 0;
+  let jumpWindupTimer = 0; // countdown for crouch before launch
 
   // Network
   const wsUrl =
@@ -290,17 +297,15 @@ async function init() {
       const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
       chatUI.addMessage(daemonId, name, thought, "daemon-thought");
     },
-    onDaemonSpeechStream(daemonId, daemonName, speech, emote, movement, addressedTo, _position) {
+    onDaemonSpeechStream(daemonId, daemonName, speech, _emote, movement, addressedTo, _position) {
       // Render speech as distinct daemon speech in chat
       chatUI.addMessage(daemonId, daemonName, speech, "daemon-speech");
 
       // Show speech bubble on daemon
       daemonRenderer.showDaemonChat(daemonId, daemonName, speech);
 
-      // Trigger emote animation if provided
-      if (emote) {
-        daemonRenderer.playDaemonEmote(daemonId, emote);
-      }
+      // Note: text emotes (e.g. "*waves*") are handled by the separate onDaemonEmote callback.
+      // Animation triggers come through onDaemonAnimatedEmote with a valid emoteId.
 
       // Handle movement intent
       if (movement) {
@@ -526,12 +531,16 @@ async function init() {
 
   // Animation panel factory for daemons
   daemonPanel.createAnimationPanel = (daemonId: string) => {
-    return new AnimationPanel({
+    const panel = new AnimationPanel({
       entityType: "daemon",
       getEntityId: () => daemonId,
       apiUrl,
       getAuthToken: getAuthTokenStr,
     });
+    panel.onAnimationChanged = () => {
+      daemonRenderer.reloadIdleAnimation(daemonId);
+    };
+    return panel;
   };
 
   // Daemon panel wiring
@@ -644,6 +653,81 @@ async function init() {
     } catch {
       return [];
     }
+  };
+
+  // --- Daemon Directory Panel callbacks ---
+  daemonDirectoryPanel.onFetchDaemons = () => {
+    return daemonRenderer.getAllDaemonStates();
+  };
+
+  daemonDirectoryPanel.onTeleport = (position) => {
+    localPosition.set(position.x, position.y, position.z);
+    networkManager?.sendMove(position, localRotation);
+  };
+
+  daemonDirectoryPanel.onFetchEmotes = async (daemonId) => {
+    const res = await fetch(`${apiUrl}/api/daemons/${daemonId}/emotes`);
+    if (!res.ok) return [];
+    return res.json();
+  };
+
+  daemonDirectoryPanel.onSetIdleAnimation = async (daemonId, label) => {
+    await authFetch(`${apiUrl}/api/daemons/${daemonId}/idle-animation`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
+    // Hot-swap the idle animation on the live daemon
+    daemonRenderer.reloadIdleAnimation(daemonId);
+  };
+
+  daemonDirectoryPanel.onFetchActivity = async (daemonId) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/activity`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.activity || [];
+    } catch {
+      return [];
+    }
+  };
+
+  daemonDirectoryPanel.onFetchDaemonDetails = async (daemonId) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}`);
+      if (!res.ok) return null;
+      return res.json();
+    } catch {
+      return null;
+    }
+  };
+
+  daemonDirectoryPanel.onSaveDaemon = async (daemonId, definition) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ definition }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  // Animation panel factory for daemon directory detail view
+  daemonDirectoryPanel.createAnimationPanel = (daemonId: string) => {
+    const panel = new AnimationPanel({
+      entityType: "daemon",
+      getEntityId: () => daemonId,
+      apiUrl,
+      getAuthToken: getAuthTokenStr,
+    });
+    // Hot-swap animation on the live daemon after upload/delete
+    panel.onAnimationChanged = () => {
+      daemonRenderer.reloadIdleAnimation(daemonId);
+    };
+    return panel;
   };
 
   async function loadPlotDaemons(plotUuid: string) {
@@ -1278,6 +1362,10 @@ async function init() {
 
       // Compute target velocity from input (avatar-relative)
       const moveVec = inputManager.getMovementVector();
+      // Both mouse buttons held = walk forward
+      if (inputManager.isBothMouseDown()) {
+        moveVec.z = Math.max(moveVec.z, 1);
+      }
       let desiredSpeed = inputManager.state.sprint ? RUN_SPEED : WALK_SPEED;
 
       // Landing recovery: reduce max speed briefly after landing
@@ -1317,12 +1405,25 @@ async function init() {
         avatarManager.stopEmote(avatarManager.localPlayerId || "");
       }
 
-      // Edge-triggered jump
-      if (inputManager.state.jump && !wasJumping && isGrounded) {
-        verticalVelocity = JUMP_VELOCITY;
-        isGrounded = false;
+      // Edge-triggered jump with wind-up (crouch before launch)
+      if (inputManager.state.jump && !wasJumping && isGrounded && jumpWindupTimer <= 0) {
+        jumpWindupTimer = JUMP_WINDUP;
+        // Start jump animation immediately so crouch frames play
+        avatarManager.setLocalMovementState({
+          speed: currentSpeed, turning: 0, strafing: 0, jumping: true,
+        });
       }
       wasJumping = inputManager.state.jump;
+
+      // Wind-up countdown — launch when timer expires
+      if (jumpWindupTimer > 0) {
+        jumpWindupTimer -= dt;
+        if (jumpWindupTimer <= 0) {
+          jumpWindupTimer = 0;
+          verticalVelocity = JUMP_VELOCITY;
+          isGrounded = false;
+        }
+      }
 
       if (!isGrounded) {
         verticalVelocity += GRAVITY * dt;
@@ -1353,7 +1454,7 @@ async function init() {
         speed: currentSpeed,
         turning: turningState,
         strafing: inputManager.state.strafeLeft ? -1 : inputManager.state.strafeRight ? 1 : 0,
-        jumping: !isGrounded,
+        jumping: !isGrounded || jumpWindupTimer > 0,
       });
 
       // Send position to server at SEND_RATE
@@ -1402,7 +1503,7 @@ async function init() {
     // Camera yaw: when free-orbiting, camera stays put; when character moves, snap back behind
     if (cameraFreeOrbit) {
       // Character is moving or turning → smoothly return camera behind character
-      const isMovingOrTurning = inputManager.isMoving() || inputManager.isTurning() || inputManager.isRightMouseDragging();
+      const isMovingOrTurning = inputManager.isMoving() || inputManager.isTurning() || inputManager.isRightMouseDragging() || inputManager.isBothMouseDown();
       if (isMovingOrTurning) {
         cameraFreeOrbit = false;
       }

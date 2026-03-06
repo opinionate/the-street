@@ -193,6 +193,8 @@ export interface DaemonState {
   targetPlayerId?: string;
   targetDaemonId?: string;    // For daemon-daemon interaction
   mood: DaemonMood;
+  characterUploadId?: string;  // UUID of uploaded character FBX
+  idleAnimationLabel?: string; // Label of emote FBX to use as idle animation
 }
 
 // --- Building Codes ---

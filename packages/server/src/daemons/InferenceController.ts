@@ -53,6 +53,7 @@ export interface InferenceCallOptions {
   visitorImpression?: VisitorImpression;
   daemonRelationship?: DaemonRelationship;
   contextBudget?: number;
+  dailyCallsRemaining?: number;
 }
 
 // --- Budget tracking ---
@@ -177,7 +178,7 @@ function assembleContext(options: InferenceCallOptions): InferenceContext {
     parts.push(`\nAVAILABLE EMOTES:\n${manifest.availableEmotes.map(e => `- ${e.emoteId}: ${e.label}`).join("\n")}`);
   }
 
-  const dailyBudgetNote = `\nBUDGET: You have approximately ${options.contextBudget ?? "unknown"} calls remaining today. Be mindful of this.`;
+  const dailyBudgetNote = `\nBUDGET: You have approximately ${options.dailyCallsRemaining ?? "unknown"} calls remaining today. Be mindful of this.`;
   parts.push(dailyBudgetNote);
 
   const assembledSystemPrompt = parts.join("\n");
@@ -373,8 +374,10 @@ async function runInferenceInternal(options: InferenceCallOptions): Promise<Infe
   }
 
   // 4. Assemble context
+  // contextBudget is in tokens (not daily call count). Haiku supports 200k but we cap
+  // conversations at 8192 tokens to keep responses focused and costs reasonable.
   const budgetRemaining = manifest.maxDailyCalls - dailyUsed;
-  const context = assembleContext({ ...options, contextBudget: budgetRemaining });
+  const context = assembleContext({ ...options, contextBudget: 8192, dailyCallsRemaining: budgetRemaining });
 
   // 5. Check context overflow
   const isContextOverflow = context.assembledTokenCount >= context.contextBudget;

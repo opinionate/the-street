@@ -178,7 +178,7 @@ export class StreetRoom extends Room<StreetRoomState> {
       return {
         userId: "00000000-0000-0000-0000-000000000000",
         clerkId: "dev_clerk_id",
-        displayName: "Dev User",
+        displayName: "Na3an",
         role: (process.env.DEV_USER_ROLE as UserRole) || "super_admin",
         avatarDefinition: { avatarIndex: 0 },
         lastPosition: null,

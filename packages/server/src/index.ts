@@ -71,8 +71,8 @@ async function main(): Promise<void> {
     const devUserId = "00000000-0000-0000-0000-000000000000";
     await pool.query(
       `INSERT INTO users (id, clerk_id, display_name, public_key, private_key_encrypted, role)
-       VALUES ($1, 'dev_clerk_id', 'Dev User', 'dev-pub-key', 'dev-priv-key', 'super_admin')
-       ON CONFLICT (id) DO UPDATE SET role = 'super_admin'`,
+       VALUES ($1, 'dev_clerk_id', 'Na3an', 'dev-pub-key', 'dev-priv-key', 'super_admin')
+       ON CONFLICT (id) DO UPDATE SET role = 'super_admin', display_name = EXCLUDED.display_name`,
       [devUserId],
     );
     // Seed plots for dev user (ring 0, positions 0-7)

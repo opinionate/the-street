@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
+import { normalizeMixamoBoneName } from "./animation-converter.js";
 import type { DaemonState, DaemonMood, DaemonAction, Vector3 as Vec3 } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
 
@@ -55,6 +57,7 @@ interface DaemonCustomModel {
 
 interface DaemonInstance {
   group: THREE.Group;
+  bodyGroup: THREE.Group;
   name: string;
   targetPosition: THREE.Vector3;
   targetRotation: number;
@@ -98,6 +101,7 @@ export class DaemonRenderer {
   private daemonNames = new Map<string, string>();
   private scene: THREE.Scene;
   private gltfLoader = new GLTFLoader();
+  private fbxLoader = new FBXLoader();
   private cachedAnimClips: { walk?: THREE.AnimationClip; run?: THREE.AnimationClip } = {};
   private animClipsLoading: Promise<void> | null = null;
   private moodTextureCache = new Map<number, THREE.Texture>();
@@ -106,6 +110,48 @@ export class DaemonRenderer {
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
+  }
+
+  /** Retarget a GLB animation clip's track names to match an FBX model's bone names.
+   *  Handles path prefixes (e.g. "AnimationRoot/mixamorigHips") and Mixamo variant
+   *  number mismatches (e.g. "mixamorigHips" vs "mixamorig1Hips"). */
+  private retargetClipToModel(clip: THREE.AnimationClip, model: THREE.Object3D): THREE.AnimationClip {
+    // Build normalized → actual bone name map from the model
+    const boneMap = new Map<string, string>();
+    model.traverse((obj) => {
+      if ((obj as THREE.Bone).isBone || obj.name) {
+        const normalized = normalizeMixamoBoneName(obj.name);
+        boneMap.set(normalized, obj.name);
+      }
+    });
+
+    const newTracks: THREE.KeyframeTrack[] = [];
+    for (const track of clip.tracks) {
+      // Track name format: "BoneName.property" or "Path/To/BoneName.property"
+      const dotIdx = track.name.lastIndexOf(".");
+      const propSuffix = dotIdx !== -1 ? track.name.substring(dotIdx) : "";
+      const fullPath = dotIdx !== -1 ? track.name.substring(0, dotIdx) : track.name;
+
+      // Strip path prefix: "AnimationRoot/mixamorigHips" → "mixamorigHips"
+      const slashIdx = fullPath.lastIndexOf("/");
+      const boneName = slashIdx !== -1 ? fullPath.substring(slashIdx + 1) : fullPath;
+
+      // Try exact match first, then normalized
+      let targetBone = boneName;
+      if (!boneMap.has(boneName)) {
+        const normalized = normalizeMixamoBoneName(boneName);
+        const actual = boneMap.get(normalized);
+        if (actual) {
+          targetBone = actual;
+        }
+      }
+
+      const newTrack = track.clone();
+      newTrack.name = targetBone + propSuffix;
+      newTracks.push(newTrack);
+    }
+
+    return new THREE.AnimationClip(clip.name, clip.duration, newTracks);
   }
 
   spawnDaemon(daemon: DaemonState): void {
@@ -143,6 +189,7 @@ export class DaemonRenderer {
 
     this.daemons.set(daemon.daemonId, {
       group,
+      bodyGroup: parts.body,
       name: daemon.definition.name,
       targetPosition: new THREE.Vector3(
         daemon.currentPosition.x,
@@ -181,6 +228,160 @@ export class DaemonRenderer {
       customModel: null,
     });
 
+    // Load custom character model if available
+    if (daemon.characterUploadId && this.apiUrl) {
+      this.loadCustomModel(daemon.daemonId, daemon.characterUploadId, daemon.idleAnimationLabel);
+    }
+  }
+
+  private async loadCustomModel(daemonId: string, uploadId: string, preferredIdleLabel?: string): Promise<void> {
+    const instance = this.daemons.get(daemonId);
+    if (!instance) return;
+
+    try {
+      const url = `${this.apiUrl}/api/daemons/assets/${uploadId}/model`;
+      const fbx = await this.fbxLoader.loadAsync(url);
+
+      // Scale to reasonable size (FBX models are often in cm)
+      const box = new THREE.Box3().setFromObject(fbx);
+      const height = box.max.y - box.min.y;
+      if (height > 0) {
+        const targetHeight = 1.7; // ~1.7m human height
+        const scale = targetHeight / height;
+        fbx.scale.setScalar(scale);
+      }
+
+      // Center horizontally, feet on ground
+      const scaledBox = new THREE.Box3().setFromObject(fbx);
+      fbx.position.y = -scaledBox.min.y;
+      fbx.position.x = -(scaledBox.min.x + scaledBox.max.x) / 2;
+      fbx.position.z = -(scaledBox.min.z + scaledBox.max.z) / 2;
+
+      // Set up animation mixer
+      const mixer = new THREE.AnimationMixer(fbx);
+      const actions: DaemonCustomModel["actions"] = {};
+
+      // Load idle animation from custom animations system (GLB uploaded via AnimationPanel)
+      try {
+        const idleUrl = `${this.apiUrl}/api/animations/daemon/${daemonId}/idle?_v=${Date.now()}`;
+        const idleRes = await fetch(idleUrl);
+        if (idleRes.ok) {
+          const gltf = await new Promise<any>((resolve, reject) => {
+            this.gltfLoader.load(idleUrl, resolve, undefined, reject);
+          });
+          if (gltf.animations.length > 0) {
+            const retargeted = this.retargetClipToModel(gltf.animations[0], fbx);
+            actions.idle = mixer.clipAction(retargeted);
+            actions.idle.play();
+            console.log(`[Daemon] Playing custom idle animation for ${daemonId}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`[Daemon] Failed to load custom idle animation for ${daemonId}:`, err);
+      }
+
+      // Fallback: try legacy emote uploads (FBX)
+      if (!actions.idle) {
+        try {
+          const emotesRes = await fetch(`${this.apiUrl}/api/daemons/${daemonId}/emotes`);
+          if (emotesRes.ok) {
+            const emotes: Array<{ id: string; label: string }> = await emotesRes.json();
+            const idleEmote = (preferredIdleLabel && emotes.find(e => e.label === preferredIdleLabel))
+              || emotes[0];
+            if (idleEmote) {
+              const emoteUrl = `${this.apiUrl}/api/daemons/assets/${idleEmote.id}/model`;
+              const emoteFbx = await this.fbxLoader.loadAsync(emoteUrl);
+              if (emoteFbx.animations.length > 0) {
+                actions.idle = mixer.clipAction(emoteFbx.animations[0]);
+                actions.idle.play();
+                console.log(`[Daemon] Playing legacy emote "${idleEmote.label}" as idle for ${daemonId}`);
+              }
+            }
+          }
+        } catch (emoteErr) {
+          console.warn(`[Daemon] Failed to load legacy emote animations for ${daemonId}:`, emoteErr);
+        }
+      }
+
+      // Fallback: use embedded animation from character FBX if no emote loaded
+      if (!actions.idle && fbx.animations.length > 0) {
+        actions.idle = mixer.clipAction(fbx.animations[0]);
+        actions.idle.play();
+      }
+
+      // Hide entire procedural body (includes eyes, accent light, etc.)
+      instance.bodyGroup.visible = false;
+
+      instance.group.add(fbx);
+      instance.customModel = {
+        model: fbx,
+        mixer,
+        actions,
+        currentAction: "idle",
+        baseY: 0,
+      };
+
+      console.log(`[Daemon] Loaded custom model for ${daemonId} from upload ${uploadId}`);
+    } catch (err) {
+      console.warn(`[Daemon] Failed to load custom model for ${daemonId}:`, err);
+      // Fall back to procedural model (already visible)
+    }
+  }
+
+  /** Hot-swap the idle animation for a daemon that already has a custom model loaded.
+   *  Checks the new animation system (GLB) first, then falls back to legacy emotes (FBX). */
+  async reloadIdleAnimation(daemonId: string): Promise<void> {
+    const instance = this.daemons.get(daemonId);
+    if (!instance?.customModel) return;
+
+    const { mixer, actions, model } = instance.customModel;
+
+    let newClip: THREE.AnimationClip | null = null;
+
+    // Try new animation system first (GLB uploaded via AnimationPanel)
+    try {
+      const idleUrl = `${this.apiUrl}/api/animations/daemon/${daemonId}/idle?_v=${Date.now()}`;
+      const gltf = await new Promise<any>((resolve, reject) => {
+        this.gltfLoader.load(idleUrl, resolve, undefined, reject);
+      });
+      if (gltf.animations.length > 0) {
+        newClip = this.retargetClipToModel(gltf.animations[0], model);
+      }
+    } catch {
+      // No custom idle in new system — try legacy
+    }
+
+    // Fallback: legacy emote system (FBX — no retargeting needed)
+    if (!newClip) {
+      try {
+        const emotesRes = await fetch(`${this.apiUrl}/api/daemons/${daemonId}/emotes`);
+        if (emotesRes.ok) {
+          const emotes: Array<{ id: string; label: string }> = await emotesRes.json();
+          if (emotes.length > 0) {
+            const emoteUrl = `${this.apiUrl}/api/daemons/assets/${emotes[0].id}/model`;
+            const emoteFbx = await this.fbxLoader.loadAsync(emoteUrl);
+            if (emoteFbx.animations.length > 0) {
+              newClip = emoteFbx.animations[0];
+            }
+          }
+        }
+      } catch {
+        // No legacy emotes either
+      }
+    }
+
+    if (!newClip) return;
+
+    // Stop and uncache old idle
+    if (actions.idle) {
+      actions.idle.stop();
+      mixer.uncacheAction(actions.idle.getClip());
+    }
+
+    // Play new idle
+    actions.idle = mixer.clipAction(newClip);
+    actions.idle.play();
+    console.log(`[Daemon] Hot-swapped idle animation for ${daemonId}`);
   }
 
   despawnDaemon(daemonId: string): void {
@@ -532,6 +733,9 @@ export class DaemonRenderer {
     }
     if (!clip) return;
 
+    // Retarget GLB bone names to match the FBX model
+    clip = this.retargetClipToModel(clip, cm.model);
+
     // Stop any existing emote
     if (cm.actions.emote) {
       cm.actions.emote.fadeOut(0.3);
@@ -567,6 +771,9 @@ export class DaemonRenderer {
 
   /** Update mood-driven visual properties: accent light color, body tint, animation speed, particles */
   private updateMoodVisuals(daemon: DaemonInstance, dt: number): void {
+    // Skip procedural mood visuals when a custom model is loaded
+    if (daemon.customModel) return;
+
     const moodColor = MOOD_COLORS[daemon.mood] || 0x888888;
 
     // Accent light shifts color to match mood
@@ -902,6 +1109,22 @@ export class DaemonRenderer {
       }
     }
     return results;
+  }
+
+  getAllDaemonStates(): DaemonState[] {
+    const states: DaemonState[] = [];
+    for (const [id, daemon] of this.daemons) {
+      states.push({
+        daemonId: id,
+        definition: { name: daemon.name, description: "", behavior: { type: daemon.behaviorType } } as DaemonState["definition"],
+        currentPosition: { x: daemon.group.position.x, y: daemon.group.position.y, z: daemon.group.position.z },
+        currentRotation: daemon.currentRotation,
+        currentAction: daemon.action,
+        mood: daemon.mood,
+        characterUploadId: daemon.customModel ? id : undefined,
+      });
+    }
+    return states;
   }
 
   // ─── Action Animations ────────────────────────────────────────

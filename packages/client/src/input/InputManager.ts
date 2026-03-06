@@ -174,6 +174,11 @@ export class InputManager {
     return this.state.rightMouseDown && this.pointerLocked;
   }
 
+  /** Returns true when both mouse buttons are held (walk forward) */
+  isBothMouseDown(): boolean {
+    return this.state.leftMouseDown && this.state.rightMouseDown;
+  }
+
   private updateState(): void {
     this.state.forward = this.keys.has("w");
     this.state.backward = this.keys.has("s");
@@ -192,8 +197,8 @@ export class InputManager {
     let z = 0;
     if (this.state.forward) z += 1;
     if (this.state.backward) z -= 1;
-    if (this.state.strafeLeft) x -= 1;
-    if (this.state.strafeRight) x += 1;
+    if (this.state.strafeLeft) x += 1;
+    if (this.state.strafeRight) x -= 1;
 
     // Normalize diagonal movement
     const len = Math.sqrt(x * x + z * z);

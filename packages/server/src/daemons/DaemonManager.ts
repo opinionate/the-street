@@ -341,11 +341,12 @@ export class DaemonManager {
           });
         }
 
-        // Legacy daemon_chat for backwards compatibility
+        // Log AI speech as activity (without re-broadcasting as daemon_chat)
         if (thought.speech) {
-          const targetUserId = session.participantType === "visitor" ? session.participantId : undefined;
-          const targetDaemonId = session.participantType === "daemon" ? session.participantId : undefined;
-          this.broadcastDaemonChat(daemon, thought.speech, targetUserId, targetDaemonId);
+          const targetName = session.participantType === "daemon"
+            ? this.daemons.get(session.participantId)?.state.definition.name
+            : undefined;
+          this.logActivity(daemon, "conversation", thought.speech.slice(0, 100), targetName);
         }
 
         if (thought.emote) {
@@ -569,18 +570,20 @@ export class DaemonManager {
     if (plotUuids.length > 0) {
       const placeholders = plotUuids.map((_, i) => `$${i + 1}`).join(",");
       const result = await pool.query(
-        `SELECT id, plot_uuid, name, description, daemon_definition, appearance, behavior,
-                position_x, position_y, position_z, rotation
-         FROM daemons WHERE (plot_uuid IN (${placeholders}) OR plot_uuid IS NULL) AND is_active = true`,
+        `SELECT d.id, d.plot_uuid, d.name, d.description, d.daemon_definition, d.appearance, d.behavior,
+                d.position_x, d.position_y, d.position_z, d.rotation,
+                (SELECT dau.id FROM daemon_asset_uploads dau WHERE dau.daemon_id = d.id AND dau.upload_type = 'character' LIMIT 1) as character_upload_id
+         FROM daemons d WHERE (d.plot_uuid IN (${placeholders}) OR d.plot_uuid IS NULL) AND d.is_active = true`,
         plotUuids,
       );
       rows = result.rows;
     } else {
       // No plots — still load global street daemons
       const result = await pool.query(
-        `SELECT id, plot_uuid, name, description, daemon_definition, appearance, behavior,
-                position_x, position_y, position_z, rotation
-         FROM daemons WHERE plot_uuid IS NULL AND is_active = true`,
+        `SELECT d.id, d.plot_uuid, d.name, d.description, d.daemon_definition, d.appearance, d.behavior,
+                d.position_x, d.position_y, d.position_z, d.rotation,
+                (SELECT dau.id FROM daemon_asset_uploads dau WHERE dau.daemon_id = d.id AND dau.upload_type = 'character' LIMIT 1) as character_upload_id
+         FROM daemons d WHERE d.plot_uuid IS NULL AND d.is_active = true`,
       );
       rows = result.rows;
     }
@@ -607,6 +610,8 @@ export class DaemonManager {
         currentRotation: row.rotation,
         currentAction: "idle",
         mood: "neutral",
+        characterUploadId: row.character_upload_id || undefined,
+        idleAnimationLabel: behavior.idleAnimationLabel || undefined,
       };
 
       this.daemons.set(row.id, this.createInstance(state, behavior));
@@ -1302,6 +1307,7 @@ export class DaemonManager {
   /** Daemons occasionally wonder about players they haven't seen in a while */
   private tickMissingPlayers(daemon: DaemonInstance, dt: number): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (Math.random() > 0.003) return; // Very rare per tick — ~every 5 min per daemon
 
@@ -2051,6 +2057,7 @@ export class DaemonManager {
   /** Daemons react to player movement patterns — sprinting, lurking, lingering */
   private tickMovementReactions(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (Math.random() > 0.02) return; // Low chance per tick
 
@@ -2461,6 +2468,7 @@ export class DaemonManager {
   /** Periodic routine actions during each time period */
   private tickDailyRoutine(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
 
     daemon.routineTimer -= dt;
@@ -2622,6 +2630,7 @@ export class DaemonManager {
 
   private tickProactiveEngagement(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (players.length === 0) return;
 
@@ -2783,6 +2792,7 @@ export class DaemonManager {
   /** Daemons gossip about players to nearby players/daemons, creating social consequences */
   private tickReputationAnnouncements(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (players.length < 2) return; // need at least 2 players for gossip to matter
 
@@ -2875,6 +2885,7 @@ export class DaemonManager {
   /** Daemons share secrets/gossip with trusted players, rewarding relationship building */
   private tickSecretSharing(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (Math.random() > 0.004) return; // Very rare per tick
 
@@ -2964,6 +2975,8 @@ export class DaemonManager {
 
   private tickThoughts(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    // AI-powered daemons don't broadcast scripted thoughts
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
 
     daemon.thoughtTimer -= dt;
@@ -3188,6 +3201,8 @@ export class DaemonManager {
 
   private tickSpontaneousGestures(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    // AI-powered daemons don't use scripted gestures
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
 
     daemon.spontaneousGestureTimer -= dt;
@@ -3479,6 +3494,8 @@ export class DaemonManager {
 
   private tickGreeter(daemon: DaemonInstance, _dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    // AI-powered daemons handle greetings via the behavior tree + inference pipeline
+    if (this.manifests.has(daemon.state.daemonId)) return;
     const radius = daemon.behavior.interactionRadius;
     const now = Date.now();
     const COOLDOWN_MS = 120_000; // 2 min between greetings per player
@@ -5228,6 +5245,8 @@ export class DaemonManager {
 
   private tickIdleChatter(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    // AI-powered daemons don't use scripted idle chatter
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (!daemon.behavior.idleMessages || daemon.behavior.idleMessages.length === 0) return;
     if (daemon.state.currentAction !== "idle") return;
 

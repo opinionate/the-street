@@ -6,7 +6,7 @@ import type { PersonalityManifest, LogEntryType } from "@the-street/shared";
 import { getPool } from "../database/pool.js";
 import { getActiveDaemonManager } from "../rooms/StreetRoom.js";
 import { queryActivityLog, getTokenSummary } from "../services/ActivityLogService.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, createReadStream } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -426,9 +426,10 @@ router.post(
       const originalFilename = (req.headers["x-original-filename"] as string) || "character.fbx";
 
       // Create asset upload record
+      // TODO: implement FBX-to-glTF conversion pipeline; for now mark as ready
       const { rows: uploadRows } = await pool.query(
         `INSERT INTO daemon_asset_uploads (upload_type, fbx_filename, conversion_status)
-         VALUES ('character', $1, 'pending')
+         VALUES ('character', $1, 'ready')
          RETURNING id`,
         [originalFilename],
       );
@@ -514,9 +515,10 @@ router.post(
       const originalFilename = (req.headers["x-original-filename"] as string) || "emote.fbx";
 
       // Create asset upload record
+      // TODO: implement FBX-to-glTF conversion pipeline; for now mark as ready
       const { rows: uploadRows } = await pool.query(
         `INSERT INTO daemon_asset_uploads (upload_type, fbx_filename, label, conversion_status)
-         VALUES ('emote', $1, $2, 'pending')
+         VALUES ('emote', $1, $2, 'ready')
          RETURNING id`,
         [originalFilename, label],
       );
@@ -956,6 +958,48 @@ router.get(
     } catch (err) {
       console.error("GET /api/daemons/:id/activity error:", err);
       res.status(500).json({ error: "Failed to get activity" });
+    }
+  },
+);
+
+// GET /api/daemons/:id — Get a single daemon's full details
+router.get(
+  "/:id",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const pool = getPool();
+      const { rows } = await pool.query(
+        `SELECT d.id, d.name, d.description, d.daemon_definition, d.appearance, d.behavior,
+                d.position_x, d.position_y, d.position_z, d.rotation, d.is_active,
+                d.plot_uuid, d.owner_id, d.created_at,
+                (SELECT dau.id FROM daemon_asset_uploads dau
+                 WHERE dau.daemon_id = d.id AND dau.upload_type = 'character' LIMIT 1) as character_upload_id
+         FROM daemons d WHERE d.id = $1`,
+        [req.params.id],
+      );
+      if (rows.length === 0) {
+        res.status(404).json({ error: "Daemon not found" });
+        return;
+      }
+      const r = rows[0];
+      res.json({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        definition: r.daemon_definition,
+        behavior: r.behavior,
+        position: { x: r.position_x, y: r.position_y, z: r.position_z },
+        rotation: r.rotation,
+        isActive: r.is_active,
+        plotUuid: r.plot_uuid,
+        ownerId: r.owner_id,
+        characterUploadId: r.character_upload_id,
+        createdAt: r.created_at,
+      });
+    } catch (err) {
+      console.error("GET /api/daemons/:id error:", err);
+      res.status(500).json({ error: "Failed to get daemon" });
     }
   },
 );
@@ -1520,6 +1564,64 @@ router.post(
       console.error("POST /api/daemons/:id/deactivate error:", err);
       res.status(500).json({ error: "Failed to deactivate daemon" });
     }
+  },
+);
+
+// GET /api/daemons/:id/emotes — List emote uploads for a daemon
+router.get(
+  "/:id/emotes",
+  async (req, res) => {
+    try {
+      const pool = getPool();
+      const result = await pool.query(
+        `SELECT id, label FROM daemon_asset_uploads
+         WHERE daemon_id = $1 AND upload_type = 'emote' AND conversion_status = 'ready'
+         ORDER BY label`,
+        [req.params.id],
+      );
+      res.json(result.rows);
+    } catch (err) {
+      console.error("Failed to fetch emotes:", err);
+      res.status(500).json({ error: "Failed to fetch emotes" });
+    }
+  },
+);
+
+// PATCH /api/daemons/:id/idle-animation — Set idle animation label
+router.patch(
+  "/:id/idle-animation",
+  async (req, res) => {
+    try {
+      const pool = getPool();
+      const { label } = req.body;
+      await pool.query(
+        `UPDATE daemons SET behavior = behavior || $1::jsonb WHERE id = $2`,
+        [JSON.stringify({ idleAnimationLabel: label || null }), req.params.id],
+      );
+      res.json({ ok: true });
+    } catch (err) {
+      console.error("Failed to update idle animation:", err);
+      res.status(500).json({ error: "Failed to update idle animation" });
+    }
+  },
+);
+
+// GET /api/daemons/assets/:uploadId/model — Serve uploaded FBX file (character or emote)
+router.get(
+  "/assets/:uploadId/model",
+  async (req, res) => {
+    const dir = join(UPLOAD_DIR, req.params.uploadId);
+    // Character uploads use model.fbx, emote uploads use emote.fbx
+    const modelPath = join(dir, "model.fbx");
+    const emotePath = join(dir, "emote.fbx");
+    const filePath = existsSync(modelPath) ? modelPath : existsSync(emotePath) ? emotePath : null;
+    if (!filePath) {
+      res.status(404).json({ error: "Asset not found" });
+      return;
+    }
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    createReadStream(filePath).pipe(res);
   },
 );
 

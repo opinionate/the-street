@@ -3,6 +3,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { PlayerState, Vector3 as Vec3, AvatarDefinition, AvatarAppearance } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
+import { normalizeMixamoBoneName } from "./animation-converter.js";
 
 const ACCENT_COLORS = [0x00ffff, 0xff00ff, 0x39ff14, 0xff6600, 0xaa44ff, 0xffff00];
 
@@ -90,8 +91,8 @@ export class AvatarManager {
   private cachedEmoteClips: Map<string, THREE.AnimationClip> = new Map();
   localPlayerId: string | null = null;
   apiUrl: string = "";
-  /** Cache buster: incremented on reload to bypass browser HTTP cache */
-  private _cacheBuster = 0;
+  /** Cache buster: always set so browser never serves stale animation files */
+  private _cacheBuster = Date.now();
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -136,7 +137,7 @@ export class AvatarManager {
           }
         } catch (err) {
           if (!this.animWarned && AvatarManager.CORE_TYPES.includes(type)) {
-            console.warn(`[Avatar] ${type} animation not available (404)`);
+            console.warn(`[Avatar] ${type} animation not available`);
           }
         }
       }
@@ -188,7 +189,7 @@ export class AvatarManager {
       cm.mixer.stopAllAction();
       cm.mixer.uncacheRoot(cm.model);
       const newMixer = new THREE.AnimationMixer(cm.model);
-      const newActions = this.createLocoActions(newMixer, clipMap);
+      const newActions = this.createLocoActions(newMixer, clipMap, cm.model);
 
       cm.mixer = newMixer;
       cm.actions = newActions;
@@ -306,7 +307,7 @@ export class AvatarManager {
         if (!clipMap[t]) clipMap[t] = customClips[t] || this.cachedAnimClips[t];
       }
       console.log("[Avatar] Uploaded avatar clip map:", Object.entries(clipMap).filter(([, v]) => v).map(([k, v]) => `${k}:${v!.tracks.length}t`).join(", "));
-      const actions = this.createLocoActions(mixer, clipMap);
+      const actions = this.createLocoActions(mixer, clipMap, model);
 
       this.swapToCustomModel(avatar, model);
       avatar.customModel = { model, mixer, actions, currentAction: "idle", baseY: model.position.y };
@@ -346,13 +347,13 @@ export class AvatarManager {
       const centeredBox = new THREE.Box3().setFromObject(model);
       model.position.y = -centeredBox.min.y;
 
-      // Animation setup — Mixamo bone space, no retargeting
+      // Animation setup — retarget Mixamo bone names to match model skeleton
       const mixer = new THREE.AnimationMixer(model);
       const clipMap: Partial<Record<LocoAction, THREE.AnimationClip>> = {};
       for (const t of AvatarManager.LOCO_TYPES) {
         clipMap[t] = this.cachedAnimClips[t];
       }
-      const actions = this.createLocoActions(mixer, clipMap);
+      const actions = this.createLocoActions(mixer, clipMap, model);
 
       this.swapToCustomModel(avatar, model);
       avatar.customModel = { model, mixer, actions, currentAction: "idle", baseY: model.position.y };
@@ -374,15 +375,101 @@ export class AvatarManager {
   }
 
   /** Replace the current model (procedural or custom) with a new model, preserving sprites. */
+  /** Build a map from normalized Mixamo bone name → actual node name in the model */
+  private buildBoneMap(root: THREE.Object3D): Map<string, string> {
+    const map = new Map<string, string>();
+    root.traverse((obj) => {
+      if (obj.name) {
+        map.set(normalizeMixamoBoneName(obj.name), obj.name);
+      }
+    });
+    return map;
+  }
+
+  /** Retarget an animation clip to match the model's bone names via normalization.
+   *  Drops tracks whose normalized name has no match in the model. */
+  private retargetClipForModel(clip: THREE.AnimationClip, boneMap: Map<string, string>): THREE.AnimationClip {
+    const retargetedTracks: THREE.KeyframeTrack[] = [];
+    let anyRenamed = false;
+    for (const track of clip.tracks) {
+      const dotIdx = track.name.indexOf(".");
+      const trackNode = track.name.substring(0, dotIdx);
+      const trackProp = track.name.substring(dotIdx); // e.g. ".quaternion"
+      const normalized = normalizeMixamoBoneName(trackNode);
+      const modelNode = boneMap.get(normalized);
+      if (!modelNode) continue;
+      if (modelNode === trackNode) {
+        retargetedTracks.push(track);
+      } else {
+        // Clone track with corrected node name
+        const cloned = track.clone();
+        cloned.name = modelNode + trackProp;
+        retargetedTracks.push(cloned);
+        anyRenamed = true;
+      }
+    }
+    if (!anyRenamed && retargetedTracks.length === clip.tracks.length) return clip;
+    return new THREE.AnimationClip(clip.name, clip.duration, retargetedTracks);
+  }
+
+  /** Bones whose Y-axis (yaw) rotation should be pinned to the first frame
+   *  to prevent idle rotation/sway around the vertical axis. */
+  private static readonly PIN_YAW_BONES = [
+    "mixamorigHips", "mixamorigSpine", "mixamorigSpine1", "mixamorigSpine2",
+  ];
+
+  /** Pin the yaw (Y component) of quaternion tracks for torso bones to the first frame value.
+   *  This prevents subtle rotational sway while preserving breathing/leaning motion. */
+  private pinTorsoYaw(clip: THREE.AnimationClip, boneMap: Map<string, string>): THREE.AnimationClip {
+    const newTracks = [...clip.tracks];
+    let modified = false;
+
+    for (const normalizedName of AvatarManager.PIN_YAW_BONES) {
+      const boneName = boneMap.get(normalizedName);
+      if (!boneName) continue;
+      const trackName = `${boneName}.quaternion`;
+      const idx = newTracks.findIndex(t => t.name === trackName);
+      if (idx === -1) continue;
+
+      const track = newTracks[idx];
+      const values = new Float32Array(track.values);
+      // Pin only the Y component (index 1 in each xyzw quartet) to first-frame value
+      const q0y = values[1];
+      for (let i = 1; i < values.length; i += 4) {
+        values[i] = q0y;
+      }
+      // Re-normalize each quaternion after pinning Y
+      for (let i = 0; i < values.length; i += 4) {
+        const len = Math.sqrt(values[i] * values[i] + values[i+1] * values[i+1] + values[i+2] * values[i+2] + values[i+3] * values[i+3]);
+        if (len > 0) { values[i] /= len; values[i+1] /= len; values[i+2] /= len; values[i+3] /= len; }
+      }
+      newTracks[idx] = new THREE.QuaternionKeyframeTrack(
+        track.name, Array.from(track.times), Array.from(values),
+      );
+      modified = true;
+    }
+
+    return modified ? new THREE.AnimationClip(clip.name, clip.duration, newTracks) : clip;
+  }
+
   /** Create AnimationActions for all available locomotion clips */
   private createLocoActions(
     mixer: THREE.AnimationMixer,
     clips: Partial<Record<LocoAction, THREE.AnimationClip>>,
+    model?: THREE.Object3D,
   ): CustomModelData["actions"] {
+    const boneMap = model ? this.buildBoneMap(model) : null;
     const actions: CustomModelData["actions"] = {};
     for (const type of AvatarManager.LOCO_TYPES) {
-      const clip = clips[type];
+      let clip = clips[type];
       if (!clip) continue;
+      if (boneMap) clip = this.retargetClipForModel(clip, boneMap);
+      if (clip.tracks.length === 0) continue;
+      // Pin torso yaw on idle/walk/run to prevent subtle rotation/sway
+      // Skip strafe/turn/jump — they need legitimate torso rotation for leaning
+      if (boneMap && (type === "idle" || type === "walk" || type === "run")) {
+        clip = this.pinTorsoYaw(clip, boneMap);
+      }
       const action = mixer.clipAction(clip);
       if (type === "jump") {
         action.setLoop(THREE.LoopOnce, 1);
@@ -467,8 +554,9 @@ export class AvatarManager {
     if (!this.localPlayerId) return;
     const avatar = this.avatars.get(this.localPlayerId);
     if (!avatar) return;
-    // Extra smoothing on the avatar side
-    avatar.speed += (state.speed - avatar.speed) * 0.15;
+    // Smooth speed transitions — faster decay when stopping, slower ramp-up when starting
+    const smoothing = state.speed < avatar.speed ? 0.35 : 0.2;
+    avatar.speed += (state.speed - avatar.speed) * smoothing;
     avatar.turning = state.turning;
     avatar.strafing = state.strafing;
     avatar.jumping = state.jumping;
@@ -997,6 +1085,11 @@ export class AvatarManager {
       cm.actions.emote = undefined;
     }
 
+    // Retarget clip bone names to match the model's skeleton
+    const boneMap = this.buildBoneMap(cm.model);
+    clip = this.retargetClipForModel(clip, boneMap);
+    if (clip.tracks.length === 0) return false;
+
     // Crossfade from current action to emote
     const prevAction = cm.actions[cm.currentAction] || cm.actions.idle;
     const emoteAction = cm.mixer.clipAction(clip);
@@ -1272,17 +1365,7 @@ export class AvatarManager {
           cm.currentAction = targetAction;
         }
 
-        // Idle: subtle procedural breathing sway
-        if (targetAction === "idle") {
-          avatar.breathPhase += dt * 1.5;
-          const breath = Math.sin(avatar.breathPhase);
-          cm.model.position.y = cm.baseY + breath * 0.003;
-          cm.model.rotation.z = Math.sin(avatar.breathPhase * 0.4) * 0.005;
-        } else {
-          cm.model.position.y = cm.baseY;
-          cm.model.rotation.z = 0;
-        }
-
+        cm.model.position.y = cm.baseY;
         cm.mixer.update(dt);
 
         // Chat bubble cleanup still runs (below), but skip procedural limb animation

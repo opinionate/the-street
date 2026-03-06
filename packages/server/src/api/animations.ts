@@ -43,6 +43,38 @@ function animPath(entityType: string, entityId: string, slot: string): string {
 
 const router = Router();
 
+// GET /api/animations/shared — List which shared animation slots have custom uploads
+// Must be before parameterized routes to avoid matching as /:entityType/:entityId
+router.get(
+  "/shared",
+  async (_req, res) => {
+    try {
+      const animations: Array<{ slot: string; filename: string }> = [];
+      if (existsSync(SHARED_ANIM_DIR)) {
+        for (const file of readdirSync(SHARED_ANIM_DIR)) {
+          if (file.endsWith(".glb")) {
+            animations.push({ slot: file.replace(".glb", ""), filename: file });
+          }
+        }
+      }
+      if (existsSync(SHARED_EMOTE_DIR)) {
+        for (const file of readdirSync(SHARED_EMOTE_DIR)) {
+          if (file.endsWith(".glb")) {
+            const emoteEntry = Object.entries(EMOTE_FILENAMES).find(([, fn]) => fn === file);
+            if (emoteEntry) {
+              animations.push({ slot: emoteEntry[0], filename: file });
+            }
+          }
+        }
+      }
+      res.json({ animations });
+    } catch (err) {
+      console.error("GET /api/animations/shared error:", err);
+      res.status(500).json({ error: "Failed to list shared animations" });
+    }
+  },
+);
+
 // POST /api/animations/upload — Upload a converted animation GLB for an entity
 router.post(
   "/upload",

@@ -95,7 +95,7 @@ RULES:
 - "internalState" is YOUR private thoughts — write as ${identity.name} would think, in first person.
 - Keep speech under 150 characters. You're talking in a virtual world, not writing essays.
 - Use emotes sparingly and only when they fit the moment.
-- Set "endConversation" to true when the interaction has reached a natural end.
+- Set "endConversation" to true ONLY when the visitor says goodbye, walks away, or the conversation has clearly run its course (at least 5+ exchanges). Default to false — keep talking!
 - "suppressSpeech" means you observe silently — use when watching, thinking, or eavesdropping.
 - Never be harmful, offensive, or inappropriate.`;
 }

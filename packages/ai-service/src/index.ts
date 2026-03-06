@@ -9,3 +9,5 @@ export type { DaemonResponse, DaemonConversationLine } from "./daemon-converse.j
 export { expandPrompt } from "./prompt-expand.js";
 export type { ExpandPromptOptions, ExpandPromptResult } from "./prompt-expand.js";
 export { MODEL, FALLBACK_MODEL, getClient, stripJsonFences, sanitizeUserInput } from "./utils.js";
+export { compile, getManifest, setManifest } from "./manifest-compiler.js";
+export type { CompileReason, CompileResult } from "./manifest-compiler.js";

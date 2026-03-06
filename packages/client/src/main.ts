@@ -19,6 +19,7 @@ import type { WorldObject, PlotSnapshot, DaemonDefinition } from "@the-street/sh
 import { AuthManager } from "./auth/AuthManager.js";
 import { LoginUI } from "./ui/LoginUI.js";
 import { AdminPanel } from "./ui/AdminPanel.js";
+import { DaemonCreationPanel } from "./ui/DaemonCreationPanel.js";
 import { AnimationPanel } from "./ui/AnimationPanel.js";
 import { AnimationConverterTool } from "./ui/AnimationConverterTool.js";
 import { DefaultModelUploader } from "./ui/DefaultModelUploader.js";
@@ -88,6 +89,7 @@ async function init() {
 
   // AdminPanel created early so inputManager can reference it
   const adminPanel = new AdminPanel();
+  const daemonCreationPanel = new DaemonCreationPanel();
 
   // Track generated objects
   let objectCounter = 0;
@@ -115,6 +117,7 @@ async function init() {
     galleryPanel.isVisible() ||
     daemonPanel.isVisible() ||
     adminPanel.isVisible ||
+    daemonCreationPanel.isVisible() ||
     daemonChatUI.isVisible();
 
   // Build button (B key) / Gallery (G key)
@@ -130,7 +133,8 @@ async function init() {
       const myId = avatarManager.localPlayerId || "";
       if (avatarManager.isEmoting(myId)) {
         avatarManager.stopEmote(myId);
-      } else if (avatarPanel.isVisible()) { avatarPanel.hide(); }
+      } else if (daemonCreationPanel.isVisible()) { daemonCreationPanel.hide(); }
+      else if (avatarPanel.isVisible()) { avatarPanel.hide(); }
       else if (daemonPanel.isVisible()) { daemonPanel.hide(); }
       else if (adminPanel.isVisible) { adminPanel.hide(); }
       else if (creationPanel.isVisible()) { creationPanel.hide(); }
@@ -778,6 +782,122 @@ async function init() {
     if (!res.ok) throw new Error("Failed to set role");
   };
 
+  // --- Daemon Creation Panel ---
+  daemonCreationPanel.onCreateDraft = async () => {
+    const res = await authFetch(`${apiUrl}/api/daemons/drafts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
+      throw new Error(err.error || "Failed to create draft");
+    }
+    const data = await res.json();
+    return { id: data.draft.id };
+  };
+
+  daemonCreationPanel.onLoadDraft = async (id: string) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/drafts/${id}`);
+    if (!res.ok) throw new Error("Failed to load draft");
+    const data = await res.json();
+    const d = data.draft;
+    return {
+      draftId: d.id,
+      characterUploadId: d.character_upload_id || undefined,
+      emoteUploadIds: d.emote_upload_ids || [],
+      adminPrompt: d.admin_prompt || undefined,
+      expandedFields: d.expanded_fields || undefined,
+      expansionStatus: d.expansion_status || "none",
+      maxConversationTurns: d.max_conversation_turns ?? 10,
+      maxDailyCalls: d.max_daily_calls ?? 200,
+      rememberVisitors: d.remember_visitors ?? true,
+      uploads: d.uploads || [],
+    };
+  };
+
+  daemonCreationPanel.onUpdateDraft = async (id: string, fields: Record<string, unknown>) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/drafts/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fields),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
+      throw new Error(err.error || "Update failed");
+    }
+  };
+
+  daemonCreationPanel.onUploadCharacter = async (draftId: string, file: File) => {
+    const buffer = await file.arrayBuffer();
+    const res = await authFetch(`${apiUrl}/api/daemons/drafts/${draftId}/upload-character`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "x-original-filename": file.name,
+      },
+      body: buffer,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Upload failed" }));
+      throw new Error(err.error || "Upload failed");
+    }
+    return await res.json();
+  };
+
+  daemonCreationPanel.onUploadEmote = async (draftId: string, file: File, label: string) => {
+    const buffer = await file.arrayBuffer();
+    const res = await authFetch(`${apiUrl}/api/daemons/drafts/${draftId}/upload-emote`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "x-original-filename": file.name,
+        "x-emote-label": label,
+      },
+      body: buffer,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Upload failed" }));
+      throw new Error(err.error || "Upload failed");
+    }
+    return await res.json();
+  };
+
+  daemonCreationPanel.onExpand = async (draftId: string, prompt?: string, clearedFields?: string[]) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/drafts/${draftId}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adminPrompt: prompt, clearedFields }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Expansion failed" }));
+      throw new Error(err.error || "Expansion failed");
+    }
+    return await res.json();
+  };
+
+  daemonCreationPanel.onFinalize = async (draftId: string) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/drafts/${draftId}/finalize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Finalize failed" }));
+      throw new Error(err.error || "Finalize failed");
+    }
+    return await res.json();
+  };
+
+  daemonCreationPanel.onAbandon = async (draftId: string) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/drafts/${draftId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
+      throw new Error(err.error || "Abandon failed");
+    }
+  };
+
   // Fetch role from server if not received via WebSocket yet
   if (authManager && userRole === "user") {
     try {
@@ -832,6 +952,31 @@ async function init() {
       activityLogViewer.loadDaemons();
       adminPanel.appendSection(activityLogViewer.element);
     })();
+
+    // Daemon creation button in admin panel
+    const daemonCreateSection = document.createElement("div");
+    daemonCreateSection.style.cssText = `
+      padding: 12px 20px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    `;
+    const daemonCreateBtn = document.createElement("button");
+    daemonCreateBtn.textContent = "Create Daemon (Full Flow)";
+    daemonCreateBtn.style.cssText = `
+      background: rgba(255, 140, 0, 0.15);
+      border: 1px solid rgba(255, 140, 0, 0.4);
+      border-radius: 6px;
+      color: #ff8c00;
+      font-size: 13px;
+      padding: 8px 16px;
+      cursor: pointer;
+      width: 100%;
+      font-family: system-ui, sans-serif;
+    `;
+    daemonCreateBtn.addEventListener("click", () => {
+      daemonCreationPanel.toggle();
+    });
+    daemonCreateSection.appendChild(daemonCreateBtn);
+    adminPanel.appendSection(daemonCreateSection);
   }
 
   // In dev mode (no auth), always show admin badge + tools
@@ -870,6 +1015,31 @@ async function init() {
     const activityLogViewer = new ActivityLogViewer(apiUrl, authFetch);
     activityLogViewer.loadDaemons();
     adminPanel.appendSection(activityLogViewer.element);
+
+    // Daemon creation button in admin panel (dev mode)
+    const daemonCreateSectionDev = document.createElement("div");
+    daemonCreateSectionDev.style.cssText = `
+      padding: 12px 20px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    `;
+    const daemonCreateBtnDev = document.createElement("button");
+    daemonCreateBtnDev.textContent = "Create Daemon (Full Flow)";
+    daemonCreateBtnDev.style.cssText = `
+      background: rgba(255, 140, 0, 0.15);
+      border: 1px solid rgba(255, 140, 0, 0.4);
+      border-radius: 6px;
+      color: #ff8c00;
+      font-size: 13px;
+      padding: 8px 16px;
+      cursor: pointer;
+      width: 100%;
+      font-family: system-ui, sans-serif;
+    `;
+    daemonCreateBtnDev.addEventListener("click", () => {
+      daemonCreationPanel.toggle();
+    });
+    daemonCreateSectionDev.appendChild(daemonCreateBtnDev);
+    adminPanel.appendSection(daemonCreateSectionDev);
   }
 
   if (authManager) {

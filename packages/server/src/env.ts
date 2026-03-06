@@ -10,8 +10,6 @@ export interface Env {
   AWS_S3_BUCKET: string;
   AWS_REGION: string;
   ANTHROPIC_API_KEY: string;
-  MESHY_API_KEY: string;
-  MESHY_API_URL: string;
   MASTER_ENCRYPTION_KEY: string;
   COLYSEUS_PORT: number;
   API_PORT: number;
@@ -39,8 +37,6 @@ export function loadEnv(): Env {
     AWS_S3_BUCKET: optionalEnv("AWS_S3_BUCKET", "the-street-assets"),
     AWS_REGION: optionalEnv("AWS_REGION", "us-east-1"),
     ANTHROPIC_API_KEY: requireEnv("ANTHROPIC_API_KEY"),
-    MESHY_API_KEY: requireEnv("MESHY_API_KEY"),
-    MESHY_API_URL: optionalEnv("MESHY_API_URL", "https://api.meshy.ai"),
     MASTER_ENCRYPTION_KEY: requireEnv("MASTER_ENCRYPTION_KEY"),
     COLYSEUS_PORT: parseInt(optionalEnv("COLYSEUS_PORT", "2567"), 10),
     API_PORT: parseInt(optionalEnv("API_PORT", "3000"), 10),

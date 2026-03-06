@@ -1,3 +1,7 @@
+import * as THREE from "three";
+import type { DaemonDefinition } from "@the-street/shared";
+import { AnimationPanel } from "./AnimationPanel.js";
+
 export class DaemonPanel {
   private container: HTMLDivElement;
   private input: HTMLTextAreaElement;
@@ -7,13 +11,35 @@ export class DaemonPanel {
   private previewArea: HTMLDivElement;
   private daemonList: HTMLDivElement;
   private plotInfoEl: HTMLDivElement;
+  private placementSelect: HTMLSelectElement | null = null;
   private visible = false;
   private plotUuid: string | null = null;
-  private currentDefinition: unknown = null;
+  private _isSuperAdmin = false;
+  private placementMode: "current-plot" | "no-plot" = "current-plot";
+  private currentDefinition: DaemonDefinition | null = null;
+  private currentDaemonId: string | null = null;
+  private daemonAnimPanels: Map<string, AnimationPanel> = new Map();
 
+  /** Set externally by main.ts — factory to create AnimationPanels for daemons */
+  createAnimationPanel: ((daemonId: string) => AnimationPanel) | null = null;
+
+  // 3D preview
+  private previewCanvas: HTMLCanvasElement | null = null;
+  private previewRenderer: THREE.WebGLRenderer | null = null;
+  private previewScene: THREE.Scene | null = null;
+  private previewCamera: THREE.PerspectiveCamera | null = null;
+  private previewModel: THREE.Group | null = null;
+  private previewRotationY = Math.PI + Math.PI / 6;
+  private previewAnimFrame = 0;
+  private isDragging = false;
+  private lastDragX = 0;
+
+  // Callbacks
+  onPlacementChange: ((mode: "current-plot" | "no-plot") => void) | null = null;
   onGenerate: ((description: string) => Promise<void>) | null = null;
-  onCreate: ((definition: unknown) => Promise<void>) | null = null;
+  onCreate: ((definition: DaemonDefinition) => Promise<void>) | null = null;
   onDelete: ((daemonId: string) => Promise<void>) | null = null;
+  onUpdate: ((daemonId: string, definition: DaemonDefinition) => Promise<void>) | null = null;
   onRecall: ((daemonId: string) => void) | null = null;
   onToggleRoam: ((daemonId: string, enabled: boolean) => void) | null = null;
   onFetchActivity: ((daemonId: string) => Promise<Array<{
@@ -22,96 +48,77 @@ export class DaemonPanel {
     targetName?: string;
     timestamp: number;
   }>>) | null = null;
+  onGetPreviewModel: (() => THREE.Group | null) | null = null;
 
   constructor() {
     this.container = document.createElement("div");
     this.container.id = "daemon-panel";
     this.container.style.cssText = `
       position: fixed;
-      top: 60px;
-      right: 20px;
-      width: 370px;
-      max-height: calc(100vh - 100px);
-      background: rgba(0, 0, 0, 0.9);
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 720px;
+      max-width: 95vw;
+      max-height: 90vh;
+      background: rgba(0, 0, 0, 0.95);
       border: 1px solid rgba(68, 255, 136, 0.3);
-      border-radius: 8px;
-      padding: 16px;
-      z-index: 100;
+      border-radius: 10px;
+      padding: 20px;
+      z-index: 200;
       display: none;
       font-family: system-ui, sans-serif;
       color: white;
       overflow-y: auto;
     `;
 
-    // Title
+    // Title bar
+    const titleBar = document.createElement("div");
+    titleBar.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;";
     const title = document.createElement("div");
     title.textContent = "Daemon Manager";
-    title.style.cssText = `
-      font-size: 16px;
-      font-weight: bold;
-      margin-bottom: 12px;
-      color: #44ff88;
-    `;
-    this.container.appendChild(title);
+    title.style.cssText = "font-size: 18px; font-weight: bold; color: #44ff88;";
+    titleBar.appendChild(title);
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "\u00D7";
+    closeBtn.style.cssText = "background: none; border: none; color: rgba(255,255,255,0.6); font-size: 24px; cursor: pointer;";
+    closeBtn.addEventListener("click", () => this.hide());
+    titleBar.appendChild(closeBtn);
+    this.container.appendChild(titleBar);
 
     // Plot info
     this.plotInfoEl = document.createElement("div");
-    this.plotInfoEl.style.cssText = `
-      font-size: 12px;
-      margin-bottom: 8px;
-      padding: 6px 8px;
-      border-radius: 4px;
-      background: rgba(255, 255, 255, 0.05);
-      color: rgba(255, 255, 255, 0.4);
-    `;
+    this.plotInfoEl.style.cssText = "font-size: 12px; margin-bottom: 12px; padding: 6px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.4);";
     this.plotInfoEl.textContent = "Walk to your plot to manage daemons";
     this.container.appendChild(this.plotInfoEl);
 
-    // Input
+    // Two-column layout
+    const columns = document.createElement("div");
+    columns.style.cssText = "display: flex; gap: 16px; margin-bottom: 16px;";
+
+    // Left column: 3D preview
+    const leftCol = document.createElement("div");
+    leftCol.style.cssText = "flex: 0 0 300px;";
+    this.previewCanvas = document.createElement("canvas");
+    this.previewCanvas.width = 300;
+    this.previewCanvas.height = 350;
+    this.previewCanvas.style.cssText = "width: 300px; height: 350px; border-radius: 8px; background: #111; cursor: grab;";
+    this.previewCanvas.addEventListener("mousedown", (e) => { this.isDragging = true; this.lastDragX = e.clientX; this.previewCanvas!.style.cursor = "grabbing"; });
+    window.addEventListener("mousemove", (e) => { if (this.isDragging) { this.previewRotationY += (e.clientX - this.lastDragX) * 0.01; this.lastDragX = e.clientX; } });
+    window.addEventListener("mouseup", () => { this.isDragging = false; if (this.previewCanvas) this.previewCanvas.style.cursor = "grab"; });
+    leftCol.appendChild(this.previewCanvas);
+    columns.appendChild(leftCol);
+
+    // Right column: controls
+    const rightCol = document.createElement("div");
+    rightCol.style.cssText = "flex: 1; display: flex; flex-direction: column; gap: 8px;";
+
+    // Description input
     this.input = document.createElement("textarea");
-    this.input.placeholder =
-      "Describe your NPC daemon...\ne.g. A witty roaming bard who plays invisible instruments and gossips about everyone";
-    this.input.style.cssText = `
-      width: 100%;
-      height: 80px;
-      padding: 8px;
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 4px;
-      color: white;
-      font-family: system-ui, sans-serif;
-      font-size: 13px;
-      resize: vertical;
-      outline: none;
-      box-sizing: border-box;
-    `;
+    this.input.placeholder = "Describe your NPC daemon...\ne.g. A witty roaming bard who plays invisible instruments";
+    this.input.style.cssText = "width: 100%; height: 80px; padding: 8px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; color: white; font-family: system-ui, sans-serif; font-size: 13px; resize: vertical; outline: none; box-sizing: border-box;";
     this.input.addEventListener("keydown", (e) => e.stopPropagation());
-    this.container.appendChild(this.input);
-
-    // Status
-    this.status = document.createElement("div");
-    this.status.style.cssText = `
-      margin-top: 8px;
-      font-size: 12px;
-      color: rgba(255, 255, 255, 0.6);
-      min-height: 20px;
-    `;
-    this.container.appendChild(this.status);
-
-    // Preview area
-    this.previewArea = document.createElement("div");
-    this.previewArea.style.cssText = `
-      margin-top: 8px;
-      font-size: 12px;
-      color: rgba(255, 255, 255, 0.7);
-      max-height: 200px;
-      overflow-y: auto;
-      display: none;
-      padding: 8px;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 4px;
-    `;
-    this.container.appendChild(this.previewArea);
+    rightCol.appendChild(this.input);
 
     // Generate button
     this.generateBtn = document.createElement("button");
@@ -119,125 +126,231 @@ export class DaemonPanel {
     this.generateBtn.disabled = true;
     this.generateBtn.style.cssText = this.btnStyle("#228844", "0.5");
     this.generateBtn.addEventListener("click", () => this.handleGenerate());
-    this.container.appendChild(this.generateBtn);
+    rightCol.appendChild(this.generateBtn);
 
-    // Create button (hidden until generation)
+    // Status
+    this.status = document.createElement("div");
+    this.status.style.cssText = "font-size: 12px; color: rgba(255,255,255,0.6); min-height: 20px;";
+    rightCol.appendChild(this.status);
+
+    // Preview area (personality preview)
+    this.previewArea = document.createElement("div");
+    this.previewArea.style.cssText = "font-size: 12px; color: rgba(255,255,255,0.7); max-height: 150px; overflow-y: auto; display: none; padding: 8px; background: rgba(255,255,255,0.05); border-radius: 4px;";
+    rightCol.appendChild(this.previewArea);
+
+    // Create button
     this.createBtn = document.createElement("button");
     this.createBtn.textContent = "Place Daemon";
     this.createBtn.style.cssText = this.btnStyle("#44ff88", "1") + "display: none; color: black;";
     this.createBtn.addEventListener("click", () => this.handleCreate());
-    this.container.appendChild(this.createBtn);
+    rightCol.appendChild(this.createBtn);
+
+    columns.appendChild(rightCol);
+    this.container.appendChild(columns);
 
     // Divider
     const divider = document.createElement("hr");
-    divider.style.cssText = "border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 16px 0 12px;";
+    divider.style.cssText = "border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 0 0 12px;";
     this.container.appendChild(divider);
 
-    // Existing daemons list
+    // Daemon list
     const listTitle = document.createElement("div");
     listTitle.textContent = "Your Daemons";
-    listTitle.style.cssText = `
-      font-size: 13px;
-      font-weight: bold;
-      margin-bottom: 8px;
-      color: rgba(255, 255, 255, 0.6);
-    `;
+    listTitle.style.cssText = "font-size: 14px; font-weight: bold; margin-bottom: 8px; color: rgba(255,255,255,0.6);";
     this.container.appendChild(listTitle);
 
     this.daemonList = document.createElement("div");
     this.container.appendChild(this.daemonList);
 
-    // Close button
-    const closeBtn = document.createElement("button");
-    closeBtn.textContent = "\u00D7";
-    closeBtn.style.cssText = `
-      position: absolute;
-      top: 8px;
-      right: 12px;
-      background: none;
-      border: none;
-      color: rgba(255, 255, 255, 0.6);
-      font-size: 20px;
-      cursor: pointer;
-    `;
-    closeBtn.addEventListener("click", () => this.hide());
-    this.container.appendChild(closeBtn);
-
     document.body.appendChild(this.container);
   }
 
   private btnStyle(bg: string, opacity: string): string {
-    return `
-      margin-top: 8px;
-      width: 100%;
-      padding: 10px;
-      background: ${bg};
-      border: none;
-      border-radius: 4px;
-      color: white;
-      font-size: 14px;
-      font-weight: bold;
-      cursor: pointer;
-      opacity: ${opacity};
-    `;
+    return `width: 100%; padding: 10px; background: ${bg}; border: none; border-radius: 4px; color: white; font-size: 14px; font-weight: bold; cursor: pointer; opacity: ${opacity};`;
+  }
+
+  private initPreview(): void {
+    if (this.previewRenderer || !this.previewCanvas) return;
+
+    this.previewScene = new THREE.Scene();
+    this.previewScene.background = new THREE.Color(0x111111);
+
+    this.previewCamera = new THREE.PerspectiveCamera(40, 300 / 350, 0.1, 50);
+    this.previewCamera.position.set(0, 1.2, 3.5);
+    this.previewCamera.lookAt(0, 0.9, 0);
+
+    this.previewRenderer = new THREE.WebGLRenderer({ canvas: this.previewCanvas, antialias: true });
+    this.previewRenderer.setSize(300, 350);
+    this.previewRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    // Lighting
+    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+    this.previewScene.add(ambient);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(2, 3, 2);
+    this.previewScene.add(dirLight);
+    const fillLight = new THREE.DirectionalLight(0x4488ff, 0.3);
+    fillLight.position.set(-2, 1, -1);
+    this.previewScene.add(fillLight);
+
+    // Ground circle
+    const groundGeo = new THREE.CircleGeometry(1, 32);
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    this.previewScene.add(ground);
+
+    this.startPreviewLoop();
+  }
+
+  private startPreviewLoop(): void {
+    const animate = () => {
+      this.previewAnimFrame = requestAnimationFrame(animate);
+      if (!this.previewRenderer || !this.previewScene || !this.previewCamera) return;
+      if (this.previewModel) {
+        this.previewModel.rotation.y = this.previewRotationY;
+      }
+      this.previewRenderer.render(this.previewScene, this.previewCamera);
+    };
+    animate();
+  }
+
+  refreshPreview(): void {
+    if (!this.previewScene) return;
+
+    // Remove old model
+    if (this.previewModel) {
+      this.previewScene.remove(this.previewModel);
+      this.previewModel = null;
+    }
+
+    // Get model from callback
+    const model = this.onGetPreviewModel?.();
+    if (model) {
+      this.previewModel = model;
+      this.previewModel.rotation.y = this.previewRotationY;
+      this.previewScene.add(this.previewModel);
+    }
+  }
+
+  setSuperAdmin(isSuperAdmin: boolean): void {
+    this._isSuperAdmin = isSuperAdmin;
+    this.updatePlacementUI();
   }
 
   setPlotInfo(plotUuid: string | null, ownerName: string | null): void {
     this.plotUuid = plotUuid;
-    if (plotUuid && ownerName) {
-      this.plotInfoEl.textContent = `Plot: ${ownerName}'s plot`;
-      this.plotInfoEl.style.color = "#44ff88";
-      this.generateBtn.disabled = false;
-      this.generateBtn.style.opacity = "1";
-    } else {
-      this.plotInfoEl.textContent = "Walk to your plot to manage daemons";
-      this.plotInfoEl.style.color = "rgba(255, 255, 255, 0.4)";
-      this.generateBtn.disabled = true;
-      this.generateBtn.style.opacity = "0.5";
-    }
+    this.updatePlacementUI();
   }
 
+  private updatePlacementUI(): void {
+    if (this._isSuperAdmin) {
+      // Show placement dropdown for admins
+      this.plotInfoEl.style.display = "none";
+      if (!this.placementSelect) {
+        this.placementSelect = document.createElement("select");
+        this.placementSelect.style.cssText = "width: 100%; padding: 6px 8px; background: rgba(255,255,255,0.1); border: 1px solid #ffaa44; border-radius: 4px; color: #ffaa44; font-size: 12px; outline: none; cursor: pointer; margin-bottom: 12px;";
+        this.placementSelect.addEventListener("change", () => {
+          this.placementMode = this.placementSelect!.value as "current-plot" | "no-plot";
+          this.updateGenerateButton();
+          this.onPlacementChange?.(this.placementMode);
+        });
+        // Insert after plotInfoEl
+        this.plotInfoEl.parentElement?.insertBefore(this.placementSelect, this.plotInfoEl.nextSibling);
+      }
+      // Rebuild options based on current state
+      const prevValue = this.placementSelect.value || this.placementMode;
+      this.placementSelect.innerHTML = "";
+
+      const plotOpt = document.createElement("option");
+      plotOpt.value = "current-plot";
+      plotOpt.textContent = this.plotUuid ? `Current Plot` : "Current Plot (walk to a plot)";
+      plotOpt.disabled = !this.plotUuid;
+      this.placementSelect.appendChild(plotOpt);
+
+      const streetOpt = document.createElement("option");
+      streetOpt.value = "no-plot";
+      streetOpt.textContent = "Street Daemon (no plot)";
+      this.placementSelect.appendChild(streetOpt);
+
+      // Restore previous selection, or auto-select street if not on a plot
+      if (prevValue === "current-plot" && this.plotUuid) {
+        this.placementSelect.value = "current-plot";
+        this.placementMode = "current-plot";
+      } else if (prevValue === "no-plot" || !this.plotUuid) {
+        this.placementSelect.value = "no-plot";
+        this.placementMode = "no-plot";
+      }
+
+      this.placementSelect.style.display = "";
+    } else {
+      // Non-admin: show static plot info text
+      this.plotInfoEl.style.display = "";
+      if (this.placementSelect) {
+        this.placementSelect.style.display = "none";
+      }
+      if (this.plotUuid) {
+        this.plotInfoEl.textContent = "On your plot";
+        this.plotInfoEl.style.color = "#44ff88";
+      } else {
+        this.plotInfoEl.textContent = "Walk to your plot to manage daemons";
+        this.plotInfoEl.style.color = "rgba(255, 255, 255, 0.4)";
+      }
+    }
+    this.updateGenerateButton();
+  }
+
+  private updateGenerateButton(): void {
+    const canGenerate = this._isSuperAdmin
+      ? (this.placementMode === "no-plot" || !!this.plotUuid)
+      : !!this.plotUuid;
+    this.generateBtn.disabled = !canGenerate;
+    this.generateBtn.style.opacity = canGenerate ? "1" : "0.5";
+  }
+
+  /** Returns the current plotUuid (whatever plot the player is standing on) */
   getPlotUuid(): string | null {
     return this.plotUuid;
   }
 
-  setGenerationResult(definition: unknown): void {
-    this.currentDefinition = definition;
-    const def = definition as Record<string, unknown>;
-    const behavior = def.behavior as Record<string, unknown>;
-    const personality = def.personality as Record<string, unknown> | undefined;
+  /** Returns the effective plotUuid based on admin placement mode */
+  getEffectivePlotUuid(): string | null {
+    if (this._isSuperAdmin && this.placementMode === "no-plot") {
+      return null;
+    }
+    return this.plotUuid;
+  }
 
-    const escapeHtml = (t: unknown) => {
+  setGenerationResult(definition: DaemonDefinition): void {
+    this.currentDefinition = definition;
+
+    const escapeHtml = (t: string | undefined) => {
       const div = document.createElement("div");
       div.textContent = String(t || "");
       return div.innerHTML;
     };
 
+    const behavior = definition.behavior;
+    const personality = definition.personality;
+
     let html = `
-      <div style="margin-bottom:6px"><strong style="color:#44ff88">${escapeHtml(def.name)}</strong></div>
-      <div style="margin-bottom:4px; color:rgba(255,255,255,0.5)"><em>${escapeHtml(def.description)}</em></div>
-      <div style="margin-bottom:4px"><strong>Role:</strong> ${escapeHtml(behavior?.type)}</div>
-      <div style="margin-bottom:4px"><strong>Greeting:</strong> "${escapeHtml(behavior?.greetingMessage || "—")}"</div>
+      <div style="margin-bottom:6px"><strong style="color:#44ff88">${escapeHtml(definition.name)}</strong></div>
+      <div style="margin-bottom:4px; color:rgba(255,255,255,0.5)"><em>${escapeHtml(definition.description)}</em></div>
+      <div style="margin-bottom:4px"><strong>Role:</strong> ${escapeHtml(behavior.type)}</div>
+      <div style="margin-bottom:4px"><strong>Greeting:</strong> "${escapeHtml(behavior.greetingMessage || "—")}"</div>
     `;
 
     if (personality) {
       html += `
         <div style="margin-top:8px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.1)">
           <div style="color:#44ff88; font-weight:bold; margin-bottom:4px; font-size:11px">PERSONALITY</div>
-          <div style="margin-bottom:3px"><strong>Traits:</strong> ${escapeHtml((personality.traits as string[])?.join(", "))}</div>
+          <div style="margin-bottom:3px"><strong>Traits:</strong> ${escapeHtml(personality.traits?.join(", "))}</div>
           <div style="margin-bottom:3px"><strong>Style:</strong> ${escapeHtml(personality.speechStyle)}</div>
-          <div style="margin-bottom:3px"><strong>Interests:</strong> ${escapeHtml((personality.interests as string[])?.join(", "))}</div>
-          <div style="margin-bottom:3px"><strong>Quirks:</strong> ${escapeHtml((personality.quirks as string[])?.join(", "))}</div>
+          <div style="margin-bottom:3px"><strong>Interests:</strong> ${escapeHtml(personality.interests?.join(", "))}</div>
+          <div style="margin-bottom:3px"><strong>Quirks:</strong> ${escapeHtml(personality.quirks?.join(", "))}</div>
           <div style="margin-bottom:3px; font-style:italic; color:rgba(255,255,255,0.5)">${escapeHtml(personality.backstory)}</div>
         </div>
       `;
-    }
-
-    if (behavior?.roamingEnabled) {
-      html += `<div style="margin-top:4px; color:#aa44ff"><strong>Roaming:</strong> Will wander the street</div>`;
-    }
-    if (behavior?.canConverseWithDaemons !== false) {
-      html += `<div style="color:#ff44aa"><strong>Social:</strong> Will chat with other NPCs</div>`;
     }
 
     this.previewArea.style.display = "block";
@@ -249,7 +362,7 @@ export class DaemonPanel {
     id: string;
     name: string;
     description: string;
-    definition?: Record<string, unknown>;
+    definition?: DaemonDefinition;
   }>): void {
     this.daemonList.innerHTML = "";
 
@@ -263,37 +376,21 @@ export class DaemonPanel {
 
     for (const daemon of daemons) {
       const card = document.createElement("div");
-      card.style.cssText = `
-        padding: 10px;
-        margin-bottom: 6px;
-        background: rgba(255, 255, 255, 0.06);
-        border-radius: 6px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-      `;
+      card.style.cssText = "padding: 10px; margin-bottom: 6px; background: rgba(255,255,255,0.06); border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);";
 
-      // Name + type
+      // Header: name + type badge
       const header = document.createElement("div");
       header.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;";
-
       const nameEl = document.createElement("span");
       nameEl.style.cssText = "font-weight: bold; font-size: 13px; color: #44ff88;";
       nameEl.textContent = daemon.name;
       header.appendChild(nameEl);
 
-      // Behavior type badge
-      const behavior = daemon.definition?.behavior as Record<string, unknown> | undefined;
+      const behavior = daemon.definition?.behavior;
       if (behavior?.type) {
         const badge = document.createElement("span");
         badge.textContent = String(behavior.type);
-        badge.style.cssText = `
-          font-size: 10px;
-          padding: 2px 6px;
-          border-radius: 3px;
-          background: rgba(68, 255, 136, 0.15);
-          color: #44ff88;
-          text-transform: uppercase;
-          font-weight: bold;
-        `;
+        badge.style.cssText = "font-size: 10px; padding: 2px 6px; border-radius: 3px; background: rgba(68,255,136,0.15); color: #44ff88; text-transform: uppercase; font-weight: bold;";
         header.appendChild(badge);
       }
       card.appendChild(header);
@@ -304,110 +401,51 @@ export class DaemonPanel {
       desc.style.cssText = "font-size: 11px; color: rgba(255,255,255,0.4); margin-bottom: 6px;";
       card.appendChild(desc);
 
-      // Personality preview
-      const personality = daemon.definition?.personality as Record<string, unknown> | undefined;
+      // Personality traits
+      const personality = daemon.definition?.personality;
       if (personality?.traits) {
         const traits = document.createElement("div");
-        traits.textContent = (personality.traits as string[]).join(" / ");
-        traits.style.cssText = "font-size: 10px; color: rgba(170, 68, 255, 0.7); margin-bottom: 6px; font-style: italic;";
+        traits.textContent = personality.traits.join(" / ");
+        traits.style.cssText = "font-size: 10px; color: rgba(170,68,255,0.7); margin-bottom: 6px; font-style: italic;";
         card.appendChild(traits);
       }
 
       // Control buttons
       const controls = document.createElement("div");
-      controls.style.cssText = "display: flex; gap: 4px;";
+      controls.style.cssText = "display: flex; gap: 4px; flex-wrap: wrap;";
 
       // Roaming toggle
       const isRoaming = behavior?.roamingEnabled !== false;
       const roamBtn = document.createElement("button");
       roamBtn.textContent = isRoaming ? "Roaming" : "Stationary";
-      roamBtn.style.cssText = `
-        flex: 1;
-        padding: 4px 6px;
-        background: ${isRoaming ? "rgba(170, 68, 255, 0.3)" : "rgba(255, 255, 255, 0.1)"};
-        border: 1px solid ${isRoaming ? "rgba(170, 68, 255, 0.5)" : "rgba(255, 255, 255, 0.15)"};
-        color: ${isRoaming ? "#aa44ff" : "rgba(255,255,255,0.5)"};
-        font-size: 11px;
-        cursor: pointer;
-        border-radius: 3px;
-        font-weight: bold;
-      `;
-      roamBtn.addEventListener("click", () => {
-        this.onToggleRoam?.(daemon.id, !isRoaming);
-        roamBtn.textContent = isRoaming ? "Stationary" : "Roaming";
-      });
+      roamBtn.style.cssText = `flex: 1; padding: 4px 6px; background: ${isRoaming ? "rgba(170,68,255,0.3)" : "rgba(255,255,255,0.1)"}; border: 1px solid ${isRoaming ? "rgba(170,68,255,0.5)" : "rgba(255,255,255,0.15)"}; color: ${isRoaming ? "#aa44ff" : "rgba(255,255,255,0.5)"}; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: bold;`;
+      roamBtn.addEventListener("click", () => { this.onToggleRoam?.(daemon.id, !isRoaming); roamBtn.textContent = isRoaming ? "Stationary" : "Roaming"; });
       controls.appendChild(roamBtn);
 
-      // Recall button
+      // Recall
       const recallBtn = document.createElement("button");
       recallBtn.textContent = "Recall";
-      recallBtn.style.cssText = `
-        flex: 1;
-        padding: 4px 6px;
-        background: rgba(68, 136, 255, 0.2);
-        border: 1px solid rgba(68, 136, 255, 0.4);
-        color: #4488ff;
-        font-size: 11px;
-        cursor: pointer;
-        border-radius: 3px;
-        font-weight: bold;
-      `;
-      recallBtn.addEventListener("click", () => {
-        this.onRecall?.(daemon.id);
-        recallBtn.textContent = "Recalled!";
-        setTimeout(() => { recallBtn.textContent = "Recall"; }, 2000);
-      });
+      recallBtn.style.cssText = "flex: 1; padding: 4px 6px; background: rgba(68,136,255,0.2); border: 1px solid rgba(68,136,255,0.4); color: #4488ff; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: bold;";
+      recallBtn.addEventListener("click", () => { this.onRecall?.(daemon.id); recallBtn.textContent = "Recalled!"; setTimeout(() => { recallBtn.textContent = "Recall"; }, 2000); });
       controls.appendChild(recallBtn);
 
-      // Delete button
+      // Delete
       const delBtn = document.createElement("button");
       delBtn.textContent = "Delete";
-      delBtn.style.cssText = `
-        padding: 4px 8px;
-        background: rgba(255, 68, 68, 0.2);
-        border: 1px solid rgba(255, 68, 68, 0.4);
-        color: #ff4444;
-        font-size: 11px;
-        cursor: pointer;
-        border-radius: 3px;
-        font-weight: bold;
-      `;
-      delBtn.addEventListener("click", () => {
-        if (confirm(`Delete ${daemon.name}?`)) {
-          this.onDelete?.(daemon.id);
-        }
-      });
+      delBtn.style.cssText = "padding: 4px 8px; background: rgba(255,68,68,0.2); border: 1px solid rgba(255,68,68,0.4); color: #ff4444; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: bold;";
+      delBtn.addEventListener("click", () => { if (confirm(`Delete ${daemon.name}?`)) this.onDelete?.(daemon.id); });
       controls.appendChild(delBtn);
 
       card.appendChild(controls);
 
-      // Activity log section (expandable)
+      // Activity log
       const activityContainer = document.createElement("div");
       activityContainer.style.cssText = "margin-top: 6px;";
-
       const activityBtn = document.createElement("button");
       activityBtn.textContent = "Activity";
-      activityBtn.style.cssText = `
-        width: 100%;
-        padding: 3px 6px;
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        color: rgba(255, 255, 255, 0.4);
-        font-size: 10px;
-        cursor: pointer;
-        border-radius: 3px;
-      `;
-
+      activityBtn.style.cssText = "width: 100%; padding: 3px 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.4); font-size: 10px; cursor: pointer; border-radius: 3px;";
       const activityLog = document.createElement("div");
-      activityLog.style.cssText = `
-        display: none;
-        margin-top: 4px;
-        max-height: 120px;
-        overflow-y: auto;
-        font-size: 10px;
-        color: rgba(255, 255, 255, 0.5);
-      `;
-
+      activityLog.style.cssText = "display: none; margin-top: 4px; max-height: 120px; overflow-y: auto; font-size: 10px; color: rgba(255,255,255,0.5);";
       activityBtn.addEventListener("click", async () => {
         if (activityLog.style.display === "none") {
           activityLog.style.display = "block";
@@ -422,9 +460,7 @@ export class DaemonPanel {
                 const line = document.createElement("div");
                 line.style.cssText = "padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04);";
                 const age = this.formatAge(entry.timestamp);
-                const typeColor = entry.type === "conversation" ? "#aa44ff"
-                  : entry.type === "emote" ? "#ffaa00"
-                  : "#44ff88";
+                const typeColor = entry.type === "conversation" ? "#aa44ff" : entry.type === "emote" ? "#ffaa00" : "#44ff88";
                 line.innerHTML = `<span style="color:${typeColor}">[${entry.type}]</span> ${this.escapeHtml(entry.content)}${entry.targetName ? ` <span style="color:rgba(255,255,255,0.3)">with ${this.escapeHtml(entry.targetName)}</span>` : ""} <span style="color:rgba(255,255,255,0.2)">${age}</span>`;
                 activityLog.appendChild(line);
               }
@@ -439,7 +475,6 @@ export class DaemonPanel {
           activityBtn.textContent = "Activity";
         }
       });
-
       activityContainer.appendChild(activityBtn);
       activityContainer.appendChild(activityLog);
       card.appendChild(activityContainer);
@@ -451,8 +486,11 @@ export class DaemonPanel {
   show(): void {
     this.visible = true;
     this.container.style.display = "block";
-    if (document.pointerLockElement) {
-      document.exitPointerLock();
+    if (document.pointerLockElement) document.exitPointerLock();
+    this.initPreview();
+    // Restart the render loop if it was stopped by hide()
+    if (this.previewRenderer && !this.previewAnimFrame) {
+      this.startPreviewLoop();
     }
     setTimeout(() => this.input.focus(), 50);
   }
@@ -460,11 +498,15 @@ export class DaemonPanel {
   hide(): void {
     this.visible = false;
     this.container.style.display = "none";
+    // Stop the preview render loop to avoid wasting GPU cycles while hidden
+    if (this.previewAnimFrame) {
+      cancelAnimationFrame(this.previewAnimFrame);
+      this.previewAnimFrame = 0;
+    }
   }
 
   toggle(): void {
-    if (this.visible) this.hide();
-    else this.show();
+    if (this.visible) this.hide(); else this.show();
   }
 
   isVisible(): boolean {
@@ -484,7 +526,7 @@ export class DaemonPanel {
 
     try {
       await this.onGenerate?.(description);
-      this.status.textContent = "Daemon generated! Review personality and place.";
+      this.status.textContent = "Daemon generated! Review personality, then place it.";
       this.status.style.color = "#44ff88";
     } catch (err) {
       const message = err instanceof Error ? err.message : "Generation failed";
@@ -492,12 +534,15 @@ export class DaemonPanel {
       this.status.style.color = "#ff4444";
     } finally {
       this.generateBtn.textContent = "Generate Daemon";
-      this.generateBtn.disabled = !this.plotUuid;
-      this.generateBtn.style.opacity = this.plotUuid ? "1" : "0.5";
+      this.updateGenerateButton();
     }
   }
 
-  private escapeHtml(text: unknown): string {
+  setCurrentDaemonId(id: string): void {
+    this.currentDaemonId = id;
+  }
+
+  private escapeHtml(text: string): string {
     const div = document.createElement("div");
     div.textContent = String(text || "");
     return div.innerHTML;
@@ -514,7 +559,8 @@ export class DaemonPanel {
   }
 
   private async handleCreate(): Promise<void> {
-    if (!this.currentDefinition || !this.plotUuid) return;
+    const effectivePlotUuid = this.getEffectivePlotUuid();
+    if (!this.currentDefinition || (!effectivePlotUuid && this.placementMode !== "no-plot")) return;
 
     this.createBtn.disabled = true;
     this.createBtn.textContent = "Placing...";
@@ -535,5 +581,10 @@ export class DaemonPanel {
       this.createBtn.textContent = "Place Daemon";
       this.createBtn.disabled = false;
     }
+  }
+
+  dispose(): void {
+    if (this.previewAnimFrame) cancelAnimationFrame(this.previewAnimFrame);
+    this.previewRenderer?.dispose();
   }
 }

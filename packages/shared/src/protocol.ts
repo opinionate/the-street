@@ -7,7 +7,12 @@ import type {
   AvatarDefinition,
   DaemonState,
   DaemonMood,
+  UserRole,
 } from "./types.js";
+
+// Valid emote IDs shared between client and server
+export const VALID_EMOTE_IDS = ["dance", "shrug", "nod", "cry", "wave", "bow", "cheer", "laugh"] as const;
+export type EmoteId = typeof VALID_EMOTE_IDS[number];
 
 // Client -> Server messages
 export type ClientMessage =
@@ -28,7 +33,9 @@ export type ClientMessage =
     }
   | { type: "daemon_interact"; daemonId: string; message?: string }
   | { type: "daemon_recall"; daemonId: string }
-  | { type: "daemon_toggle_roam"; daemonId: string; enabled: boolean };
+  | { type: "daemon_toggle_roam"; daemonId: string; enabled: boolean }
+  | { type: "emote"; emoteId: EmoteId }
+  | { type: "avatar_update"; avatarDefinition: AvatarDefinition };
 
 // Server -> Client messages
 export type ServerMessage =
@@ -61,6 +68,8 @@ export type ServerMessage =
     }
   | {
       type: "world_snapshot";
+      yourUserId: string;
+      yourRole: UserRole;
       players: PlayerState[];
       plots: PlotSnapshot[];
       daemons?: DaemonState[];
@@ -71,7 +80,9 @@ export type ServerMessage =
   | { type: "daemon_move"; daemonId: string; position: Vector3; rotation: number; action: string }
   | { type: "daemon_chat"; daemonId: string; daemonName: string; content: string; targetUserId?: string; targetDaemonId?: string }
   | { type: "daemon_emote"; daemonId: string; emote: string; mood: DaemonMood }
-  | { type: "daemon_thought"; daemonId: string; thought: string };
+  | { type: "daemon_animated_emote"; daemonId: string; emoteId: string }
+  | { type: "daemon_thought"; daemonId: string; thought: string }
+  | { type: "player_emote"; userId: string; emoteId: EmoteId };
 
 // Message type constants for Colyseus
 export const MSG = {
@@ -97,7 +108,11 @@ export const MSG = {
   DAEMON_MOVE: "daemon_move",
   DAEMON_CHAT: "daemon_chat",
   DAEMON_EMOTE: "daemon_emote",
+  DAEMON_ANIMATED_EMOTE: "daemon_animated_emote",
   DAEMON_THOUGHT: "daemon_thought",
+  EMOTE: "emote",
+  PLAYER_EMOTE: "player_emote",
+  AVATAR_UPDATE: "avatar_update",
 } as const;
 
 // Rate limits

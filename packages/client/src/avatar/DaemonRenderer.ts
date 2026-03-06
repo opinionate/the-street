@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { DaemonState, DaemonMood, DaemonAction, Vector3 as Vec3 } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
 
@@ -20,15 +21,6 @@ const MOOD_COLORS: Record<string, number> = {
   curious: 0x44ccff,
 };
 
-const MOOD_EMOJIS: Record<string, string> = {
-  happy: ":)",
-  neutral: ":|",
-  bored: "._.",
-  excited: ":D",
-  annoyed: ">:|",
-  curious: "?",
-};
-
 interface ChatBubble {
   sprite: THREE.Sprite;
   createdAt: number;
@@ -48,8 +40,22 @@ interface EmoteLabel {
   duration: number;
 }
 
+interface DaemonCustomModel {
+  model: THREE.Group;
+  mixer: THREE.AnimationMixer;
+  actions: {
+    idle?: THREE.AnimationAction;
+    walk?: THREE.AnimationAction;
+    run?: THREE.AnimationAction;
+    emote?: THREE.AnimationAction;
+  };
+  currentAction: "idle" | "walk" | "run";
+  baseY: number;
+}
+
 interface DaemonInstance {
   group: THREE.Group;
+  name: string;
   targetPosition: THREE.Vector3;
   targetRotation: number;
   currentRotation: number;
@@ -84,12 +90,19 @@ interface DaemonInstance {
   sleepZs: THREE.Group | null;
   sleepPhase: number;
   lastAction: DaemonAction;
+  customModel: DaemonCustomModel | null;
 }
 
 export class DaemonRenderer {
   private daemons = new Map<string, DaemonInstance>();
   private daemonNames = new Map<string, string>();
   private scene: THREE.Scene;
+  private gltfLoader = new GLTFLoader();
+  private cachedAnimClips: { walk?: THREE.AnimationClip; run?: THREE.AnimationClip } = {};
+  private animClipsLoading: Promise<void> | null = null;
+  private moodTextureCache = new Map<number, THREE.Texture>();
+  private static _tempVec3 = new THREE.Vector3();
+  apiUrl = "";
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -130,6 +143,7 @@ export class DaemonRenderer {
 
     this.daemons.set(daemon.daemonId, {
       group,
+      name: daemon.definition.name,
       targetPosition: new THREE.Vector3(
         daemon.currentPosition.x,
         daemon.currentPosition.y,
@@ -164,15 +178,135 @@ export class DaemonRenderer {
       sleepZs: null,
       sleepPhase: 0,
       lastAction: "idle",
+      customModel: null,
     });
+
   }
 
   despawnDaemon(daemonId: string): void {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) return;
+
+    // Stop and uncache animation mixer for custom models
+    if (daemon.customModel?.mixer) {
+      daemon.customModel.mixer.stopAllAction();
+      daemon.customModel.mixer.uncacheRoot(daemon.customModel.model);
+    }
+
+    // Dispose trail particles (added to this.scene, not the daemon group)
+    for (const p of daemon.trailParticles) {
+      this.scene.remove(p.mesh);
+      (p.mesh.material as THREE.SpriteMaterial).dispose();
+    }
+    daemon.trailParticles.length = 0;
+
+    // Dispose thinking dots sprites
+    if (daemon.thinkingDots) {
+      daemon.thinkingDots.traverse((child) => {
+        if (child instanceof THREE.Sprite) {
+          (child.material as THREE.SpriteMaterial).dispose();
+        }
+      });
+      daemon.group.remove(daemon.thinkingDots);
+      daemon.thinkingDots = null;
+    }
+
+    // Dispose sleep Z sprites
+    if (daemon.sleepZs) {
+      daemon.sleepZs.traverse((child) => {
+        if (child instanceof THREE.Sprite) {
+          const mat = child.material as THREE.SpriteMaterial;
+          mat.map?.dispose();
+          mat.dispose();
+        }
+      });
+      daemon.group.remove(daemon.sleepZs);
+      daemon.sleepZs = null;
+    }
+
+    // Dispose emote particles
+    // Note: mood particles use textures from moodTextureCache — those must NOT be disposed
+    // here since they're shared across daemons. Set mat.map = null before disposing the
+    // material so the material doesn't take the cached texture down with it.
+    for (const p of daemon.emoteParticles) {
+      p.mesh.parent?.remove(p.mesh);
+      const mat = p.mesh.material as THREE.SpriteMaterial;
+      mat.map = null;
+      mat.dispose();
+    }
+    daemon.emoteParticles.length = 0;
+
+    // Dispose emote labels
+    for (const label of daemon.emoteLabels) {
+      label.sprite.parent?.remove(label.sprite);
+      label.sprite.material.map?.dispose();
+      label.sprite.material.dispose();
+    }
+    daemon.emoteLabels.length = 0;
+
+    // Dispose chat bubbles
+    for (const bubble of daemon.chatBubbles) {
+      bubble.sprite.parent?.remove(bubble.sprite);
+      bubble.sprite.material.map?.dispose();
+      bubble.sprite.material.dispose();
+    }
+    daemon.chatBubbles.length = 0;
+
+    // Dispose all geometries, materials, textures in the daemon group
+    this.disposeGroup(daemon.group);
     this.scene.remove(daemon.group);
     this.daemons.delete(daemonId);
     this.daemonNames.delete(daemonId);
+  }
+
+  /** Recursively dispose all geometries, materials, and textures in a group */
+  private disposeGroup(group: THREE.Group): void {
+    group.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh;
+        mesh.geometry?.dispose();
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const mat of materials) {
+          if (!mat) continue;
+          const texProps = ["map", "normalMap", "emissiveMap", "roughnessMap", "metalnessMap",
+            "aoMap", "alphaMap", "bumpMap", "displacementMap", "envMap", "lightMap"] as const;
+          for (const prop of texProps) {
+            const tex = (mat as any)[prop] as THREE.Texture | undefined;
+            if (tex) tex.dispose();
+          }
+          mat.dispose();
+        }
+      }
+      if (child instanceof THREE.Sprite) {
+        const mat = child.material as THREE.SpriteMaterial;
+        mat.map?.dispose();
+        mat.dispose();
+      }
+    });
+  }
+
+  /** Load shared walk/run animation clips (cached after first load) */
+  private async ensureAnimClips(): Promise<void> {
+    if (this.cachedAnimClips.walk) return;
+    if (this.animClipsLoading) { await this.animClipsLoading; return; }
+    this.animClipsLoading = (async () => {
+      for (const type of ["walk", "run"] as const) {
+        try {
+          const url = `${this.apiUrl}/api/avatar/animations/${type}`;
+          const gltf = await this.gltfLoader.loadAsync(url);
+          if (gltf.animations.length > 0) {
+            this.cachedAnimClips[type] = gltf.animations[0];
+          }
+        } catch (err) {
+          console.warn(`[Daemon] Failed to load ${type} animation clip:`, err);
+        }
+      }
+      // If we didn't get any clips, reset so next call retries
+      if (!this.cachedAnimClips.walk && !this.cachedAnimClips.run) {
+        this.animClipsLoading = null;
+      }
+    })();
+    await this.animClipsLoading;
   }
 
   moveDaemon(daemonId: string, position: Vec3, rotation: number, action: string): void {
@@ -372,6 +506,65 @@ export class DaemonRenderer {
     daemon.gesturePhase = 0;
   }
 
+  /** Play an animated emote on a daemon's rigged model */
+  async playDaemonEmote(daemonId: string, emoteId: string): Promise<void> {
+    const instance = this.daemons.get(daemonId);
+    if (!instance?.customModel) return;
+
+    const cm = instance.customModel;
+
+    // Try loading custom emote for this daemon, then shared fallback
+    let clip: THREE.AnimationClip | null = null;
+    try {
+      const url = `${this.apiUrl}/api/animations/daemon/${daemonId}/emote-${emoteId}`;
+      const gltf = await this.gltfLoader.loadAsync(url);
+      if (gltf.animations.length > 0) clip = gltf.animations[0];
+    } catch {
+      // No custom emote — try shared default
+      try {
+        const url = `${this.apiUrl}/api/avatar/emotes/${emoteId}`;
+        const gltf = await this.gltfLoader.loadAsync(url);
+        if (gltf.animations.length > 0) clip = gltf.animations[0];
+      } catch {
+        console.warn(`[Daemon] No emote animation found for ${emoteId}`);
+        return;
+      }
+    }
+    if (!clip) return;
+
+    // Stop any existing emote
+    if (cm.actions.emote) {
+      cm.actions.emote.fadeOut(0.3);
+      cm.actions.emote = undefined;
+    }
+
+    // Crossfade from current action to emote
+    const prevAction = cm.actions[cm.currentAction] || cm.actions.idle;
+    const emoteAction = cm.mixer.clipAction(clip);
+    emoteAction.setLoop(THREE.LoopOnce, 1);
+    emoteAction.clampWhenFinished = true;
+    emoteAction.reset();
+    if (prevAction) {
+      prevAction.crossFadeTo(emoteAction, 0.3, true);
+    }
+    emoteAction.play();
+    cm.actions.emote = emoteAction;
+
+    // Auto-return to idle after clip finishes
+    const duration = clip.duration * 1000;
+    setTimeout(() => {
+      // Verify this emote action is still the active one
+      if (cm.actions.emote !== emoteAction) return;
+      emoteAction.fadeOut(0.3);
+      cm.actions.emote = undefined;
+      const idleAction = cm.actions.idle;
+      if (idleAction) {
+        idleAction.reset().fadeIn(0.3).play();
+      }
+      cm.currentAction = "idle";
+    }, duration + 100);
+  }
+
   /** Update mood-driven visual properties: accent light color, body tint, animation speed, particles */
   private updateMoodVisuals(daemon: DaemonInstance, dt: number): void {
     const moodColor = MOOD_COLORS[daemon.mood] || 0x888888;
@@ -420,18 +613,27 @@ export class DaemonRenderer {
     }
   }
 
+  /** Get or create a cached texture for mood particles of the given color */
+  private getMoodTexture(color: number): THREE.Texture {
+    let tex = this.moodTextureCache.get(color);
+    if (!tex) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 16;
+      canvas.height = 16;
+      const ctx = canvas.getContext("2d")!;
+      ctx.beginPath();
+      ctx.arc(8, 8, 6, 0, Math.PI * 2);
+      ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
+      ctx.fill();
+      tex = new THREE.CanvasTexture(canvas);
+      this.moodTextureCache.set(color, tex);
+    }
+    return tex;
+  }
+
   /** Emit a small colored particle near the daemon for mood effects */
   private emitMoodParticle(daemon: DaemonInstance, color: number): void {
-    const canvas = document.createElement("canvas");
-    canvas.width = 16;
-    canvas.height = 16;
-    const ctx = canvas.getContext("2d")!;
-    ctx.beginPath();
-    ctx.arc(8, 8, 6, 0, Math.PI * 2);
-    ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
-    ctx.fill();
-
-    const tex = new THREE.CanvasTexture(canvas);
+    const tex = this.getMoodTexture(color);
     const mat = new THREE.SpriteMaterial({
       map: tex,
       transparent: true,
@@ -486,22 +688,80 @@ export class DaemonRenderer {
       daemon.currentRotation += rotDiff * Math.min(dt * 8, 1);
       daemon.group.rotation.y = daemon.currentRotation;
 
-      // Breathing (always active — subtle body scale pulse)
-      daemon.breathPhase += dt * 1.5;
-      const breathScale = 1 + Math.sin(daemon.breathPhase) * 0.008;
-      daemon.bodyMesh.scale.set(1, breathScale, 1);
+      // --- Custom model animation ---
+      if (daemon.customModel) {
+        const cm = daemon.customModel;
+        const CROSS_FADE_DURATION = 0.3;
 
-      // Animate based on action
-      this.animateAction(daemon, dt);
+        // Derive speed from actual movement (position delta)
+        const dist = daemon.group.position.distanceTo(daemon.targetPosition);
+        if (dist > 0.1) {
+          daemon.speed += (3 - daemon.speed) * Math.min(dt * 5, 1);
+        } else {
+          daemon.speed *= 1 - Math.min(dt * 5, 1);
+        }
 
-      // Gesture animation (arms, head bobbing during emotes/chat)
-      if (daemon.gestureTimer > 0) {
-        daemon.gestureTimer -= dt;
-        daemon.gesturePhase += dt * 6;
-        this.animateGesture(daemon);
-      } else {
-        // Return arms to rest
-        this.returnToRest(daemon, dt);
+        let targetAction: "idle" | "walk" | "run";
+        if (daemon.speed > 5) {
+          targetAction = "run";
+        } else if (daemon.speed > 0.3) {
+          targetAction = "walk";
+        } else {
+          targetAction = "idle";
+        }
+
+        if (targetAction !== cm.currentAction) {
+          const prevClip = cm.actions[cm.currentAction];
+          const nextClip = cm.actions[targetAction];
+
+          if (prevClip && nextClip) {
+            nextClip.reset();
+            prevClip.crossFadeTo(nextClip, CROSS_FADE_DURATION, true);
+            nextClip.play();
+          } else if (nextClip) {
+            nextClip.reset();
+            nextClip.time = nextClip.getClip().duration * 0.25;
+            nextClip.fadeIn(CROSS_FADE_DURATION).play();
+          } else if (prevClip) {
+            prevClip.fadeOut(CROSS_FADE_DURATION);
+          }
+
+          cm.currentAction = targetAction;
+        }
+
+        // Idle breathing
+        if (targetAction === "idle") {
+          daemon.breathPhase += dt * 1.5;
+          const breath = Math.sin(daemon.breathPhase);
+          cm.model.position.y = cm.baseY + breath * 0.003;
+        } else {
+          cm.model.position.y = cm.baseY;
+        }
+
+        cm.mixer.update(dt);
+
+        // Skip procedural animation for custom models
+        // (still process chat bubbles, emotes, mood below)
+      }
+
+      if (!daemon.customModel) {
+        // Breathing (always active — subtle body scale pulse)
+        daemon.breathPhase += dt * 1.5;
+        const breathScale = 1 + Math.sin(daemon.breathPhase) * 0.008;
+        daemon.bodyMesh.scale.set(1, breathScale, 1);
+
+        // Animate based on action
+        this.animateAction(daemon, dt);
+
+        // Gesture animation (arms, head bobbing during emotes/chat)
+        if (daemon.gestureTimer > 0) {
+          daemon.gestureTimer -= dt;
+          daemon.gesturePhase += dt * 6;
+          this.animateGesture(daemon);
+        } else {
+          // Return arms to rest
+          this.returnToRest(daemon, dt);
+        }
       }
 
       // Status indicators
@@ -523,7 +783,8 @@ export class DaemonRenderer {
       for (let i = daemon.emoteParticles.length - 1; i >= 0; i--) {
         const p = daemon.emoteParticles[i];
         p.life -= dt;
-        p.mesh.position.add(p.velocity.clone().multiplyScalar(dt));
+        DaemonRenderer._tempVec3.copy(p.velocity).multiplyScalar(dt);
+        p.mesh.position.add(DaemonRenderer._tempVec3);
         p.velocity.y -= dt * 0.5; // gravity
         const alpha = p.life / p.maxLife;
         (p.mesh.material as THREE.SpriteMaterial).opacity = alpha;
@@ -599,7 +860,7 @@ export class DaemonRenderer {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) return null;
     return {
-      name: daemon.state.definition.name,
+      name: daemon.name,
       role: daemon.behaviorType,
       mood: daemon.mood,
       action: daemon.action,
@@ -811,6 +1072,11 @@ export class DaemonRenderer {
 
     // Clean up thinking dots if present
     if (daemon.thinkingDots) {
+      daemon.thinkingDots.traverse((child) => {
+        if (child instanceof THREE.Sprite) {
+          (child.material as THREE.SpriteMaterial).dispose();
+        }
+      });
       daemon.group.remove(daemon.thinkingDots);
       daemon.thinkingDots = null;
     }
@@ -909,6 +1175,13 @@ export class DaemonRenderer {
       daemon.sleepPhase += dt * 1.5;
       this.updateSleepZs(daemon.sleepZs, daemon.sleepPhase);
     } else if (daemon.sleepZs) {
+      daemon.sleepZs.traverse((child) => {
+        if (child instanceof THREE.Sprite) {
+          const mat = child.material as THREE.SpriteMaterial;
+          mat.map?.dispose();
+          mat.dispose();
+        }
+      });
       daemon.group.remove(daemon.sleepZs);
       daemon.sleepZs = null;
     }
@@ -1161,9 +1434,11 @@ export class DaemonRenderer {
     const body = new THREE.Group();
 
     const bodyMat = new THREE.MeshStandardMaterial({
-      color: 0x333333,
-      roughness: 0.7,
-      metalness: 0.1,
+      color: 0x556677,
+      roughness: 0.5,
+      metalness: 0.3,
+      emissive: accentColor,
+      emissiveIntensity: 0.15,
     });
     const accentMat = new THREE.MeshStandardMaterial({
       color: accentColor,
@@ -1209,8 +1484,8 @@ export class DaemonRenderer {
     body.add(ring);
 
     // Accent glow
-    const glowLight = new THREE.PointLight(accentColor, 0.3, 2, 2);
-    glowLight.position.set(0, 1.75, 0);
+    const glowLight = new THREE.PointLight(accentColor, 1.0, 4, 2);
+    glowLight.position.set(0, 1.2, 0);
     body.add(glowLight);
 
     // Arms (capsules, attached at shoulder height)

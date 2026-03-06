@@ -1,4 +1,4 @@
-import type { Request, Response, NextFunction } from "express";
+import type { Response, NextFunction } from "express";
 import { getRedis } from "../database/redis.js";
 import type { AuthedRequest } from "./auth.js";
 
@@ -16,6 +16,12 @@ export function rateLimit(config: RateLimitConfig) {
     const userId = req.userId;
     if (!userId) {
       res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    // Super admins bypass rate limits
+    if (req.userRole === "super_admin") {
+      next();
       return;
     }
 
@@ -40,7 +46,8 @@ export function rateLimit(config: RateLimitConfig) {
 }
 
 // Chat rate limiter for WebSocket — returns true if allowed
-export async function checkChatRateLimit(userId: string): Promise<boolean> {
+export async function checkChatRateLimit(userId: string, role?: string): Promise<boolean> {
+  if (role === "super_admin") return true;
   const redis = getRedis();
   const key = `ratelimit:chat:${userId}`;
   const current = await redis.incr(key);

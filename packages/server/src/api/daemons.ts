@@ -1,11 +1,12 @@
 import { Router } from "express";
-import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
+import { requireAuth, isAdmin, type AuthedRequest } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { RATE_LIMITS } from "@the-street/shared";
 import { getPool } from "../database/pool.js";
 import { getActiveDaemonManager } from "../rooms/StreetRoom.js";
 
-const MAX_DAEMONS_PER_PLOT = 2;
+const MAX_DAEMONS_PER_PLOT = 10;
+
 const router = Router();
 
 // POST /api/daemons/generate — AI daemon definition generation
@@ -37,50 +38,65 @@ router.post(
   },
 );
 
-// POST /api/daemons/create — Save daemon to plot
+// POST /api/daemons/create — Save daemon to plot (or as a global street daemon for admins)
 router.post(
   "/create",
   ...requireAuth(),
   async (req, res) => {
     try {
       const userId = (req as AuthedRequest).userId;
+      const authedReq = req as AuthedRequest;
       const { definition } = req.body;
 
-      if (!definition || !definition.plotUuid || !definition.name) {
-        res.status(400).json({ error: "definition with plotUuid and name is required" });
+      if (!definition || !definition.name) {
+        res.status(400).json({ error: "definition with name is required" });
         return;
       }
 
       const pool = getPool();
+      const plotUuid: string | null = definition.plotUuid || null;
 
-      // Verify plot ownership
-      const { rows: plotRows } = await pool.query(
-        "SELECT uuid FROM plots WHERE uuid = $1 AND owner_id = $2",
-        [definition.plotUuid, userId],
-      );
-      if (plotRows.length === 0) {
-        res.status(403).json({ error: "You don't own this plot" });
-        return;
-      }
+      if (plotUuid) {
+        // Plot-based daemon: verify plot ownership (admins bypass ownership check)
+        const { rows: plotRows } = isAdmin(authedReq)
+          ? await pool.query(
+              "SELECT uuid FROM plots WHERE uuid = $1",
+              [plotUuid],
+            )
+          : await pool.query(
+              "SELECT uuid FROM plots WHERE uuid = $1 AND owner_id = $2",
+              [plotUuid, userId],
+            );
+        if (plotRows.length === 0) {
+          res.status(403).json({ error: "You don't own this plot" });
+          return;
+        }
 
-      // Check daemon limit per plot
-      const { rows: countRows } = await pool.query(
-        "SELECT COUNT(*) as count FROM daemons WHERE plot_uuid = $1 AND is_active = true",
-        [definition.plotUuid],
-      );
-      if (parseInt(countRows[0].count) >= MAX_DAEMONS_PER_PLOT) {
-        res.status(400).json({ error: `Maximum ${MAX_DAEMONS_PER_PLOT} daemons per plot` });
-        return;
+        // Check daemon limit per plot
+        const { rows: countRows } = await pool.query(
+          "SELECT COUNT(*) as count FROM daemons WHERE plot_uuid = $1 AND is_active = true",
+          [plotUuid],
+        );
+        if (parseInt(countRows[0].count) >= MAX_DAEMONS_PER_PLOT) {
+          res.status(400).json({ error: `Maximum ${MAX_DAEMONS_PER_PLOT} daemons per plot` });
+          return;
+        }
+      } else {
+        // Global street daemon (no plot) — admin only
+        if (!isAdmin(authedReq)) {
+          res.status(403).json({ error: "Only admins can create daemons without a plot" });
+          return;
+        }
       }
 
       const { rows } = await pool.query(
         `INSERT INTO daemons
           (plot_uuid, owner_id, name, description, daemon_definition, appearance, behavior,
-           position_x, position_y, position_z, rotation)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           position_x, position_y, position_z, rotation, mesh_description)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING id`,
         [
-          definition.plotUuid,
+          plotUuid,
           userId,
           definition.name,
           definition.description || "",
@@ -91,6 +107,7 @@ router.post(
           definition.position?.y || 0,
           definition.position?.z || 0,
           definition.rotation || 0,
+          definition.meshDescription || null,
         ],
       );
 
@@ -105,6 +122,45 @@ router.post(
       console.error("POST /api/daemons/create error:", err);
       const message = err instanceof Error ? err.message : "Daemon creation failed";
       res.status(500).json({ error: message });
+    }
+  },
+);
+
+// GET /api/daemons/global — List global street daemons (no plot, admin only)
+router.get(
+  "/global",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const pool = getPool();
+      const { rows } = await pool.query(
+        `SELECT id, name, description, daemon_definition, appearance, behavior,
+                position_x, position_y, position_z, rotation, is_active, created_at
+         FROM daemons WHERE plot_uuid IS NULL AND is_active = true
+         ORDER BY created_at DESC`,
+      );
+
+      res.json({
+        daemons: rows.map((r: Record<string, unknown>) => ({
+          id: r.id,
+          name: r.name,
+          description: r.description,
+          definition: r.daemon_definition,
+          position: { x: r.position_x, y: r.position_y, z: r.position_z },
+          rotation: r.rotation,
+          isActive: r.is_active,
+          createdAt: r.created_at,
+        })),
+      });
+    } catch (err) {
+      console.error("GET /api/daemons/global error:", err);
+      res.status(500).json({ error: "Failed to list global daemons" });
     }
   },
 );
@@ -155,10 +211,16 @@ router.delete(
       const daemonId = req.params.id as string;
       const pool = getPool();
 
-      const { rowCount } = await pool.query(
-        "UPDATE daemons SET is_active = false WHERE id = $1 AND owner_id = $2",
-        [daemonId, userId],
-      );
+      const authedReq = req as AuthedRequest;
+      const { rowCount } = isAdmin(authedReq)
+        ? await pool.query(
+            "UPDATE daemons SET is_active = false WHERE id = $1",
+            [daemonId],
+          )
+        : await pool.query(
+            "UPDATE daemons SET is_active = false WHERE id = $1 AND owner_id = $2",
+            [daemonId, userId],
+          );
 
       if (rowCount === 0) {
         res.status(404).json({ error: "Daemon not found or not owned by you" });
@@ -198,6 +260,84 @@ router.get(
     } catch (err) {
       console.error("GET /api/daemons/:id/activity error:", err);
       res.status(500).json({ error: "Failed to get activity" });
+    }
+  },
+);
+
+// PUT /api/daemons/:id — Update daemon definition
+router.put(
+  "/:id",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const userId = (req as AuthedRequest).userId;
+      const daemonId = req.params.id as string;
+      const { definition } = req.body;
+
+      if (!definition) {
+        res.status(400).json({ error: "definition is required" });
+        return;
+      }
+
+      const pool = getPool();
+      const authedReq = req as AuthedRequest;
+      const { rowCount } = isAdmin(authedReq)
+        ? await pool.query(
+            `UPDATE daemons SET
+              name = $1,
+              description = $2,
+              daemon_definition = $3,
+              appearance = $4,
+              behavior = $5,
+              mesh_description = $6
+             WHERE id = $7 AND is_active = true`,
+            [
+              definition.name,
+              definition.description || "",
+              JSON.stringify(definition),
+              JSON.stringify(definition.appearance),
+              JSON.stringify(definition.behavior),
+              definition.meshDescription || null,
+              daemonId,
+            ],
+          )
+        : await pool.query(
+            `UPDATE daemons SET
+              name = $1,
+              description = $2,
+              daemon_definition = $3,
+              appearance = $4,
+              behavior = $5,
+              mesh_description = $6
+             WHERE id = $7 AND owner_id = $8 AND is_active = true`,
+            [
+              definition.name,
+              definition.description || "",
+              JSON.stringify(definition),
+              JSON.stringify(definition.appearance),
+              JSON.stringify(definition.behavior),
+              definition.meshDescription || null,
+              daemonId,
+              userId,
+            ],
+          );
+
+      if (rowCount === 0) {
+        res.status(404).json({ error: "Daemon not found or not owned by you" });
+        return;
+      }
+
+      // Notify running DaemonManager to reload definition
+      const dm = getActiveDaemonManager();
+      if (dm) {
+        dm.updateDaemonDefinition?.(daemonId, definition);
+      }
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("PUT /api/daemons/:id error:", err);
+      const message = err instanceof Error ? err.message : "Update failed";
+      res.status(500).json({ error: message });
     }
   },
 );

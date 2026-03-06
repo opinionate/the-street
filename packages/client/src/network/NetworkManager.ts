@@ -7,10 +7,11 @@ import type {
   AvatarDefinition,
   DaemonState,
   DaemonMood,
+  UserRole,
 } from "@the-street/shared";
 
 export interface NetworkCallbacks {
-  onWorldSnapshot: (yourUserId: string, players: PlayerState[], plots: PlotSnapshot[], daemons?: DaemonState[]) => void;
+  onWorldSnapshot: (yourUserId: string, yourRole: UserRole, players: PlayerState[], plots: PlotSnapshot[], daemons?: DaemonState[]) => void;
   onPlayerJoin: (player: PlayerState) => void;
   onPlayerLeave: (userId: string) => void;
   onPlayerMove: (userId: string, position: Vector3, rotation: number) => void;
@@ -36,7 +37,9 @@ export interface NetworkCallbacks {
   onDaemonMove?: (daemonId: string, position: Vector3, rotation: number, action: string) => void;
   onDaemonChat?: (daemonId: string, daemonName: string, content: string, targetUserId?: string, targetDaemonId?: string) => void;
   onDaemonEmote?: (daemonId: string, emote: string, mood: DaemonMood) => void;
+  onDaemonAnimatedEmote?: (daemonId: string, emoteId: string) => void;
   onDaemonThought?: (daemonId: string, thought: string) => void;
+  onPlayerEmote?: (userId: string, emoteId: string) => void;
 }
 
 export class NetworkManager {
@@ -64,7 +67,7 @@ export class NetworkManager {
     if (!this.room) return;
 
     this.room.onMessage("world_snapshot", (data) => {
-      this.callbacks.onWorldSnapshot(data.yourUserId, data.players, data.plots, data.daemons);
+      this.callbacks.onWorldSnapshot(data.yourUserId, data.yourRole ?? "user", data.players, data.plots, data.daemons);
     });
 
     this.room.onMessage("player_join", (data) => {
@@ -128,8 +131,16 @@ export class NetworkManager {
       this.callbacks.onDaemonEmote?.(data.daemonId, data.emote, data.mood);
     });
 
+    this.room.onMessage("daemon_animated_emote", (data) => {
+      this.callbacks.onDaemonAnimatedEmote?.(data.daemonId, data.emoteId);
+    });
+
     this.room.onMessage("daemon_thought", (data) => {
       this.callbacks.onDaemonThought?.(data.daemonId, data.thought);
+    });
+
+    this.room.onMessage("player_emote", (data) => {
+      this.callbacks.onPlayerEmote?.(data.userId, data.emoteId);
     });
 
     this.room.onError((code, message) => {
@@ -147,6 +158,10 @@ export class NetworkManager {
 
   sendChat(content: string): void {
     this.room?.send("chat", { content });
+  }
+
+  sendEmote(emoteId: string): void {
+    this.room?.send("emote", { emoteId });
   }
 
   sendInteract(objectId: string, interaction: string): void {
@@ -173,7 +188,7 @@ export class NetworkManager {
     this.room?.send("daemon_toggle_roam", { daemonId, enabled });
   }
 
-  sendAvatarUpdate(avatarDefinition: unknown): void {
+  sendAvatarUpdate(avatarDefinition: AvatarDefinition): void {
     this.room?.send("avatar_update", { avatarDefinition });
   }
 

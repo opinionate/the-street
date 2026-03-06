@@ -40,18 +40,37 @@ const EMOTE_VERBS: Record<string, string> = {
   point: "points",
 };
 
+/** Animated emotes — these have GLB animations in addition to chat text */
+const ANIMATED_EMOTES: Record<string, { verb: string; emoteId: string }> = {
+  dance: { verb: "dances", emoteId: "dance" },
+  shrug: { verb: "shrugs", emoteId: "shrug" },
+  nod: { verb: "nods", emoteId: "nod" },
+  cry: { verb: "cries", emoteId: "cry" },
+  wave: { verb: "waves", emoteId: "wave" },
+  bow: { verb: "bows", emoteId: "bow" },
+  cheer: { verb: "cheers", emoteId: "cheer" },
+  laugh: { verb: "laughs", emoteId: "laugh" },
+};
+
+/** All slash commands for autocomplete (animated + text-only) */
+const ALL_COMMANDS = Object.keys(EMOTE_VERBS);
+
 export class ChatUI {
   private container: HTMLDivElement;
   private input: HTMLInputElement;
   private messageList: HTMLDivElement;
   private resizeHandle: HTMLDivElement;
+  private autocompletePopup: HTMLDivElement;
   private messages: ChatMessage[] = [];
   private inputFocused = false;
   private userScrolledUp = false;
+  private selectedAutocompleteIndex = -1;
 
   onSendMessage: ((content: string) => void) | null = null;
   /** Called when the user types a /emote command. Receives the emote text (e.g. "waves.") */
   onEmote: ((emoteText: string) => void) | null = null;
+  /** Called when the user triggers an animated emote (e.g. /dance). Receives the emoteId. */
+  onAnimatedEmote: ((emoteId: string, verb: string) => void) | null = null;
 
   constructor() {
     // Container — always visible
@@ -159,32 +178,105 @@ export class ChatUI {
     `;
     this.input.addEventListener("keydown", (e) => {
       e.stopPropagation();
+
+      // Autocomplete navigation
+      const items = this.autocompletePopup.children;
+      if (this.autocompletePopup.style.display !== "none" && items.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          this.selectedAutocompleteIndex = Math.min(this.selectedAutocompleteIndex + 1, items.length - 1);
+          this.highlightAutocomplete();
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          this.selectedAutocompleteIndex = Math.max(this.selectedAutocompleteIndex - 1, 0);
+          this.highlightAutocomplete();
+          return;
+        }
+        if (e.key === "Tab") {
+          e.preventDefault();
+          if (this.selectedAutocompleteIndex >= 0) {
+            const cmd = items[this.selectedAutocompleteIndex]?.getAttribute("data-cmd");
+            if (cmd) {
+              this.input.value = "/" + cmd;
+              this.updateAutocomplete();
+            }
+          }
+          return;
+        }
+      }
+
       if (e.key === "Enter" && this.input.value.trim()) {
         const text = this.input.value.trim();
         // Check for /emote commands
         const emoteMatch = text.match(/^\/(\w+)$/);
-        if (emoteMatch && EMOTE_VERBS[emoteMatch[1].toLowerCase()]) {
-          const verb = EMOTE_VERBS[emoteMatch[1].toLowerCase()];
-          this.onEmote?.(verb);
+        if (emoteMatch) {
+          const cmd = emoteMatch[1].toLowerCase();
+          // Animated emote takes priority
+          if (ANIMATED_EMOTES[cmd]) {
+            const { emoteId, verb } = ANIMATED_EMOTES[cmd];
+            this.onAnimatedEmote?.(emoteId, verb);
+          } else if (EMOTE_VERBS[cmd]) {
+            const verb = EMOTE_VERBS[cmd];
+            this.onEmote?.(verb);
+          } else {
+            this.onSendMessage?.(text);
+          }
         } else {
           this.onSendMessage?.(text);
         }
         this.input.value = "";
         this.input.blur();
         this.inputFocused = false;
+        this.hideAutocomplete();
       }
       if (e.key === "Escape") {
         this.input.blur();
         this.inputFocused = false;
+        this.hideAutocomplete();
       }
+    });
+    this.input.addEventListener("input", () => {
+      this.updateAutocomplete();
     });
     this.input.addEventListener("focus", () => {
       this.inputFocused = true;
+      this.updateAutocomplete();
     });
     this.input.addEventListener("blur", () => {
       this.inputFocused = false;
+      // Delay hide so clicks on autocomplete items register
+      setTimeout(() => this.hideAutocomplete(), 150);
     });
     this.container.appendChild(this.input);
+
+    // Autocomplete popup — positioned above input
+    this.autocompletePopup = document.createElement("div");
+    this.autocompletePopup.style.cssText = `
+      display: none;
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      right: 0;
+      margin-bottom: 2px;
+      background: rgba(0, 0, 0, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      max-height: 200px;
+      overflow-y: auto;
+      pointer-events: auto;
+      z-index: 101;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.2) transparent;
+    `;
+    // Input wrapper needed for absolute positioning of popup
+    const inputWrapper = document.createElement("div");
+    inputWrapper.style.cssText = "position: relative; pointer-events: auto;";
+    this.container.removeChild(this.input);
+    inputWrapper.appendChild(this.autocompletePopup);
+    inputWrapper.appendChild(this.input);
+    this.container.appendChild(inputWrapper);
 
     document.body.appendChild(this.container);
   }
@@ -198,6 +290,7 @@ export class ChatUI {
     this.inputFocused = false;
     this.input.blur();
     this.input.value = "";
+    this.hideAutocomplete();
   }
 
   toggle(): void {
@@ -259,6 +352,80 @@ export class ChatUI {
     // Only auto-scroll if the user hasn't scrolled up to read history
     if (!this.userScrolledUp) {
       this.messageList.scrollTop = this.messageList.scrollHeight;
+    }
+  }
+
+  /** Open chat input with text pre-filled (e.g. "/" for slash commands) */
+  showWithText(text: string): void {
+    this.input.value = text;
+    this.inputFocused = true;
+    this.input.focus();
+    this.updateAutocomplete();
+  }
+
+  private updateAutocomplete(): void {
+    const val = this.input.value;
+    // Only show autocomplete when input starts with "/"
+    if (!val.startsWith("/")) {
+      this.hideAutocomplete();
+      return;
+    }
+
+    const prefix = val.slice(1).toLowerCase();
+    const matches = ALL_COMMANDS.filter((cmd) => cmd.startsWith(prefix));
+
+    if (matches.length === 0 || (matches.length === 1 && matches[0] === prefix)) {
+      this.hideAutocomplete();
+      return;
+    }
+
+    this.autocompletePopup.innerHTML = "";
+    this.selectedAutocompleteIndex = 0;
+
+    matches.slice(0, 8).forEach((cmd, i) => {
+      const item = document.createElement("div");
+      const isAnimated = cmd in ANIMATED_EMOTES;
+      item.setAttribute("data-cmd", cmd);
+      item.style.cssText = `
+        padding: 6px 10px;
+        color: white;
+        font-family: system-ui, sans-serif;
+        font-size: 13px;
+        cursor: pointer;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      `;
+      item.innerHTML = `<span>/${cmd}</span>${isAnimated ? '<span style="color:#66ff99;font-size:11px">animated</span>' : ""}`;
+      item.addEventListener("mouseenter", () => {
+        this.selectedAutocompleteIndex = i;
+        this.highlightAutocomplete();
+      });
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        this.input.value = "/" + cmd;
+        this.hideAutocomplete();
+        // Auto-submit the command
+        this.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      });
+      this.autocompletePopup.appendChild(item);
+    });
+
+    this.highlightAutocomplete();
+    this.autocompletePopup.style.display = "block";
+  }
+
+  private hideAutocomplete(): void {
+    this.autocompletePopup.style.display = "none";
+    this.autocompletePopup.innerHTML = "";
+    this.selectedAutocompleteIndex = -1;
+  }
+
+  private highlightAutocomplete(): void {
+    const items = this.autocompletePopup.children;
+    for (let i = 0; i < items.length; i++) {
+      (items[i] as HTMLElement).style.background =
+        i === this.selectedAutocompleteIndex ? "rgba(255, 255, 255, 0.15)" : "transparent";
     }
   }
 

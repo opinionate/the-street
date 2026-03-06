@@ -1,15 +1,18 @@
 export interface InputState {
   forward: boolean;
   backward: boolean;
-  left: boolean;
-  right: boolean;
+  turnLeft: boolean;
+  turnRight: boolean;
+  strafeLeft: boolean;
+  strafeRight: boolean;
   sprint: boolean;
   jump: boolean;
-  interact: boolean;
   chat: boolean;
   menu: boolean;
   mouseX: number;
   mouseY: number;
+  leftMouseDown: boolean;
+  rightMouseDown: boolean;
 }
 
 export class InputManager {
@@ -19,32 +22,76 @@ export class InputManager {
   private pointerLocked = false;
 
   onChatToggle: (() => void) | null = null;
-  onInteract: (() => void) | null = null;
+  onSlashCommand: (() => void) | null = null;
   onZoom: ((delta: number) => void) | null = null;
   onTabTarget: ((reverse: boolean) => void) | null = null;
+
+  /** Check if UI is blocking mouse input (set by the host app) */
+  isUIBlocking: (() => boolean) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.state = {
       forward: false,
       backward: false,
-      left: false,
-      right: false,
+      turnLeft: false,
+      turnRight: false,
+      strafeLeft: false,
+      strafeRight: false,
       sprint: false,
       jump: false,
-      interact: false,
       chat: false,
       menu: false,
       mouseX: 0,
       mouseY: 0,
+      leftMouseDown: false,
+      rightMouseDown: false,
     };
 
     document.addEventListener("keydown", this.onKeyDown.bind(this));
     document.addEventListener("keyup", this.onKeyUp.bind(this));
     document.addEventListener("mousemove", this.onMouseMove.bind(this));
     document.addEventListener("wheel", this.onWheel.bind(this), { passive: false });
-    canvas.addEventListener("click", this.requestPointerLock.bind(this));
     document.addEventListener("pointerlockchange", this.onPointerLockChange.bind(this));
+
+    // Right-click: enter pointer lock to capture mouse for character rotation
+    canvas.addEventListener("mousedown", this.onMouseDown.bind(this));
+    document.addEventListener("mouseup", this.onMouseUp.bind(this));
+
+    // Prevent context menu on right-click
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  }
+
+  private onMouseDown(e: MouseEvent): void {
+    // Don't capture mouse when UI panels are blocking
+    if (this.isUIBlocking?.()) return;
+
+    if (e.button === 0) {
+      // Left-click → pointer lock for camera orbit
+      this.state.leftMouseDown = true;
+      this.canvas.requestPointerLock();
+    } else if (e.button === 2) {
+      // Right-click → pointer lock for character turning
+      e.preventDefault();
+      this.state.rightMouseDown = true;
+      this.canvas.requestPointerLock();
+    }
+  }
+
+  private onMouseUp(e: MouseEvent): void {
+    if (e.button === 0) {
+      this.state.leftMouseDown = false;
+      // Only exit pointer lock if right mouse isn't also held
+      if (!this.state.rightMouseDown && this.pointerLocked) {
+        document.exitPointerLock();
+      }
+    } else if (e.button === 2) {
+      this.state.rightMouseDown = false;
+      // Only exit pointer lock if left mouse isn't also held
+      if (!this.state.leftMouseDown && this.pointerLocked) {
+        document.exitPointerLock();
+      }
+    }
   }
 
   private onKeyDown(e: KeyboardEvent): void {
@@ -54,6 +101,13 @@ export class InputManager {
       if (e.key === "Escape") {
         (document.activeElement as HTMLElement).blur();
       }
+      return;
+    }
+
+    // "/" opens chat with slash pre-filled for commands
+    if (e.key === "/") {
+      e.preventDefault();
+      this.onSlashCommand?.();
       return;
     }
 
@@ -67,12 +121,6 @@ export class InputManager {
     if (e.key === "Tab") {
       e.preventDefault();
       this.onTabTarget?.(e.shiftKey);
-    }
-    if (e.key.toLowerCase() === "e") {
-      this.onInteract?.();
-    }
-    if (e.key === "Escape" && this.pointerLocked) {
-      document.exitPointerLock();
     }
   }
 
@@ -89,10 +137,10 @@ export class InputManager {
   }
 
   private onWheel(e: WheelEvent): void {
-    if (this.pointerLocked) {
-      e.preventDefault();
-      this.onZoom?.(e.deltaY);
-    }
+    // Don't intercept scroll when UI panels are open
+    if (this.isUIBlocking?.()) return;
+    e.preventDefault();
+    this.onZoom?.(e.deltaY);
   }
 
   consumeMouse(): { x: number; y: number } {
@@ -103,35 +151,49 @@ export class InputManager {
     return { x, y };
   }
 
-  private requestPointerLock(): void {
-    this.canvas.requestPointerLock();
-  }
-
   private onPointerLockChange(): void {
     this.pointerLocked = document.pointerLockElement === this.canvas;
+    // If pointer lock was lost externally (e.g. Escape), clear mouse states
+    if (!this.pointerLocked) {
+      this.state.leftMouseDown = false;
+      this.state.rightMouseDown = false;
+    }
   }
 
   isPointerLocked(): boolean {
     return this.pointerLocked;
   }
 
+  /** Returns true when the user is left-click dragging (camera orbit active) */
+  isLeftMouseDragging(): boolean {
+    return this.state.leftMouseDown && this.pointerLocked;
+  }
+
+  /** Returns true when the user is right-click dragging (mouse turning active) */
+  isRightMouseDragging(): boolean {
+    return this.state.rightMouseDown && this.pointerLocked;
+  }
+
   private updateState(): void {
     this.state.forward = this.keys.has("w");
     this.state.backward = this.keys.has("s");
-    this.state.left = this.keys.has("a");
-    this.state.right = this.keys.has("d");
+    this.state.turnLeft = this.keys.has("a");
+    this.state.turnRight = this.keys.has("d");
+    this.state.strafeLeft = this.keys.has("q");
+    this.state.strafeRight = this.keys.has("e");
     this.state.sprint = this.keys.has("shift");
     this.state.jump = this.keys.has(" ");
   }
 
-  /** Get movement vector in local space (-1 to 1 on each axis) */
+  /** Get movement vector in local space (-1 to 1 on each axis).
+   *  z: forward/backward (W/S), x: strafe (Q/E) */
   getMovementVector(): { x: number; z: number } {
     let x = 0;
     let z = 0;
-    if (this.state.forward) z -= 1;
-    if (this.state.backward) z += 1;
-    if (this.state.left) x -= 1;
-    if (this.state.right) x += 1;
+    if (this.state.forward) z += 1;
+    if (this.state.backward) z -= 1;
+    if (this.state.strafeLeft) x -= 1;
+    if (this.state.strafeRight) x += 1;
 
     // Normalize diagonal movement
     const len = Math.sqrt(x * x + z * z);
@@ -147,8 +209,12 @@ export class InputManager {
     return (
       this.state.forward ||
       this.state.backward ||
-      this.state.left ||
-      this.state.right
+      this.state.strafeLeft ||
+      this.state.strafeRight
     );
+  }
+
+  isTurning(): boolean {
+    return this.state.turnLeft || this.state.turnRight;
   }
 }

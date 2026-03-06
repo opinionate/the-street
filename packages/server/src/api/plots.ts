@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getPool } from "../database/pool.js";
-import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
+import { requireAuth, isAdmin, type AuthedRequest } from "../middleware/auth.js";
 import {
   validateWorldObject,
   getPlotPosition,
@@ -104,11 +104,10 @@ router.post("/:uuid/publish", ...requireAuth(), async (req, res) => {
   try {
     const pool = getPool();
 
-    // Verify plot ownership
-    const { rows: plotRows } = await pool.query(
-      "SELECT uuid, position FROM plots WHERE uuid = $1 AND owner_id = $2",
-      [req.params.uuid, authedReq.userId],
-    );
+    // Verify plot ownership (admins bypass)
+    const { rows: plotRows } = isAdmin(authedReq)
+      ? await pool.query("SELECT uuid, position FROM plots WHERE uuid = $1", [req.params.uuid])
+      : await pool.query("SELECT uuid, position FROM plots WHERE uuid = $1 AND owner_id = $2", [req.params.uuid, authedReq.userId]);
     if (plotRows.length === 0) {
       res.status(403).json({ error: "Not plot owner" });
       return;

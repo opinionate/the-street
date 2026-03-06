@@ -1,7 +1,5 @@
 import { Router } from "express";
-import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
-import { rateLimit } from "../middleware/rate-limit.js";
-import { RATE_LIMITS } from "@the-street/shared";
+import { requireAuth, type AuthedRequest, isAdmin } from "../middleware/auth.js";
 import { getPool } from "../database/pool.js";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -9,281 +7,30 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ANIM_CACHE_DIR = join(__dirname, "..", "..", "data", "animations");
-
-// In-memory flag to avoid redundant disk checks
-let animsCached = false;
-
-/** Cache walk/run animation GLBs from a completed rig task (one-time). */
-async function cacheAnimationsIfNeeded(walkUrl?: string, runUrl?: string): Promise<void> {
-  if (animsCached) return;
-  if (existsSync(join(ANIM_CACHE_DIR, "walk.glb"))) {
-    animsCached = true;
-    return;
-  }
-  if (!walkUrl && !runUrl) return;
-
-  mkdirSync(ANIM_CACHE_DIR, { recursive: true });
-
-  for (const [type, url] of [["walk", walkUrl], ["run", runUrl]] as const) {
-    if (!url) continue;
-    try {
-      const res = await fetch(url);
-      if (res.ok) {
-        const buf = Buffer.from(await res.arrayBuffer());
-        writeFileSync(join(ANIM_CACHE_DIR, `${type}.glb`), buf);
-      }
-    } catch (err) {
-      console.warn(`Failed to cache ${type} animation:`, err);
-    }
-  }
-  animsCached = true;
-}
+const MODELS_DIR = join(__dirname, "..", "..", "data", "models");
+const DEFAULT_MODEL_PATH = join(MODELS_DIR, "default-mannequin.glb");
 
 const router = Router();
 
-// POST /api/avatar/generate — AI avatar appearance generation
-router.post(
-  "/generate",
-  ...requireAuth(),
-  rateLimit({
-    windowMs: 60_000,
-    maxRequests: RATE_LIMITS.aiGeneration.maxPerMinute,
-  }),
-  async (req, res) => {
-    try {
-      const { description } = req.body;
-
-      if (!description || typeof description !== "string") {
-        res.status(400).json({ error: "description is required" });
-        return;
-      }
-
-      const { generateAvatar } = await import("@the-street/ai-service");
-      const result = await generateAvatar(description);
-
-      res.json({
-        appearance: result.appearance,
-        meshDescription: result.meshDescription,
-      });
-    } catch (err) {
-      console.error("POST /api/avatar/generate error:", err);
-      const message = err instanceof Error ? err.message : "Avatar generation failed";
-      res.status(500).json({ error: message });
-    }
-  },
-);
-
-// GET /api/avatar/mesh/:taskId — Poll Meshy task status
-router.get(
-  "/mesh/:taskId",
-  ...requireAuth(),
-  async (req, res) => {
-    try {
-      const taskId = req.params.taskId as string;
-      const { pollMeshTask } = await import("@the-street/ai-service");
-      const result = await pollMeshTask(taskId);
-      res.json(result);
-    } catch (err) {
-      console.error("GET /api/avatar/mesh/:taskId error:", err);
-      const message = err instanceof Error ? err.message : "Mesh status check failed";
-      res.status(500).json({ error: message });
-    }
-  },
-);
-
-// GET /api/avatar/mesh/:taskId/model — Proxy GLB download
-router.get(
-  "/mesh/:taskId/model",
-  ...requireAuth(),
-  async (req, res) => {
-    try {
-      const taskId = req.params.taskId as string;
-      const { pollMeshTask } = await import("@the-street/ai-service");
-      const status = await pollMeshTask(taskId);
-
-      if (status.status !== "SUCCEEDED" || !status.glbUrl) {
-        res.status(404).json({ error: "Model not ready" });
-        return;
-      }
-
-      const glbRes = await fetch(status.glbUrl);
-      if (!glbRes.ok || !glbRes.body) {
-        res.status(502).json({ error: "Failed to fetch model" });
-        return;
-      }
-
-      res.setHeader("Content-Type", "model/gltf-binary");
-      res.setHeader("Cache-Control", "public, max-age=86400");
-
-      const reader = glbRes.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
-      }
-      res.end();
-    } catch (err) {
-      console.error("GET /api/avatar/mesh/:taskId/model error:", err);
-      const message = err instanceof Error ? err.message : "Model proxy failed";
-      res.status(500).json({ error: message });
-    }
-  },
-);
-
-// POST /api/avatar/rig — Start rigging a completed mesh task
-router.post(
-  "/rig",
-  ...requireAuth(),
-  async (req, res) => {
-    try {
-      const { meshTaskId } = req.body;
-
-      if (!meshTaskId || typeof meshTaskId !== "string") {
-        res.status(400).json({ error: "meshTaskId is required" });
-        return;
-      }
-
-      const { startRigging } = await import("@the-street/ai-service");
-      const rigTaskId = await startRigging(meshTaskId);
-      res.json({ rigTaskId });
-    } catch (err) {
-      console.error("POST /api/avatar/rig error:", err);
-      const message = err instanceof Error ? err.message : "Rigging failed";
-      res.status(500).json({ error: message });
-    }
-  },
-);
-
-// GET /api/avatar/rig/:taskId — Poll rigging status
-router.get(
-  "/rig/:taskId",
-  ...requireAuth(),
-  async (req, res) => {
-    try {
-      const taskId = req.params.taskId as string;
-      const { pollRiggingTask } = await import("@the-street/ai-service");
-      const result = await pollRiggingTask(taskId);
-
-      // On first successful rig, cache the shared walk/run animations
-      if (result.status === "SUCCEEDED") {
-        cacheAnimationsIfNeeded(result.walkAnimUrl, result.runAnimUrl).catch(() => {});
-      }
-
-      res.json(result);
-    } catch (err) {
-      console.error("GET /api/avatar/rig/:taskId error:", err);
-      const message = err instanceof Error ? err.message : "Rig status check failed";
-      res.status(500).json({ error: message });
-    }
-  },
-);
-
-// GET /api/avatar/rig/:taskId/model — Proxy rigged GLB download
-router.get(
-  "/rig/:taskId/model",
-  ...requireAuth(),
-  async (req, res) => {
-    try {
-      const taskId = req.params.taskId as string;
-      const { pollRiggingTask } = await import("@the-street/ai-service");
-      const status = await pollRiggingTask(taskId);
-
-      if (status.status !== "SUCCEEDED" || !status.riggedGlbUrl) {
-        res.status(404).json({ error: "Rigged model not ready" });
-        return;
-      }
-
-      const glbRes = await fetch(status.riggedGlbUrl);
-      if (!glbRes.ok || !glbRes.body) {
-        res.status(502).json({ error: "Failed to fetch rigged model" });
-        return;
-      }
-
-      res.setHeader("Content-Type", "model/gltf-binary");
-      res.setHeader("Cache-Control", "public, max-age=86400");
-
-      const reader = glbRes.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
-      }
-      res.end();
-    } catch (err) {
-      console.error("GET /api/avatar/rig/:taskId/model error:", err);
-      const message = err instanceof Error ? err.message : "Rigged model proxy failed";
-      res.status(500).json({ error: message });
-    }
-  },
-);
-
-// GET /api/avatar/rig/:taskId/anim/:type — Proxy walk/run animation GLB download
-router.get(
-  "/rig/:taskId/anim/:type",
-  ...requireAuth(),
-  async (req, res) => {
-    try {
-      const taskId = req.params.taskId as string;
-      const animType = req.params.type as string;
-
-      if (animType !== "walk" && animType !== "run") {
-        res.status(400).json({ error: "Animation type must be 'walk' or 'run'" });
-        return;
-      }
-
-      const { pollRiggingTask } = await import("@the-street/ai-service");
-      const status = await pollRiggingTask(taskId);
-
-      if (status.status !== "SUCCEEDED") {
-        res.status(404).json({ error: "Rigging not complete" });
-        return;
-      }
-
-      const animUrl = animType === "walk" ? status.walkAnimUrl : status.runAnimUrl;
-      if (!animUrl) {
-        res.status(404).json({ error: `No ${animType} animation available` });
-        return;
-      }
-
-      const glbRes = await fetch(animUrl);
-      if (!glbRes.ok || !glbRes.body) {
-        res.status(502).json({ error: "Failed to fetch animation" });
-        return;
-      }
-
-      res.setHeader("Content-Type", "model/gltf-binary");
-      res.setHeader("Cache-Control", "public, max-age=86400");
-
-      const reader = glbRes.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(Buffer.from(value));
-      }
-      res.end();
-    } catch (err) {
-      console.error("GET /api/avatar/rig/:taskId/anim/:type error:", err);
-      const message = err instanceof Error ? err.message : "Animation proxy failed";
-      res.status(500).json({ error: message });
-    }
-  },
-);
-
-// GET /api/avatar/animations/:type — Serve cached shared animation GLBs (walk/run)
+// GET /api/avatar/animations/:type — Serve cached shared animation GLBs
+const ALLOWED_ANIM_TYPES = new Set([
+  "idle", "walk", "run", "turnLeft", "turnRight",
+  "strafeLeftWalk", "strafeRightWalk", "strafeLeftRun", "strafeRightRun", "jump",
+]);
 router.get(
   "/animations/:type",
   ...requireAuth(),
   async (req, res) => {
     try {
       const animType = req.params.type as string;
-      if (animType !== "walk" && animType !== "run") {
-        res.status(400).json({ error: "Animation type must be 'walk' or 'run'" });
+      if (!ALLOWED_ANIM_TYPES.has(animType)) {
+        res.status(400).json({ error: `Unknown animation type: '${animType}'` });
         return;
       }
 
       const filePath = join(ANIM_CACHE_DIR, `${animType}.glb`);
       if (!existsSync(filePath)) {
-        res.status(404).json({ error: `No cached ${animType} animation yet` });
+        res.status(404).json({ error: `No cached ${animType} animation` });
         return;
       }
 
@@ -298,6 +45,117 @@ router.get(
   },
 );
 
+// GET /api/avatar/emotes/:name — Serve emote animation GLBs
+const EMOTE_DIR = join(__dirname, "..", "..", "data", "emotes");
+const VALID_EMOTES: Record<string, string> = {
+  dance: "hip-hop-dance.glb",
+  shrug: "shrugging.glb",
+  nod: "nod.glb",
+  cry: "crying.glb",
+  wave: "waving.glb",
+  bow: "bow.glb",
+  cheer: "cheering.glb",
+  laugh: "laughing.glb",
+};
+router.get(
+  "/emotes/:name",
+  async (req, res) => {
+    const name = req.params.name as string;
+    const filename = VALID_EMOTES[name];
+    if (!filename) {
+      res.status(404).json({ error: "Unknown emote" });
+      return;
+    }
+    const filePath = join(EMOTE_DIR, filename);
+    if (!existsSync(filePath)) {
+      res.status(404).json({ error: "Emote file not found" });
+      return;
+    }
+    const data = readFileSync(filePath);
+    res.setHeader("Content-Type", "model/gltf-binary");
+    res.setHeader("Cache-Control", "public, max-age=604800");
+    res.send(data);
+  },
+);
+
+// POST /api/avatar/upload-character — Upload a pre-rigged character model (FBX converted to GLB client-side)
+const UPLOAD_DIR = join(__dirname, "..", "..", "data", "assets", "upload");
+const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB
+router.post(
+  "/upload-character",
+  ...requireAuth(),
+  async (req, res) => {
+    const authedReq = req as AuthedRequest;
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(chunk as Buffer);
+      }
+      const body = Buffer.concat(chunks);
+
+      if (body.length < 12) {
+        res.status(400).json({ error: "File too small" });
+        return;
+      }
+      if (body.length > MAX_UPLOAD_SIZE) {
+        res.status(400).json({ error: `File too large (max ${MAX_UPLOAD_SIZE / 1024 / 1024}MB)` });
+        return;
+      }
+
+      // Validate GLB magic bytes (glTF)
+      const magic = body.readUInt32LE(0);
+      if (magic !== 0x46546c67) {
+        res.status(400).json({ error: "Invalid GLB file (bad magic bytes)" });
+        return;
+      }
+
+      const originalFilename = (req.headers["x-original-filename"] as string) || "character.glb";
+      const pool = getPool();
+
+      // Insert DB record
+      const { rows } = await pool.query(
+        `INSERT INTO avatar_uploads (user_id, original_filename, file_size_bytes, bone_space)
+         VALUES ($1, $2, $3, 'mixamo') RETURNING id`,
+        [authedReq.userId, originalFilename, body.length],
+      );
+      const uploadId = rows[0].id as string;
+
+      // Write file to disk
+      const dir = join(UPLOAD_DIR, uploadId);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "model.glb"), body);
+
+      res.json({ uploadId });
+    } catch (err) {
+      console.error("POST /api/avatar/upload-character error:", err);
+      res.status(500).json({ error: "Upload failed" });
+    }
+  },
+);
+
+// GET /api/avatar/upload/:uploadId/model — Serve an uploaded character model
+router.get(
+  "/upload/:uploadId/model",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const uploadId = req.params.uploadId as string;
+      const filePath = join(UPLOAD_DIR, uploadId, "model.glb");
+      if (!existsSync(filePath)) {
+        res.status(404).json({ error: "Upload not found" });
+        return;
+      }
+      const data = readFileSync(filePath);
+      res.setHeader("Content-Type", "model/gltf-binary");
+      res.setHeader("Cache-Control", "public, max-age=604800");
+      res.send(data);
+    } catch (err) {
+      console.error("GET /api/avatar/upload/:uploadId/model error:", err);
+      res.status(500).json({ error: "Failed to serve uploaded model" });
+    }
+  },
+);
+
 // GET /api/avatar/history — User's avatar history (most recent first)
 router.get(
   "/history",
@@ -307,7 +165,7 @@ router.get(
       const userId = (req as AuthedRequest).userId;
       const pool = getPool();
       const { rows } = await pool.query(
-        `SELECT id, avatar_definition, mesh_description, meshy_task_id, thumbnail_url, created_at
+        `SELECT id, avatar_definition, mesh_description, thumbnail_url, created_at
          FROM avatar_history WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20`,
         [userId],
       );
@@ -327,7 +185,7 @@ router.post(
   async (req, res) => {
     try {
       const userId = (req as AuthedRequest).userId;
-      const { avatarDefinition, meshDescription, meshyTaskId, thumbnailUrl } = req.body;
+      const { avatarDefinition, meshDescription, thumbnailUrl } = req.body;
 
       if (!avatarDefinition) {
         res.status(400).json({ error: "avatarDefinition is required" });
@@ -343,9 +201,9 @@ router.post(
           [JSON.stringify(avatarDefinition), userId],
         );
         await client.query(
-          `INSERT INTO avatar_history (user_id, avatar_definition, mesh_description, meshy_task_id, thumbnail_url)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [userId, JSON.stringify(avatarDefinition), meshDescription || null, meshyTaskId || null, thumbnailUrl || null],
+          `INSERT INTO avatar_history (user_id, avatar_definition, mesh_description, thumbnail_url)
+           VALUES ($1, $2, $3, $4)`,
+          [userId, JSON.stringify(avatarDefinition), meshDescription || null, thumbnailUrl || null],
         );
         await client.query("COMMIT");
       } catch (txErr) {
@@ -353,6 +211,16 @@ router.post(
         throw txErr;
       } finally {
         client.release();
+      }
+
+      // Asynchronously mark uploaded character assets as cached (model is already on disk)
+      const uploadedModelId = avatarDefinition?.uploadedModelId as string | undefined;
+      if (uploadedModelId) {
+        pool.query(
+          `UPDATE avatar_history SET assets_cached = true
+           WHERE user_id = $1 AND avatar_definition->>'uploadedModelId' = $2`,
+          [userId, uploadedModelId],
+        ).catch((e) => console.warn("Failed to update assets_cached for upload:", e));
       }
 
       res.json({ success: true });
@@ -386,6 +254,72 @@ router.delete(
       console.error("DELETE /api/avatar/history/:id error:", err);
       const message = err instanceof Error ? err.message : "Delete failed";
       res.status(500).json({ error: message });
+    }
+  },
+);
+
+// GET /api/avatar/default-model — Serve the default mannequin GLB (no auth required)
+router.get(
+  "/default-model",
+  async (_req, res) => {
+    try {
+      if (!existsSync(DEFAULT_MODEL_PATH)) {
+        res.status(404).json({ error: "No default model uploaded yet" });
+        return;
+      }
+      const data = readFileSync(DEFAULT_MODEL_PATH);
+      res.setHeader("Content-Type", "model/gltf-binary");
+      res.setHeader("Cache-Control", "public, max-age=604800");
+      res.send(data);
+    } catch (err) {
+      console.error("GET /api/avatar/default-model error:", err);
+      res.status(500).json({ error: "Failed to serve default model" });
+    }
+  },
+);
+
+// POST /api/avatar/default-model — Upload a default mannequin GLB (admin only)
+router.post(
+  "/default-model",
+  ...requireAuth(),
+  async (req, res) => {
+    const authedReq = req as AuthedRequest;
+    if (!isAdmin(authedReq)) {
+      res.status(403).json({ error: "Admin only" });
+      return;
+    }
+
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(chunk as Buffer);
+      }
+      const body = Buffer.concat(chunks);
+
+      if (body.length < 12) {
+        res.status(400).json({ error: "File too small" });
+        return;
+      }
+      if (body.length > MAX_UPLOAD_SIZE) {
+        res.status(400).json({ error: `File too large (max ${MAX_UPLOAD_SIZE / 1024 / 1024}MB)` });
+        return;
+      }
+
+      // Validate GLB magic bytes
+      const magic = body.readUInt32LE(0);
+      if (magic !== 0x46546c67) {
+        res.status(400).json({ error: "Invalid GLB file (bad magic bytes)" });
+        return;
+      }
+
+      mkdirSync(MODELS_DIR, { recursive: true });
+      writeFileSync(DEFAULT_MODEL_PATH, body);
+
+      console.log(`[Avatar] Default model uploaded: ${(body.length / 1024 / 1024).toFixed(2)} MB`);
+      res.json({ success: true, size: body.length });
+    } catch (err) {
+      console.error("POST /api/avatar/default-model error:", err);
+      res.status(500).json({ error: "Upload failed" });
     }
   },
 );

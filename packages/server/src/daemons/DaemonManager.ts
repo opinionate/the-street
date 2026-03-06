@@ -144,6 +144,7 @@ function getTimeChattinessFactor(time: TimeOfDay): number {
 
 /** Pick a random element from an array */
 function pick<T>(arr: T[]): T {
+  if (arr.length === 0) throw new Error("pick() called with empty array");
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
@@ -184,6 +185,8 @@ export class DaemonManager {
   private playerMovement = new Map<string, { lastPos: Vector3; speed: number; stillTime: number; nearDaemonTime: Map<string, number> }>();
   private lastPlayerCount = 0;
   private crowdReactionCooldown = 0;
+  private compactionTimer = 0;
+  private consecutiveAiFailures = 0;
 
   constructor(
     broadcast: BroadcastFn,
@@ -197,15 +200,27 @@ export class DaemonManager {
     this.plotUuids = plotUuids;
     const pool = getPool();
 
-    const placeholders = plotUuids.map((_, i) => `$${i + 1}`).join(",");
-    if (plotUuids.length === 0) return;
-
-    const { rows } = await pool.query(
-      `SELECT id, plot_uuid, name, description, daemon_definition, appearance, behavior,
-              position_x, position_y, position_z, rotation
-       FROM daemons WHERE plot_uuid IN (${placeholders}) AND is_active = true`,
-      plotUuids,
-    );
+    // Load plot daemons + global street daemons (plot_uuid IS NULL)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let rows: any[];
+    if (plotUuids.length > 0) {
+      const placeholders = plotUuids.map((_, i) => `$${i + 1}`).join(",");
+      const result = await pool.query(
+        `SELECT id, plot_uuid, name, description, daemon_definition, appearance, behavior,
+                position_x, position_y, position_z, rotation
+         FROM daemons WHERE (plot_uuid IN (${placeholders}) OR plot_uuid IS NULL) AND is_active = true`,
+        plotUuids,
+      );
+      rows = result.rows;
+    } else {
+      // No plots — still load global street daemons
+      const result = await pool.query(
+        `SELECT id, plot_uuid, name, description, daemon_definition, appearance, behavior,
+                position_x, position_y, position_z, rotation
+         FROM daemons WHERE plot_uuid IS NULL AND is_active = true`,
+      );
+      rows = result.rows;
+    }
 
     for (const row of rows) {
       const definition: DaemonDefinition = row.daemon_definition;
@@ -233,6 +248,8 @@ export class DaemonManager {
 
       this.daemons.set(row.id, this.createInstance(state, behavior));
     }
+
+    await this.loadPersistedMemories();
   }
 
   private createInstance(state: DaemonState, behavior: DaemonBehavior): DaemonInstance {
@@ -253,7 +270,7 @@ export class DaemonManager {
       conversationCooldown: 10 + Math.random() * 20, // stagger initial conversations
       relationships: new Map(),
       lastOverhearReaction: 0,
-      spontaneousGestureTimer: 15 + Math.random() * 25, // 15-40s initial delay
+      spontaneousGestureTimer: 300 + Math.random() * 300, // 5-10 min initial delay
       gatheringTarget: null,
       gatheringTimer: 20 + Math.random() * 20,
       routineTimer: 30 + Math.random() * 30,
@@ -844,10 +861,11 @@ export class DaemonManager {
         }
       }
 
-      // Check if content mentions daemon's name
+      // Check if content mentions daemon's name — trigger direct interaction
       if (contentLower.includes(daemon.state.definition.name.toLowerCase())) {
-        reactionChance = 0.8; // 80% when mentioned by name
-        topicMatch = "being mentioned";
+        daemon.lastOverhearReaction = now;
+        this.handleInteract(daemon.state.daemonId, playerId, "", content, playerName);
+        break; // Only one daemon reacts per chat message
       }
 
       // Role-specific triggers
@@ -957,6 +975,13 @@ export class DaemonManager {
   }
 
   tick(dt: number, players: PlayerInfo[]): void {
+    // Memory compaction timer (every 10 minutes)
+    this.compactionTimer = (this.compactionTimer || 0) + dt;
+    if (this.compactionTimer >= 600) {
+      this.compactionTimer = 0;
+      this.compactMemories().catch(err => console.warn("Memory compaction failed:", err));
+    }
+
     // Advance world clock
     this.worldClock += dt;
     const timeOfDay = getTimeOfDay(this.worldClock);
@@ -1150,11 +1175,29 @@ export class DaemonManager {
           timeOfDay: this.getTimeOfDay(),
         };
 
+        // Query available animated emotes for this daemon
+        let availableEmotes: string[] | undefined;
+        try {
+          const { getPool } = await import("../database/pool.js");
+          const pool = getPool();
+          const { rows } = await pool.query(
+            `SELECT slot FROM custom_animations WHERE entity_type = 'daemon' AND entity_id = $1 AND slot LIKE 'emote-%'`,
+            [daemonId],
+          );
+          // Default emotes + custom ones
+          const defaults = ["dance", "wave", "shrug", "nod", "cry", "bow", "cheer", "laugh"];
+          const custom = rows.map((r: { slot: string }) => r.slot);
+          availableEmotes = [...defaults, ...custom];
+        } catch {
+          // Proceed without emote awareness
+        }
+
         const response = await generateDaemonResponse(
           daemon.state.definition,
           resolvedPlayerName,
           playerMessage,
           context,
+          availableEmotes,
         );
 
         // Update daemon state
@@ -1181,7 +1224,16 @@ export class DaemonManager {
           this.learnTopics(daemon, playerId, playerMessage);
         }
 
-        // Broadcast emote if present
+        // Broadcast animated emote if AI chose one
+        if (response.animatedEmoteId) {
+          this.broadcast("daemon_animated_emote", {
+            type: "daemon_animated_emote" as const,
+            daemonId,
+            emoteId: response.animatedEmoteId,
+          });
+        }
+
+        // Broadcast text emote if present
         if (response.emote) {
           this.broadcastDaemonEmote(daemon, response.emote, response.mood);
         }
@@ -2444,8 +2496,8 @@ export class DaemonManager {
       (p) => this.distance(daemon.state.currentPosition, p.position) < daemon.behavior.interactionRadius * 2,
     );
     daemon.spontaneousGestureTimer = (hasNearby
-      ? 25 + Math.random() * 35  // More active when watched
-      : 50 + Math.random() * 60  // Less active when alone
+      ? 480 + Math.random() * 240  // 8-12 min when watched
+      : 600 + Math.random() * 300  // 10-15 min when alone
     ) * chattiness;
 
     // Try object-aware gesture first (30% chance if nearby objects match interests)
@@ -4380,6 +4432,7 @@ export class DaemonManager {
       daemon.relationships.set(targetId, rel);
     }
 
+    const oldSentiment = rel.sentiment;
     rel.interactionCount++;
     rel.lastSeen = Date.now();
     rel.lastUpdated = Date.now();
@@ -4401,6 +4454,12 @@ export class DaemonManager {
     } else if (delta <= -1 && currentIdx > 0 && Math.random() < 0.3) {
       // Mild negative: 30% chance to move down
       rel.sentiment = ladder[currentIdx - 1];
+    }
+
+    // After updating relationship, persist periodically
+    const sentimentChanged = rel.sentiment !== oldSentiment;
+    if (rel.interactionCount % 5 === 0 || sentimentChanged) {
+      this.persistRelationship(daemon.state.daemonId, targetId).catch(() => {});
     }
   }
 
@@ -4535,13 +4594,24 @@ export class DaemonManager {
 
   private async processAiQueue(): Promise<void> {
     if (this.processingAi || this.aiConversationQueue.length === 0) return;
+
+    // Circuit breaker: skip AI processing after too many consecutive failures
+    if (this.consecutiveAiFailures >= 5) {
+      console.warn(`AI circuit breaker open: ${this.consecutiveAiFailures} consecutive failures, skipping AI processing`);
+      // Decay the counter after 30s equivalent (let the queue drain slowly)
+      setTimeout(() => { this.consecutiveAiFailures = Math.max(0, this.consecutiveAiFailures - 1); }, 30_000);
+      return;
+    }
+
     this.processingAi = true;
 
     const fn = this.aiConversationQueue.shift()!;
     try {
       await fn();
+      this.consecutiveAiFailures = 0;
     } catch (err) {
       console.error("AI queue processing error:", err);
+      this.consecutiveAiFailures++;
     }
     this.processingAi = false;
   }
@@ -4583,6 +4653,7 @@ export class DaemonManager {
       daemon.relationships.set(targetId, rel);
     }
 
+    const oldSentiment = rel.sentiment;
     rel.interactionCount++;
     rel.lastSeen = Date.now();
     rel.lastUpdated = Date.now();
@@ -4616,6 +4687,12 @@ export class DaemonManager {
       setTimeout(() => {
         this.broadcastDaemonChat(daemon, `You know what? I'm going to call you "${rel.nickname}" from now on.`);
       }, 1500);
+    }
+
+    // After updating relationship, persist periodically
+    const sentimentChanged = rel.sentiment !== oldSentiment;
+    if (rel.interactionCount % 5 === 0 || sentimentChanged) {
+      this.persistRelationship(daemon.state.daemonId, targetId).catch(() => {});
     }
   }
 
@@ -5033,6 +5110,127 @@ export class DaemonManager {
       } catch {
         // Non-critical
       }
+    }
+  }
+
+  /** Load persisted memory summaries from DB for all loaded daemons */
+  private async loadPersistedMemories(): Promise<void> {
+    try {
+      const pool = getPool();
+      for (const [daemonId, daemon] of this.daemons) {
+        const { rows } = await pool.query(
+          `SELECT target_id, target_type, target_name, summary, sentiment,
+                  interaction_count, topic_history, gossip, nickname, last_interaction
+           FROM daemon_memory_summaries WHERE daemon_id = $1`,
+          [daemonId],
+        );
+        for (const row of rows) {
+          // Reconstruct relationship from persisted data
+          const rel = {
+            targetName: row.target_name,
+            targetType: row.target_type as "player" | "daemon",
+            sentiment: row.sentiment,
+            interactionCount: row.interaction_count || 0,
+            gossip: row.gossip || [],
+            topicHistory: row.topic_history || [],
+            nickname: row.nickname || undefined,
+            lastSeen: new Date(row.last_interaction).getTime(),
+            lastUpdated: Date.now(),
+          };
+          daemon.relationships.set(row.target_id, rel);
+
+          // Seed conversation memory with summary context
+          if (row.summary && row.target_type === "player") {
+            daemon.conversationMemory.set(row.target_id, {
+              playerId: row.target_id,
+              playerName: row.target_name,
+              messages: [{ role: "daemon", content: `[Previous interactions: ${row.summary}]` }],
+              lastInteraction: new Date(row.last_interaction).getTime(),
+            });
+          }
+        }
+      }
+      console.log(`Loaded persisted memories for ${this.daemons.size} daemons`);
+    } catch (err) {
+      console.warn("Failed to load persisted memories:", err);
+    }
+  }
+
+  /** Persist a relationship + conversation summary to the database */
+  private async persistRelationship(daemonId: string, targetId: string): Promise<void> {
+    try {
+      const daemon = this.daemons.get(daemonId);
+      if (!daemon) return;
+      const rel = daemon.relationships.get(targetId);
+      if (!rel) return;
+
+      // Build summary from conversation memory
+      const memory = daemon.conversationMemory.get(targetId);
+      let summary = "";
+      if (memory) {
+        const recent = memory.messages.filter(m => !m.content.startsWith("[Previous")).slice(-10);
+        const playerMsgs = recent.filter(m => m.role === "player").map(m => m.content.slice(0, 50));
+        const daemonMsgs = recent.filter(m => m.role === "daemon").map(m => m.content.slice(0, 50));
+        summary = `Player said: ${playerMsgs.join("; ")}. I replied: ${daemonMsgs.join("; ")}`.slice(0, 500);
+      }
+
+      const pool = getPool();
+      await pool.query(
+        `INSERT INTO daemon_memory_summaries
+          (daemon_id, target_id, target_type, target_name, summary, sentiment,
+           interaction_count, topic_history, gossip, nickname, last_interaction, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+         ON CONFLICT (daemon_id, target_id) DO UPDATE SET
+           target_name = EXCLUDED.target_name,
+           summary = EXCLUDED.summary,
+           sentiment = EXCLUDED.sentiment,
+           interaction_count = EXCLUDED.interaction_count,
+           topic_history = EXCLUDED.topic_history,
+           gossip = EXCLUDED.gossip,
+           nickname = EXCLUDED.nickname,
+           last_interaction = EXCLUDED.last_interaction,
+           updated_at = now()`,
+        [
+          daemonId, targetId, rel.targetType, rel.targetName, summary, rel.sentiment,
+          rel.interactionCount, JSON.stringify(rel.topicHistory || []),
+          JSON.stringify(rel.gossip || []), rel.nickname || null,
+          new Date(rel.lastSeen),
+        ],
+      );
+    } catch (err) {
+      console.warn(`Failed to persist relationship for daemon ${daemonId}:`, err);
+    }
+  }
+
+  /** Compact conversation memories: summarize + persist + trim */
+  private async compactMemories(): Promise<void> {
+    for (const [daemonId, daemon] of this.daemons) {
+      for (const [targetId, memory] of daemon.conversationMemory) {
+        if (memory.messages.length > 20) {
+          // Persist before trimming
+          await this.persistRelationship(daemonId, targetId);
+
+          // Trim: keep context note + last 8 messages
+          const contextMsgs = memory.messages.filter(m => m.content.startsWith("[Previous"));
+          const recent = memory.messages.slice(-8);
+          memory.messages = [...contextMsgs.slice(-1), ...recent];
+        }
+      }
+      // Also persist all active relationships
+      for (const [targetId, rel] of daemon.relationships) {
+        if (rel.interactionCount > 0) {
+          await this.persistRelationship(daemonId, targetId);
+        }
+      }
+    }
+  }
+
+  updateDaemonDefinition(daemonId: string, definition: any): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+    daemon.state.definition = definition;
+    if (definition.behavior) {
+      daemon.behavior = definition.behavior;
     }
   }
 }

@@ -17,7 +17,7 @@ export class CameraController {
     this.camera = camera;
   }
 
-  /** Apply mouse rotation delta */
+  /** Apply mouse rotation delta (pitch only — yaw follows character via setYaw) */
   applyMouseDelta(dx: number, dy: number): void {
     this.yaw -= dx * 0.003;
     this.pitch += dy * 0.003;
@@ -25,6 +25,11 @@ export class CameraController {
       CameraController.MIN_PITCH,
       Math.min(CameraController.MAX_PITCH, this.pitch)
     );
+  }
+
+  /** Set camera yaw directly (used to follow character rotation) */
+  setYaw(yaw: number): void {
+    this.yaw = yaw;
   }
 
   /** Update camera to follow target position */

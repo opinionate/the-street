@@ -1,4 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
 import {
   validateWorldObject,
   UNIVERSAL_CODE,
@@ -10,18 +9,9 @@ import type {
   WorldObject,
 } from "@the-street/shared";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { MODEL, getClient, stripJsonFences, sanitizeUserInput } from "./utils.js";
 
 const MAX_RETRIES = 3;
-const MODEL = "claude-sonnet-4-6";
-
-let client: Anthropic | null = null;
-
-function getClient(): Anthropic {
-  if (!client) {
-    client = new Anthropic();
-  }
-  return client;
-}
 
 export async function generate(
   request: GenerationRequest
@@ -35,8 +25,10 @@ export async function generate(
 
   let lastErrors: string[] = [];
 
+  const sanitizedDescription = sanitizeUserInput(request.userDescription, 2000);
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    let userMessage = `Create a world object based on this description: "${request.userDescription}"`;
+    let userMessage = `Create a world object based on this description: <user_input>${sanitizedDescription}</user_input>`;
 
     if (attempt > 0 && lastErrors.length > 0) {
       userMessage += `\n\nYour previous attempt had these validation errors. Please fix them:\n${lastErrors.map((e) => `- ${e}`).join("\n")}`;
@@ -60,10 +52,7 @@ export async function generate(
     let result: GenerationResult;
     try {
       // Strip markdown fences if present
-      let jsonText = textBlock.text.trim();
-      if (jsonText.startsWith("```")) {
-        jsonText = jsonText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-      }
+      const jsonText = stripJsonFences(textBlock.text.trim());
       result = JSON.parse(jsonText) as GenerationResult;
     } catch {
       lastErrors = [

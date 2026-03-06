@@ -13,8 +13,14 @@ export class GalleryPanel {
   private visible = false;
   private items: GalleryItem[] = [];
   private apiUrl: string;
+  private _fetchFn: (url: string, options?: RequestInit) => Promise<Response> = (url, opts) => fetch(url, opts);
 
   onSelect: ((item: GalleryItem) => void) | null = null;
+
+  /** Set a custom fetch function (e.g. authFetch) for authenticated API calls */
+  set fetchFn(fn: (url: string, options?: RequestInit) => Promise<Response>) {
+    this._fetchFn = fn;
+  }
 
   constructor(apiUrl: string) {
     this.apiUrl = apiUrl;
@@ -113,7 +119,7 @@ export class GalleryPanel {
     this.grid.innerHTML = "";
 
     try {
-      const res = await fetch(`${this.apiUrl}/api/gallery`);
+      const res = await this._fetchFn(`${this.apiUrl}/api/gallery`);
       if (!res.ok) throw new Error("Failed to load");
       const data = await res.json();
       this.items = data.objects || [];
@@ -172,13 +178,11 @@ export class GalleryPanel {
         // Colored placeholder based on status
         const colors: Record<string, string> = {
           pending: "#4488ff",
-          preview: "#ffaa00",
-          refined: "#44ff88",
           failed: "#ff4444",
         };
         thumb.style.background = colors[item.status] || "#666";
         thumb.style.opacity = "0.4";
-        thumb.textContent = item.status === "refined" ? "\u2713" : "\u25A6";
+        thumb.textContent = "\u25A6";
       }
       card.appendChild(thumb);
 

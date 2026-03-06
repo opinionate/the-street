@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import * as SkeletonUtils from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { PlayerState, Vector3 as Vec3, AvatarDefinition, AvatarAppearance } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
 
@@ -45,14 +46,15 @@ interface MaterialRefs {
   boots: THREE.MeshStandardMaterial;
 }
 
+/** All locomotion action names for rigged models */
+type LocoAction = "idle" | "walk" | "run" | "turnLeft" | "turnRight"
+  | "strafeLeftWalk" | "strafeRightWalk" | "strafeLeftRun" | "strafeRightRun" | "jump";
+
 interface CustomModelData {
   model: THREE.Group;
   mixer: THREE.AnimationMixer;
-  actions: {
-    walk?: THREE.AnimationAction;
-    run?: THREE.AnimationAction;
-  };
-  currentAction: "idle" | "walk" | "run";
+  actions: Partial<Record<LocoAction, THREE.AnimationAction>> & { emote?: THREE.AnimationAction };
+  currentAction: LocoAction;
   baseY: number; // model's resting y position (after centering)
 }
 
@@ -72,43 +74,129 @@ interface AvatarInstance {
   stoppingPhaseTarget: number | null; // stride completion target
   chatBubbles: ChatBubble[];
   customModel: CustomModelData | null;
+  activeEmote: string | null;
+  avatarHistoryId: string | null;
+  turning: number;  // -1 left, 0 none, 1 right
+  strafing: number; // -1 left, 0 none, 1 right
+  jumping: boolean;
 }
 
 export class AvatarManager {
   private avatars: Map<string, AvatarInstance> = new Map();
   private scene: THREE.Scene;
   private gltfLoader = new GLTFLoader();
-  private cachedAnimClips: { walk?: THREE.AnimationClip; run?: THREE.AnimationClip } = {};
+  private cachedAnimClips: Partial<Record<LocoAction, THREE.AnimationClip>> = {};
   private animClipsLoading: Promise<void> | null = null;
+  private cachedEmoteClips: Map<string, THREE.AnimationClip> = new Map();
   localPlayerId: string | null = null;
   apiUrl: string = "";
+  /** Cache buster: incremented on reload to bypass browser HTTP cache */
+  private _cacheBuster = 0;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
   }
 
-  /** Ensure shared walk/run animation clips are loaded (from server cache). */
+  /** Append cache-buster query parameter to a URL (only after a reload) */
+  private _bustCache(url: string): string {
+    if (this._cacheBuster === 0) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}_v=${this._cacheBuster}`;
+  }
+
+  /** All locomotion animation types to load */
+  private static readonly LOCO_TYPES: LocoAction[] = [
+    "idle", "walk", "run", "turnLeft", "turnRight",
+    "strafeLeftWalk", "strafeRightWalk", "strafeLeftRun", "strafeRightRun", "jump",
+  ];
+  /** Core types that must exist; extras are optional */
+  private static readonly CORE_TYPES: LocoAction[] = ["idle", "walk", "run"];
+  /** Ensure shared animation clips are loaded (Mixamo bone space). Retries on failure. */
+  private animWarned = false;
   private ensureAnimClips(): Promise<void> {
-    if (this.cachedAnimClips.walk) return Promise.resolve();
+    if (this.cachedAnimClips.idle) return Promise.resolve();
     if (this.animClipsLoading) return this.animClipsLoading;
 
     this.animClipsLoading = (async () => {
-      for (const type of ["walk", "run"] as const) {
+      for (const type of AvatarManager.LOCO_TYPES) {
         try {
-          const url = `${this.apiUrl}/api/avatar/animations/${type}`;
+          const url = this._bustCache(`${this.apiUrl}/api/avatar/animations/${type}`);
           const gltf = await new Promise<any>((resolve, reject) => {
             this.gltfLoader.load(url, resolve, undefined, reject);
           });
-          if (gltf.animations.length > 0) {
-            this.cachedAnimClips[type] = gltf.animations[0];
+          if (gltf.animations?.length > 0) {
+            // Strip position tracks to prevent sinking/floating
+            const srcClip = gltf.animations[0];
+            const filtered = srcClip.tracks.filter(
+              (t: THREE.KeyframeTrack) => !t.name.endsWith(".position"),
+            );
+            this.cachedAnimClips[type] = new THREE.AnimationClip(
+              srcClip.name, srcClip.duration, filtered,
+            );
           }
-        } catch {
-          // Not cached on server yet — will be available after first rig
+        } catch (err) {
+          if (!this.animWarned && AvatarManager.CORE_TYPES.includes(type)) {
+            console.warn(`[Avatar] ${type} animation not available (404)`);
+          }
         }
+      }
+      this.animWarned = true;
+      if (!this.cachedAnimClips.idle && !this.cachedAnimClips.walk) {
+        this.animClipsLoading = null;
       }
     })();
 
     return this.animClipsLoading;
+  }
+
+  /** Force-reload all shared animation clips from the server, then refresh actions on all
+   *  active avatars that use shared clips. Call after uploading new shared animations. */
+  async reloadSharedAnimClips(): Promise<void> {
+    console.log("[Avatar] Reloading shared animation clips...");
+
+    // Clear cache so ensureAnimClips re-fetches everything
+    this.cachedAnimClips = {};
+    this.animClipsLoading = null;
+
+    // Increment cache buster to bypass browser HTTP cache (server sends max-age=604800)
+    this._cacheBuster = Date.now();
+
+    await this.ensureAnimClips();
+
+    console.log("[Avatar] Clips loaded:", Object.keys(this.cachedAnimClips));
+
+    // Refresh animation actions on all active avatars that have a custom model
+    let avatarsRefreshed = 0;
+    for (const [userId, avatar] of this.avatars) {
+      const cm = avatar.customModel;
+      if (!cm) {
+        console.log(`[Avatar] Skipping ${userId}: no custom model (procedural capsule)`);
+        continue;
+      }
+
+      // Build new clip map: use refreshed shared clips, but preserve per-model clips
+      // when shared versions don't exist
+      const clipMap: Partial<Record<LocoAction, THREE.AnimationClip>> = {};
+      for (const t of AvatarManager.LOCO_TYPES) {
+        clipMap[t] = this.cachedAnimClips[t] || cm.actions[t]?.getClip();
+      }
+
+      const clipNames = Object.entries(clipMap).filter(([, v]) => v).map(([k, v]) => `${k}:${v!.tracks.length}t`).join(", ");
+      console.log(`[Avatar] Refreshing ${userId}: ${clipNames}`);
+
+      // Stop old mixer, create fresh one
+      cm.mixer.stopAllAction();
+      cm.mixer.uncacheRoot(cm.model);
+      const newMixer = new THREE.AnimationMixer(cm.model);
+      const newActions = this.createLocoActions(newMixer, clipMap);
+
+      cm.mixer = newMixer;
+      cm.actions = newActions;
+      cm.currentAction = "idle";
+      avatarsRefreshed++;
+    }
+
+    console.log(`[Avatar] Shared animation clips reloaded: ${avatarsRefreshed} avatars refreshed`);
   }
 
   /** Load a custom GLB avatar model (static, no animations), replacing the procedural mesh */
@@ -134,31 +222,65 @@ export class AvatarManager {
       // Center the model
       const centeredBox = new THREE.Box3().setFromObject(model);
       model.position.y = -centeredBox.min.y;
-      model.rotation.y = Math.PI;
 
       this.swapToCustomModel(avatar, model);
       // Store as customModel so getPreviewModel can find it + idle breathing works
       const mixer = new THREE.AnimationMixer(model);
       avatar.customModel = { model, mixer, actions: {}, currentAction: "idle", baseY: model.position.y };
-      (avatar as any).isCustomModel = true;
     } catch (err) {
       console.error(`Failed to load custom avatar for ${userId}:`, err);
     }
   }
 
-  /** Load a rigged GLB avatar with shared walk/run animations */
-  async loadRiggedAvatar(userId: string, riggedGlbUrl: string): Promise<void> {
+  /** Load an uploaded Mixamo character model (already rigged, Mixamo bone space). */
+  async loadUploadedAvatar(userId: string, uploadId: string, avatarHistoryId?: string): Promise<void> {
     const avatar = this.avatars.get(userId);
     if (!avatar) return;
 
     try {
-      // Load rigged model + shared animations in parallel
-      const [gltf] = await Promise.all([
-        new Promise<any>((resolve, reject) => {
-          this.gltfLoader.load(riggedGlbUrl, resolve, undefined, reject);
-        }),
-        this.ensureAnimClips(),
-      ]);
+      const loadModel = new Promise<any>((resolve, reject) => {
+        this.gltfLoader.load(
+          `${this.apiUrl}/api/avatar/upload/${uploadId}/model`,
+          resolve, undefined, reject,
+        );
+      });
+
+      const loadShared = this.ensureAnimClips();
+
+      // Load custom animation overrides
+      const customClips: Record<string, THREE.AnimationClip> = {};
+      const loadCustomAnims = avatarHistoryId ? (async () => {
+        try {
+          const listUrl = `${this.apiUrl}/api/animations/avatar/${avatarHistoryId}?_v=${Date.now()}`;
+          const listRes = await fetch(listUrl);
+          if (!listRes.ok) {
+            console.warn(`[Avatar] Custom anim list failed (${listRes.status}) for ${avatarHistoryId}`);
+            return;
+          }
+          const { animations } = await listRes.json();
+          console.log(`[Avatar] Found ${animations.length} custom animations for uploaded avatar ${avatarHistoryId}`);
+          for (const anim of animations as Array<{ slot: string }>) {
+            try {
+              const url = `${this.apiUrl}/api/animations/avatar/${avatarHistoryId}/${anim.slot}?_v=${Date.now()}`;
+              const gltf = await new Promise<any>((resolve, reject) => {
+                this.gltfLoader.load(url, resolve, undefined, reject);
+              });
+              if (gltf.animations.length > 0) {
+                customClips[anim.slot] = gltf.animations[0];
+                console.log(`[Avatar] Loaded custom ${anim.slot}: ${gltf.animations[0].tracks.length} tracks, ${gltf.animations[0].duration.toFixed(2)}s`);
+              } else {
+                console.warn(`[Avatar] Custom ${anim.slot} GLB has no animation clips`);
+              }
+            } catch (err) {
+              console.warn(`[Avatar] Failed to load custom ${anim.slot}:`, err);
+            }
+          }
+        } catch (err) {
+          console.warn("[Avatar] Failed to list custom animations:", err);
+        }
+      })() : Promise.resolve();
+
+      const [gltf] = await Promise.all([loadModel, loadShared, loadCustomAnims]);
 
       const model = gltf.scene as THREE.Group;
 
@@ -170,35 +292,110 @@ export class AvatarManager {
         model.scale.setScalar(scale);
       }
 
-      // Center and rotate
       const centeredBox = new THREE.Box3().setFromObject(model);
       model.position.y = -centeredBox.min.y;
-      model.rotation.y = Math.PI;
 
-      // Create animation mixer with shared clips
+      // Animation setup — Mixamo bone space, no retargeting
       const mixer = new THREE.AnimationMixer(model);
-      const actions: CustomModelData["actions"] = {};
-
-      if (this.cachedAnimClips.walk) {
-        actions.walk = mixer.clipAction(this.cachedAnimClips.walk);
-        actions.walk.setLoop(THREE.LoopRepeat, Infinity);
+      const clipMap: Partial<Record<LocoAction, THREE.AnimationClip>> = {};
+      clipMap.idle = customClips["idle"] || this.cachedAnimClips.idle;
+      clipMap.walk = customClips["walk"] || this.cachedAnimClips.walk;
+      clipMap.run = customClips["run"] || this.cachedAnimClips.run;
+      // Extended: custom > shared
+      for (const t of AvatarManager.LOCO_TYPES) {
+        if (!clipMap[t]) clipMap[t] = customClips[t] || this.cachedAnimClips[t];
       }
-      if (this.cachedAnimClips.run) {
-        actions.run = mixer.clipAction(this.cachedAnimClips.run);
-        actions.run.setLoop(THREE.LoopRepeat, Infinity);
-      }
+      console.log("[Avatar] Uploaded avatar clip map:", Object.entries(clipMap).filter(([, v]) => v).map(([k, v]) => `${k}:${v!.tracks.length}t`).join(", "));
+      const actions = this.createLocoActions(mixer, clipMap);
 
-      // Swap procedural body with rigged model
       this.swapToCustomModel(avatar, model);
-
       avatar.customModel = { model, mixer, actions, currentAction: "idle", baseY: model.position.y };
-      (avatar as any).isCustomModel = true;
+      if (avatarHistoryId) avatar.avatarHistoryId = avatarHistoryId;
     } catch (err) {
-      console.error(`Failed to load rigged avatar for ${userId}:`, err);
+      console.error(`Failed to load uploaded avatar for ${userId}:`, err);
+    }
+  }
+
+  /** Load the server's default mannequin model as the avatar (replaces procedural capsule).
+   *  The default model is a Mixamo-space character, so it uses Mixamo animation clips. */
+  async loadDefaultAvatar(userId: string): Promise<void> {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+
+    try {
+      const loadModel = new Promise<any>((resolve, reject) => {
+        this.gltfLoader.load(
+          this._bustCache(`${this.apiUrl}/api/avatar/default-model`),
+          resolve, undefined, reject,
+        );
+      });
+
+      const loadShared = this.ensureAnimClips();
+
+      const [gltf] = await Promise.all([loadModel, loadShared]);
+      const model = gltf.scene as THREE.Group;
+
+      // Scale to avatar height (~1.8m)
+      const box = new THREE.Box3().setFromObject(model);
+      const height = box.max.y - box.min.y;
+      if (height > 0) {
+        const scale = 1.8 / height;
+        model.scale.setScalar(scale);
+      }
+
+      const centeredBox = new THREE.Box3().setFromObject(model);
+      model.position.y = -centeredBox.min.y;
+
+      // Animation setup — Mixamo bone space, no retargeting
+      const mixer = new THREE.AnimationMixer(model);
+      const clipMap: Partial<Record<LocoAction, THREE.AnimationClip>> = {};
+      for (const t of AvatarManager.LOCO_TYPES) {
+        clipMap[t] = this.cachedAnimClips[t];
+      }
+      const actions = this.createLocoActions(mixer, clipMap);
+
+      this.swapToCustomModel(avatar, model);
+      avatar.customModel = { model, mixer, actions, currentAction: "idle", baseY: model.position.y };
+    } catch (err) {
+      // Silently fall back to procedural capsule if default model not found
+      console.warn(`[Avatar] Default model not available for ${userId}:`, err);
+    }
+  }
+
+  /** Reload default models for all avatars that don't have a custom model.
+   *  Called after admin uploads a new default model. */
+  async reloadDefaultModels(): Promise<void> {
+    this._cacheBuster = Date.now(); // Bust cache to get the newly uploaded model
+    for (const [userId, avatar] of this.avatars) {
+      if (!avatar.customModel) {
+        this.loadDefaultAvatar(userId);
+      }
     }
   }
 
   /** Replace the current model (procedural or custom) with a new model, preserving sprites. */
+  /** Create AnimationActions for all available locomotion clips */
+  private createLocoActions(
+    mixer: THREE.AnimationMixer,
+    clips: Partial<Record<LocoAction, THREE.AnimationClip>>,
+  ): CustomModelData["actions"] {
+    const actions: CustomModelData["actions"] = {};
+    for (const type of AvatarManager.LOCO_TYPES) {
+      const clip = clips[type];
+      if (!clip) continue;
+      const action = mixer.clipAction(clip);
+      if (type === "jump") {
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+      } else {
+        action.setLoop(THREE.LoopRepeat, Infinity);
+      }
+      if (type === "idle") action.play(); // Start in idle
+      actions[type] = action;
+    }
+    return actions;
+  }
+
   private swapToCustomModel(avatar: AvatarInstance, model: THREE.Group): void {
     // Identify which object is the current "body" — either procedural limbs or a previous custom model
     const currentBody = avatar.customModel?.model ?? avatar.limbs.body;
@@ -227,7 +424,7 @@ export class AvatarManager {
   applyAppearance(userId: string, appearance: AvatarAppearance): void {
     const avatar = this.avatars.get(userId);
     if (!avatar) return;
-    if ((avatar as any).isCustomModel) return; // skip for GLB models
+    if (avatar.customModel !== null) return; // skip for GLB models
 
     const { materials } = avatar;
 
@@ -259,19 +456,22 @@ export class AvatarManager {
     if (avatarDefinition.customAppearance) {
       this.applyAppearance(userId, avatarDefinition.customAppearance);
     }
-    // Load custom GLB mesh with rigging + shared animations
-    if (avatarDefinition.meshyTaskId) {
-      this.loadRiggedAvatar(userId, `${apiUrl}/api/avatar/mesh/${avatarDefinition.meshyTaskId}/model`);
+    // Load custom GLB mesh if uploaded
+    if (avatarDefinition.uploadedModelId) {
+      this.loadUploadedAvatar(userId, avatarDefinition.uploadedModelId);
     }
   }
 
-  /** Notify avatar manager of the local player's current movement speed */
-  setLocalMoving(speed: number): void {
+  /** Notify avatar manager of the local player's full movement state */
+  setLocalMovementState(state: { speed: number; turning: number; strafing: number; jumping: boolean }): void {
     if (!this.localPlayerId) return;
     const avatar = this.avatars.get(this.localPlayerId);
     if (!avatar) return;
     // Extra smoothing on the avatar side
-    avatar.speed += (speed - avatar.speed) * 0.15;
+    avatar.speed += (state.speed - avatar.speed) * 0.15;
+    avatar.turning = state.turning;
+    avatar.strafing = state.strafing;
+    avatar.jumping = state.jumping;
   }
 
   /** Trigger landing squash animation on the local player */
@@ -280,6 +480,19 @@ export class AvatarManager {
     const avatar = this.avatars.get(this.localPlayerId);
     if (!avatar) return;
     avatar.landingSquash = 1;
+    avatar.jumping = false;
+
+    // Crossfade from jump animation back to locomotion
+    const cm = avatar.customModel;
+    if (cm && cm.currentAction === "jump" && cm.actions.jump) {
+      const idleAction = cm.actions.idle;
+      if (idleAction) {
+        idleAction.reset();
+        cm.actions.jump.crossFadeTo(idleAction, 0.2, true);
+        idleAction.play();
+      }
+      cm.currentAction = "idle";
+    }
   }
 
   private createAvatar(colorIndex: number): { group: THREE.Group; limbs: LimbRefs; materials: MaterialRefs } {
@@ -288,58 +501,41 @@ export class AvatarManager {
 
     // --- Materials ---
     const coatMat = new THREE.MeshPhysicalMaterial({
-      color: 0x0c0c0c,
-      roughness: 0.55,
-      metalness: 0.05,
-      clearcoat: 0.2,
-      clearcoatRoughness: 0.5,
+      color: 0x4a6670,
+      roughness: 0.65,
+      metalness: 0.0,
     });
     const shirtMat = new THREE.MeshStandardMaterial({
-      color: 0x151515,
+      color: 0x5a7a8a,
       roughness: 0.8,
       metalness: 0.0,
     });
     const pantsMat = new THREE.MeshStandardMaterial({
-      color: 0x0e0e0e,
+      color: 0x3d4f5c,
       roughness: 0.7,
       metalness: 0.0,
     });
     const skinMat = new THREE.MeshPhysicalMaterial({
-      color: 0xc8a07a,
+      color: 0xd4a574,
       roughness: 0.55,
       metalness: 0.0,
     });
     const bootMat = new THREE.MeshStandardMaterial({
-      color: 0x0a0a0a,
-      roughness: 0.35,
-      metalness: 0.2,
-    });
-    const glassMat = new THREE.MeshStandardMaterial({
-      color: 0x000000,
-      roughness: 0.05,
-      metalness: 0.95,
-      emissive: accent,
-      emissiveIntensity: 0.7,
-    });
-    const hairMat = new THREE.MeshStandardMaterial({
-      color: 0x0a0808,
-      roughness: 0.35,
-      metalness: 0.15,
-    });
-    const bladeMat = new THREE.MeshStandardMaterial({
-      color: 0xccccdd,
-      roughness: 0.1,
-      metalness: 0.95,
-    });
-    const hiltMat = new THREE.MeshStandardMaterial({
-      color: 0x2a1510,
-      roughness: 0.8,
+      color: 0x3a3a3a,
+      roughness: 0.5,
       metalness: 0.1,
     });
-    const guardMat = new THREE.MeshStandardMaterial({
-      color: 0xaa8833,
-      roughness: 0.3,
-      metalness: 0.7,
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0x222222,
+      roughness: 0.1,
+      metalness: 0.8,
+      emissive: accent,
+      emissiveIntensity: 0.5,
+    });
+    const hairMat = new THREE.MeshStandardMaterial({
+      color: 0x5c3a1e,
+      roughness: 0.5,
+      metalness: 0.05,
     });
 
     const body = new THREE.Group();
@@ -394,19 +590,12 @@ export class AvatarManager {
     jaw.scale.set(1, 0.6, 0.8);
     headGroup.add(jaw);
 
-    // Hair — slicked back
+    // Hair — short and simple
     const hairGeo = new THREE.SphereGeometry(0.12, 10, 8);
     const hair = new THREE.Mesh(hairGeo, hairMat);
-    hair.scale.set(1.05, 1.0, 1.15);
-    hair.position.set(0, 0.02, 0.02);
+    hair.scale.set(1.05, 1.05, 1.05);
+    hair.position.set(0, 0.025, 0.005);
     headGroup.add(hair);
-
-    // Hair back extension
-    const hairBackGeo = new THREE.SphereGeometry(0.06, 8, 6);
-    const hairBack = new THREE.Mesh(hairBackGeo, hairMat);
-    hairBack.scale.set(1.2, 0.6, 1);
-    hairBack.position.set(0, -0.02, 0.08);
-    headGroup.add(hairBack);
 
     // Sunglasses — narrow wraparound
     const lensGeo = new THREE.BoxGeometry(0.22, 0.04, 0.03);
@@ -419,53 +608,16 @@ export class AvatarManager {
     glowLight.position.set(0, 0.01, -0.18);
     headGroup.add(glowLight);
 
-    // ===== COAT DETAILS =====
-    // Collar — turned up
-    const collarLGeo = new THREE.BoxGeometry(0.04, 0.1, 0.08);
-    const collarL = new THREE.Mesh(collarLGeo, coatMat);
-    collarL.position.set(-0.1, 1.52, -0.07);
-    collarL.rotation.z = -0.2;
-    body.add(collarL);
-    const collarR = new THREE.Mesh(collarLGeo, coatMat);
-    collarR.position.set(0.1, 1.52, -0.07);
-    collarR.rotation.z = 0.2;
-    body.add(collarR);
-
-    // Coat tails — two separate flaps that animate
-    const tailGeo = new THREE.BoxGeometry(0.14, 0.45, 0.025);
+    // Coat tails — kept minimal (animated by movement system)
+    const tailGeo = new THREE.BoxGeometry(0.12, 0.15, 0.02);
     const coatTailLeft = new THREE.Mesh(tailGeo, coatMat);
-    coatTailLeft.position.set(-0.07, 0.55, 0.1);
+    coatTailLeft.position.set(-0.06, 0.72, 0.08);
     coatTailLeft.castShadow = true;
     body.add(coatTailLeft);
     const coatTailRight = new THREE.Mesh(tailGeo, coatMat);
-    coatTailRight.position.set(0.07, 0.55, 0.1);
+    coatTailRight.position.set(0.06, 0.72, 0.08);
     coatTailRight.castShadow = true;
     body.add(coatTailRight);
-
-    // ===== CROSSED KATANAS =====
-    for (const side of [-1, 1]) {
-      const kGroup = new THREE.Group();
-      kGroup.position.set(side * 0.06, 1.2, 0.14);
-      kGroup.rotation.z = side * 0.3;
-      kGroup.rotation.x = 0.12;
-
-      const bladeGeo = new THREE.BoxGeometry(0.012, 0.6, 0.03);
-      const blade = new THREE.Mesh(bladeGeo, bladeMat);
-      blade.position.y = 0.22;
-      kGroup.add(blade);
-
-      const hiltGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.16, 6);
-      const hilt = new THREE.Mesh(hiltGeo, hiltMat);
-      hilt.position.y = -0.1;
-      kGroup.add(hilt);
-
-      const tsubaGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.01, 8);
-      const tsuba = new THREE.Mesh(tsubaGeo, guardMat);
-      tsuba.position.y = -0.01;
-      kGroup.add(tsuba);
-
-      body.add(kGroup);
-    }
 
     // ===== LEFT ARM =====
     const leftShoulderPivot = new THREE.Group();
@@ -666,19 +818,68 @@ export class AvatarManager {
       stoppingPhaseTarget: null,
       chatBubbles: [],
       customModel: null,
+      activeEmote: null,
+      avatarHistoryId: null,
+      turning: 0,
+      strafing: 0,
+      jumping: false,
     });
 
     // Apply custom appearance if present
     if (state.avatarDefinition.customAppearance) {
       this.applyAppearance(state.userId, state.avatarDefinition.customAppearance);
     }
+
+    // If no custom avatar, try loading the default mannequin model
+    const def = state.avatarDefinition;
+    if (!def.uploadedModelId) {
+      this.loadDefaultAvatar(state.userId).catch(() => {
+        // Fall back to procedural capsule silently
+      });
+    }
   }
 
   removePlayer(userId: string): void {
     const avatar = this.avatars.get(userId);
     if (!avatar) return;
+
+    // Stop and uncache animation mixer for custom models
+    if (avatar.customModel?.mixer) {
+      avatar.customModel.mixer.stopAllAction();
+      avatar.customModel.mixer.uncacheRoot(avatar.customModel.model);
+    }
+
+    // Dispose all Three.js resources before removing from scene
+    this.disposeGroup(avatar.group);
     this.scene.remove(avatar.group);
     this.avatars.delete(userId);
+  }
+
+  /** Recursively dispose all geometries, materials, and textures in a group */
+  private disposeGroup(group: THREE.Group): void {
+    group.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh;
+        mesh.geometry?.dispose();
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const mat of materials) {
+          if (!mat) continue;
+          // Dispose all texture properties
+          const texProps = ["map", "normalMap", "emissiveMap", "roughnessMap", "metalnessMap",
+            "aoMap", "alphaMap", "bumpMap", "displacementMap", "envMap", "lightMap"] as const;
+          for (const prop of texProps) {
+            const tex = (mat as any)[prop] as THREE.Texture | undefined;
+            if (tex) tex.dispose();
+          }
+          mat.dispose();
+        }
+      }
+      if (child instanceof THREE.Sprite) {
+        const mat = child.material as THREE.SpriteMaterial;
+        mat.map?.dispose();
+        mat.dispose();
+      }
+    });
   }
 
   updatePlayerPosition(userId: string, position: Vec3, rotation: number): void {
@@ -744,13 +945,135 @@ export class AvatarManager {
     }
   }
 
+  /** Load and play an emote animation. Returns false if no custom model. */
+  async playEmote(userId: string, emoteId: string): Promise<boolean> {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return false;
+
+    // Procedural avatar — just set the flag, update() handles the animation
+    if (!avatar.customModel) {
+      avatar.activeEmote = emoteId;
+      avatar.animPhase = 0;
+      return true;
+    }
+
+    const cm = avatar.customModel;
+
+    // Load emote clip — check custom first, then shared defaults
+    let clip = this.cachedEmoteClips.get(emoteId);
+    if (!clip) {
+      // Try custom animation first (already in correct bone space)
+      const customLoaded = await this.tryLoadCustomEmote(userId, emoteId);
+      if (customLoaded) {
+        clip = customLoaded;
+        this.cachedEmoteClips.set(`${userId}:${emoteId}`, clip);
+      } else {
+        // Fall back to shared emote — strip position tracks
+        // (hip position Y differs from scaled character height, causing sinking)
+        try {
+          const url = `${this.apiUrl}/api/avatar/emotes/${emoteId}`;
+          const gltf = await new Promise<any>((resolve, reject) => {
+            this.gltfLoader.load(url, resolve, undefined, reject);
+          });
+          if (gltf.animations.length > 0) {
+            const srcClip = gltf.animations[0];
+            const filtered = srcClip.tracks.filter(
+              (t: THREE.KeyframeTrack) => !t.name.endsWith(".position"),
+            );
+            clip = new THREE.AnimationClip(srcClip.name, srcClip.duration, filtered);
+            if (clip) this.cachedEmoteClips.set(emoteId, clip);
+          }
+        } catch (err) {
+          console.warn(`[Avatar] Failed to load emote ${emoteId}:`, err);
+          return false;
+        }
+      }
+    }
+    if (!clip) return false;
+
+    // Stop any existing emote
+    if (cm.actions.emote) {
+      cm.actions.emote.fadeOut(0.3);
+      cm.actions.emote = undefined;
+    }
+
+    // Crossfade from current action to emote
+    const prevAction = cm.actions[cm.currentAction] || cm.actions.idle;
+    const emoteAction = cm.mixer.clipAction(clip);
+    emoteAction.setLoop(THREE.LoopRepeat, Infinity);
+    emoteAction.reset();
+    if (prevAction) {
+      prevAction.crossFadeTo(emoteAction, 0.3, true);
+    }
+    emoteAction.play();
+
+    cm.actions.emote = emoteAction;
+    avatar.activeEmote = emoteId;
+    return true;
+  }
+
+  /** Try to load a custom emote animation for a specific avatar. Returns null if not found. */
+  private async tryLoadCustomEmote(userId: string, emoteId: string): Promise<THREE.AnimationClip | null> {
+    const avatar = this.avatars.get(userId);
+    if (!avatar?.avatarHistoryId) return null;
+    try {
+      const url = `${this.apiUrl}/api/animations/avatar/${avatar.avatarHistoryId}/emote-${emoteId}`;
+      const gltf = await new Promise<any>((resolve, reject) => {
+        this.gltfLoader.load(url, resolve, undefined, (err: any) => {
+          // 404 is expected — no custom emote for this slot
+          reject(err);
+        });
+      });
+      if (gltf.animations.length > 0) return gltf.animations[0];
+    } catch {
+      // No custom emote — expected for most avatars
+    }
+    return null;
+  }
+
+  /** Stop the current emote, crossfading back to idle. */
+  stopEmote(userId: string): void {
+    const avatar = this.avatars.get(userId);
+    if (!avatar || !avatar.activeEmote) return;
+
+    // Procedural avatar — just clear the flag
+    if (!avatar.customModel) {
+      avatar.activeEmote = null;
+      return;
+    }
+
+    const cm = avatar.customModel;
+    const emoteAction = cm.actions.emote;
+    if (!emoteAction) return;
+
+    const idleAction = cm.actions.idle;
+    if (idleAction) {
+      idleAction.reset();
+      emoteAction.crossFadeTo(idleAction, 0.3, true);
+      idleAction.play();
+    } else {
+      emoteAction.fadeOut(0.3);
+    }
+
+    cm.actions.emote = undefined;
+    cm.currentAction = "idle";
+    avatar.activeEmote = null;
+  }
+
+  /** Check if a player is currently playing an emote */
+  isEmoting(userId: string): boolean {
+    const avatar = this.avatars.get(userId);
+    return !!avatar?.activeEmote;
+  }
+
   /** Get a clone of a player's current 3D model for preview rendering */
   getPreviewModel(userId: string): THREE.Group | null {
     const avatar = this.avatars.get(userId);
     if (!avatar) return null;
 
     if (avatar.customModel) {
-      return avatar.customModel.model.clone();
+      // SkeletonUtils.clone properly handles SkinnedMesh + skeleton binding
+      return SkeletonUtils.clone(avatar.customModel.model) as THREE.Group;
     }
     // Clone the procedural limbs body
     return avatar.limbs.body.clone();
@@ -875,7 +1198,7 @@ export class AvatarManager {
         const measuredSpeed = dt > 0 ? moved / dt : 0;
         avatar.speed += (measuredSpeed - avatar.speed) * Math.min(dt * 8, 1);
       }
-      // Local player: speed is set externally via setLocalMoving()
+      // Local player: speed is set externally via setLocalMovementState()
 
       // --- Custom rigged model animation ---
       if (avatar.customModel) {
@@ -883,8 +1206,28 @@ export class AvatarManager {
         const spd = avatar.speed;
         const CROSS_FADE_DURATION = 0.3;
 
-        let targetAction: "idle" | "walk" | "run";
-        if (spd > 5) {
+        // Auto-cancel emote when player starts moving or turning
+        if (avatar.activeEmote && (spd > 0.3 || avatar.turning !== 0)) {
+          this.stopEmote(userId);
+        }
+
+        // If emote is active, skip locomotion state machine — just update mixer
+        if (avatar.activeEmote) {
+          cm.mixer.update(dt);
+          continue;
+        }
+
+        // Determine target animation state (priority order)
+        let targetAction: LocoAction;
+        if (avatar.jumping) {
+          targetAction = "jump";
+        } else if (avatar.strafing !== 0 && spd > 5) {
+          targetAction = avatar.strafing < 0 ? "strafeLeftRun" : "strafeRightRun";
+        } else if (avatar.strafing !== 0 && spd > 0.3) {
+          targetAction = avatar.strafing < 0 ? "strafeLeftWalk" : "strafeRightWalk";
+        } else if (avatar.turning !== 0 && spd <= 0.3) {
+          targetAction = avatar.turning < 0 ? "turnLeft" : "turnRight";
+        } else if (spd > 5) {
           targetAction = "run";
         } else if (spd > 0.3) {
           targetAction = "walk";
@@ -892,21 +1235,38 @@ export class AvatarManager {
           targetAction = "idle";
         }
 
-        if (targetAction !== cm.currentAction) {
-          const prevActionClip = cm.currentAction === "walk" ? cm.actions.walk
-            : cm.currentAction === "run" ? cm.actions.run
-            : undefined;
-          const nextActionClip = targetAction === "walk" ? cm.actions.walk
-            : targetAction === "run" ? cm.actions.run
-            : undefined;
+        // Fallback: if the target action clip doesn't exist, use a reasonable default
+        if (!cm.actions[targetAction]) {
+          if (targetAction.startsWith("strafe") && targetAction.endsWith("Run")) {
+            targetAction = "run";
+          } else if (targetAction.startsWith("strafe") && targetAction.endsWith("Walk")) {
+            targetAction = "walk";
+          } else if (targetAction === "turnLeft" || targetAction === "turnRight") {
+            targetAction = "idle";
+          } else if (targetAction === "jump") {
+            targetAction = spd > 0.3 ? (spd > 5 ? "run" : "walk") : "idle";
+          }
+        }
+        // Second-pass fallback: walk→idle, run→walk→idle
+        if (!cm.actions[targetAction]) {
+          if (targetAction === "run") targetAction = cm.actions.walk ? "walk" : "idle";
+          else if (targetAction === "walk") targetAction = "idle";
+        }
 
-          if (prevActionClip && nextActionClip) {
-            prevActionClip.crossFadeTo(nextActionClip, CROSS_FADE_DURATION, true);
-            nextActionClip.play();
-          } else if (nextActionClip) {
-            nextActionClip.reset().fadeIn(CROSS_FADE_DURATION).play();
-          } else if (prevActionClip) {
-            prevActionClip.fadeOut(CROSS_FADE_DURATION);
+        if (targetAction !== cm.currentAction) {
+          const prevClip = cm.actions[cm.currentAction];
+          const nextClip = cm.actions[targetAction];
+
+          if (prevClip && nextClip) {
+            nextClip.reset();
+            prevClip.crossFadeTo(nextClip, CROSS_FADE_DURATION, true);
+            nextClip.play();
+          } else if (nextClip) {
+            nextClip.reset();
+            nextClip.time = nextClip.getClip().duration * 0.25;
+            nextClip.fadeIn(CROSS_FADE_DURATION).play();
+          } else if (prevClip) {
+            prevClip.fadeOut(CROSS_FADE_DURATION);
           }
 
           cm.currentAction = targetAction;
@@ -948,6 +1308,54 @@ export class AvatarManager {
         continue;
       }
 
+      // --- Procedural emote: auto-cancel on movement, dance animation ---
+      if (avatar.activeEmote && avatar.speed > 0.3) {
+        avatar.activeEmote = null;
+      }
+      if (avatar.activeEmote) {
+        // Procedural dance: bounce + arm/leg swing + hip wiggle
+        avatar.animPhase += dt * 8;
+        const p = avatar.animPhase;
+        const bounce = Math.abs(Math.sin(p * 2)) * 0.08;
+        avatar.group.children[0]?.position.setY(bounce);
+
+        // Hip wiggle
+        limbs.leftHipPivot.rotation.x = Math.sin(p) * 0.4;
+        limbs.rightHipPivot.rotation.x = Math.sin(p + Math.PI) * 0.4;
+        limbs.leftKneePivot.rotation.x = Math.max(0, Math.sin(p)) * 0.5;
+        limbs.rightKneePivot.rotation.x = Math.max(0, Math.sin(p + Math.PI)) * 0.5;
+
+        // Arms swing
+        limbs.leftShoulderPivot.rotation.x = Math.sin(p + Math.PI) * 0.6;
+        limbs.rightShoulderPivot.rotation.x = Math.sin(p) * 0.6;
+        limbs.leftElbowPivot.rotation.x = -0.3 - Math.abs(Math.sin(p)) * 0.4;
+        limbs.rightElbowPivot.rotation.x = -0.3 - Math.abs(Math.sin(p + Math.PI)) * 0.4;
+
+        // Body sway
+        limbs.body.rotation.z = Math.sin(p * 0.5) * 0.08;
+        limbs.body.rotation.y = Math.sin(p) * 0.1;
+
+        // Chat bubbles still need cleanup
+        const now = Date.now();
+        for (let i = avatar.chatBubbles.length - 1; i >= 0; i--) {
+          const bubble = avatar.chatBubbles[i];
+          const age = now - bubble.createdAt;
+          if (age >= bubble.duration) {
+            bubble.sprite.parent?.remove(bubble.sprite);
+            bubble.sprite.material.map?.dispose();
+            bubble.sprite.material.dispose();
+            avatar.chatBubbles.splice(i, 1);
+          } else {
+            const fadeStart = bubble.duration * 0.8;
+            if (age > fadeStart) {
+              const fadeProgress = (age - fadeStart) / (bubble.duration - fadeStart);
+              bubble.sprite.material.opacity = 1 - fadeProgress;
+            }
+          }
+        }
+        continue;
+      }
+
       // --- Animation ---
       const spd = avatar.speed;
       const isMoving = spd > 0.3;
@@ -979,7 +1387,7 @@ export class AvatarManager {
       avatar.prevSpeed = spd;
 
       const p = avatar.animPhase;
-      const sinP = Math.sin(p);
+      const sinP = -Math.sin(p);
       const cosP = Math.cos(p);
 
       // -- Legs: hip swing + asymmetric knee bend --

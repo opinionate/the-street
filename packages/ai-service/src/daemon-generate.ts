@@ -1,16 +1,5 @@
-import Anthropic from "@anthropic-ai/sdk";
 import type { DaemonDefinition, AvatarAppearance, DaemonBehavior } from "@the-street/shared";
-
-const MODEL = "claude-sonnet-4-6";
-
-let client: Anthropic | null = null;
-
-function getClient(): Anthropic {
-  if (!client) {
-    client = new Anthropic();
-  }
-  return client;
-}
+import { MODEL, getClient, stripJsonFences, sanitizeUserInput } from "./utils.js";
 
 export interface DaemonGenerationResult {
   definition: Omit<DaemonDefinition, "plotUuid" | "position" | "rotation">;
@@ -89,6 +78,7 @@ RULES:
 export async function generateDaemon(
   userDescription: string,
 ): Promise<DaemonGenerationResult> {
+  userDescription = sanitizeUserInput(userDescription, 2000);
   const anthropic = getClient();
 
   const response = await anthropic.messages.create({
@@ -98,7 +88,7 @@ export async function generateDaemon(
     messages: [
       {
         role: "user",
-        content: `Design an NPC daemon based on this description: "${userDescription}"`,
+        content: `Design an NPC daemon based on this description: <user_input>${userDescription}</user_input>`,
       },
     ],
   });
@@ -108,10 +98,7 @@ export async function generateDaemon(
     throw new Error("No text response from AI");
   }
 
-  let jsonText = textBlock.text.trim();
-  if (jsonText.startsWith("```")) {
-    jsonText = jsonText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-  }
+  const jsonText = stripJsonFences(textBlock.text.trim());
 
   const result = JSON.parse(jsonText) as DaemonGenerationResult;
 

@@ -1,15 +1,23 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { DaemonDefinition, DaemonMood } from "@the-street/shared";
+import { MODEL, FALLBACK_MODEL, getClient, stripJsonFences, sanitizeUserInput } from "./utils.js";
 
-const MODEL = "claude-sonnet-4-6";
-
-let client: Anthropic | null = null;
-
-function getClient(): Anthropic {
-  if (!client) {
-    client = new Anthropic();
+async function callWithFallback<T>(
+  primaryCall: (model: string) => Promise<T>,
+  fallbackResponse: T,
+): Promise<T> {
+  try {
+    return await primaryCall(MODEL);
+  } catch (primaryErr) {
+    console.warn("Primary model failed, trying fallback:", primaryErr instanceof Error ? primaryErr.message : primaryErr);
+    try {
+      await new Promise(r => setTimeout(r, 1000));
+      return await primaryCall(FALLBACK_MODEL);
+    } catch (fallbackErr) {
+      console.warn("Fallback model also failed:", fallbackErr instanceof Error ? fallbackErr.message : fallbackErr);
+      return fallbackResponse;
+    }
   }
-  return client;
 }
 
 interface RelationshipInfo {
@@ -34,6 +42,7 @@ export interface DaemonResponse {
   mood: DaemonMood;
   action?: "idle" | "waving" | "laughing" | "thinking" | "emoting";
   emote?: string; // short emote description like "*adjusts glasses*"
+  animatedEmoteId?: string; // triggers a 3D animation (e.g. "dance", "wave", "emote-backflip")
 }
 
 export interface DaemonConversationLine {
@@ -45,7 +54,7 @@ export interface DaemonConversationLine {
   emote?: string;
 }
 
-function buildDaemonSystemPrompt(daemon: DaemonDefinition, context: ConversationContext): string {
+function buildDaemonSystemPrompt(daemon: DaemonDefinition, context: ConversationContext, availableEmotes?: string[]): string {
   const p = daemon.personality;
   return `You are ${daemon.name}, an NPC in The Street, a persistent shared virtual world.
 
@@ -86,8 +95,13 @@ Return a single JSON object (no markdown fences, no extra text):
 {
   "message": "Your spoken response",
   "mood": "happy" | "neutral" | "bored" | "excited" | "annoyed" | "curious",
-  "emote": "*optional brief emote*"
-}`;
+  "emote": "*optional brief emote*"${availableEmotes && availableEmotes.length > 0 ? `,
+  "animatedEmoteId": "optional - one of: ${availableEmotes.join(", ")}"` : ""}
+}${availableEmotes && availableEmotes.length > 0 ? `
+
+ANIMATED EMOTES:
+You can trigger a 3D animation by setting "animatedEmoteId" to one of: ${availableEmotes.join(", ")}
+Use these sparingly and when they fit the conversation (e.g., "dance" when happy, "wave" when greeting).` : ""}`;
 }
 
 /** Generate an AI response for a daemon talking to a player */
@@ -96,59 +110,73 @@ export async function generateDaemonResponse(
   playerName: string,
   playerMessage: string | undefined,
   context: ConversationContext,
+  availableEmotes?: string[],
 ): Promise<DaemonResponse> {
-  const anthropic = getClient();
+  playerName = sanitizeUserInput(playerName, 100);
+  if (playerMessage) {
+    playerMessage = sanitizeUserInput(playerMessage, 500);
+  }
 
-  const messages: Anthropic.MessageParam[] = [];
+  const cannedFallback: DaemonResponse = {
+    message: daemon.behavior.greetingMessage || "...",
+    mood: context.currentMood,
+  };
 
-  // Add recent conversation history
-  for (const msg of context.recentMessages.slice(-6)) {
-    messages.push({
-      role: msg.role === "daemon" ? "assistant" : "user",
-      content: msg.content,
+  return callWithFallback(async (model: string) => {
+    const anthropic = getClient();
+
+    const messages: Anthropic.MessageParam[] = [];
+
+    // Add recent conversation history
+    for (const msg of context.recentMessages.slice(-6)) {
+      messages.push({
+        role: msg.role === "daemon" ? "assistant" : "user",
+        content: msg.content,
+      });
+    }
+
+    // Add the new player message
+    const userContent = playerMessage
+      ? `[<user_input>${playerName}</user_input> says]: "<user_input>${playerMessage}</user_input>"`
+      : `[<user_input>${playerName}</user_input> approaches you and wants to interact]`;
+    messages.push({ role: "user", content: userContent });
+
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: 256,
+      system: buildDaemonSystemPrompt(daemon, context, availableEmotes),
+      messages,
     });
-  }
 
-  // Add the new player message
-  const userContent = playerMessage
-    ? `[${playerName} says]: "${playerMessage}"`
-    : `[${playerName} approaches you and wants to interact]`;
-  messages.push({ role: "user", content: userContent });
-
-  const response = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 256,
-    system: buildDaemonSystemPrompt(daemon, context),
-    messages,
-  });
-
-  const textBlock = response.content.find((b) => b.type === "text");
-  if (!textBlock || textBlock.type !== "text") {
-    return { message: daemon.behavior.greetingMessage || "...", mood: context.currentMood };
-  }
-
-  try {
-    let jsonText = textBlock.text.trim();
-    if (jsonText.startsWith("```")) {
-      jsonText = jsonText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-    }
-    const result = JSON.parse(jsonText) as DaemonResponse;
-
-    // Validate/clamp
-    if (!result.message || result.message.length > 200) {
-      result.message = (result.message || "...").slice(0, 200);
-    }
-    const validMoods: DaemonMood[] = ["happy", "neutral", "bored", "excited", "annoyed", "curious"];
-    if (!validMoods.includes(result.mood)) {
-      result.mood = context.currentMood;
+    const textBlock = response.content.find((b) => b.type === "text");
+    if (!textBlock || textBlock.type !== "text") {
+      return cannedFallback;
     }
 
-    return result;
-  } catch {
-    // Fallback: use raw text as message
-    const raw = textBlock.text.trim().slice(0, 200);
-    return { message: raw, mood: context.currentMood };
-  }
+    try {
+      const jsonText = stripJsonFences(textBlock.text.trim());
+      const result = JSON.parse(jsonText) as DaemonResponse;
+
+      if (!result.message || result.message.length > 200) {
+        result.message = (result.message || "...").slice(0, 200);
+      }
+      const validMoods: DaemonMood[] = ["happy", "neutral", "bored", "excited", "annoyed", "curious"];
+      if (!validMoods.includes(result.mood)) {
+        result.mood = context.currentMood;
+      }
+      // Validate animatedEmoteId against available emotes
+      if (result.animatedEmoteId && availableEmotes) {
+        if (!availableEmotes.includes(result.animatedEmoteId)) {
+          result.animatedEmoteId = undefined;
+        }
+      }
+
+      return result;
+    } catch {
+      const raw = textBlock.text.trim().slice(0, 200);
+      return { message: raw, mood: context.currentMood };
+    }
+  }, cannedFallback);
 }
 
 /** Generate a conversation between two daemons */
@@ -159,9 +187,10 @@ export async function generateDaemonConversation(
   contextB: ConversationContext,
   exchanges: number = 3,
 ): Promise<DaemonConversationLine[]> {
-  const anthropic = getClient();
+  return callWithFallback(async (model: string) => {
+    const anthropic = getClient();
 
-  const system = `You are a dialogue writer for The Street, a persistent shared virtual world.
+    const system = `You are a dialogue writer for The Street, a persistent shared virtual world.
 Write a brief, natural conversation between two NPCs who just encountered each other.
 
 NPC A: ${daemonA.name}
@@ -207,47 +236,45 @@ Return a JSON array (no markdown fences):
   ...
 ]`;
 
-  const response = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system,
-    messages: [
-      {
-        role: "user",
-        content: `${daemonA.name} and ${daemonB.name} have just crossed paths on the street. Write their conversation.`,
-      },
-    ],
-  });
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: 1024,
+      system,
+      messages: [
+        {
+          role: "user",
+          content: `${daemonA.name} and ${daemonB.name} have just crossed paths on the street. Write their conversation.`,
+        },
+      ],
+    });
 
-  const textBlock = response.content.find((b) => b.type === "text");
-  if (!textBlock || textBlock.type !== "text") {
-    return [];
-  }
-
-  try {
-    let jsonText = textBlock.text.trim();
-    if (jsonText.startsWith("```")) {
-      jsonText = jsonText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    const textBlock = response.content.find((b) => b.type === "text");
+    if (!textBlock || textBlock.type !== "text") {
+      return [];
     }
-    const lines = JSON.parse(jsonText) as Array<{
-      speaker: "A" | "B";
-      message: string;
-      mood: DaemonMood;
-      emote?: string;
-    }>;
 
-    const validMoods: DaemonMood[] = ["happy", "neutral", "bored", "excited", "annoyed", "curious"];
+    try {
+      const jsonText = stripJsonFences(textBlock.text.trim());
+      const lines = JSON.parse(jsonText) as Array<{
+        speaker: "A" | "B";
+        message: string;
+        mood: DaemonMood;
+        emote?: string;
+      }>;
 
-    return lines.slice(0, exchanges * 2).map((line) => ({
-      speakerId: line.speaker === "A" ? "A" : "B",
-      speakerName: line.speaker === "A" ? daemonA.name : daemonB.name,
-      message: (line.message || "...").slice(0, 150),
-      mood: validMoods.includes(line.mood) ? line.mood : "neutral",
-      emote: line.emote?.slice(0, 60),
-    }));
-  } catch {
-    return [];
-  }
+      const validMoods: DaemonMood[] = ["happy", "neutral", "bored", "excited", "annoyed", "curious"];
+
+      return lines.slice(0, exchanges * 2).map((line) => ({
+        speakerId: line.speaker === "A" ? "A" : "B",
+        speakerName: line.speaker === "A" ? daemonA.name : daemonB.name,
+        message: (line.message || "...").slice(0, 150),
+        mood: validMoods.includes(line.mood) ? line.mood : "neutral",
+        emote: line.emote?.slice(0, 60),
+      }));
+    } catch {
+      return [];
+    }
+  }, []);
 }
 
 /** Generate a multi-party conversation between 3+ daemons */
@@ -257,26 +284,27 @@ export async function generateGroupConversation(
 ): Promise<DaemonConversationLine[]> {
   if (daemons.length < 3) return [];
 
-  const anthropic = getClient();
-  const labels = "ABCDEFGH";
-  const totalLines = daemons.length * linesPerDaemon;
+  return callWithFallback(async (model: string) => {
+    const anthropic = getClient();
+    const labels = "ABCDEFGH";
+    const totalLines = daemons.length * linesPerDaemon;
 
-  let npcDescriptions = "";
-  for (let i = 0; i < daemons.length; i++) {
-    const d = daemons[i].definition;
-    const ctx = daemons[i].context;
-    npcDescriptions += `\nNPC ${labels[i]}: ${d.name}
+    let npcDescriptions = "";
+    for (let i = 0; i < daemons.length; i++) {
+      const d = daemons[i].definition;
+      const ctx = daemons[i].context;
+      npcDescriptions += `\nNPC ${labels[i]}: ${d.name}
 - Role: ${d.behavior.type}
 - Personality: ${d.personality.traits.join(", ")}
 - Speech style: ${d.personality.speechStyle}
 - Interests: ${d.personality.interests.join(", ")}
 - Quirks: ${d.personality.quirks.join(", ")}
 - Current mood: ${ctx.currentMood}\n`;
-  }
+    }
 
-  const speakerOptions = daemons.map((_, i) => `"${labels[i]}"`).join(" | ");
+    const speakerOptions = daemons.map((_, i) => `"${labels[i]}"`).join(" | ");
 
-  const system = `You are a dialogue writer for The Street, a persistent shared virtual world.
+    const system = `You are a dialogue writer for The Street, a persistent shared virtual world.
 Write a lively group conversation between ${daemons.length} NPCs who've gathered together.
 ${npcDescriptions}
 RULES:
@@ -296,53 +324,51 @@ Return a JSON array (no markdown fences):
   ...
 ]`;
 
-  const names = daemons.map(d => d.definition.name).join(", ");
+    const names = daemons.map(d => d.definition.name).join(", ");
 
-  const response = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system,
-    messages: [
-      {
-        role: "user",
-        content: `${names} are all hanging out together on the street. Write their group conversation.`,
-      },
-    ],
-  });
-
-  const textBlock = response.content.find((b) => b.type === "text");
-  if (!textBlock || textBlock.type !== "text") {
-    return [];
-  }
-
-  try {
-    let jsonText = textBlock.text.trim();
-    if (jsonText.startsWith("```")) {
-      jsonText = jsonText.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-    }
-    const lines = JSON.parse(jsonText) as Array<{
-      speaker: string;
-      message: string;
-      mood: DaemonMood;
-      emote?: string;
-    }>;
-
-    const validMoods: DaemonMood[] = ["happy", "neutral", "bored", "excited", "annoyed", "curious"];
-
-    return lines.slice(0, totalLines).map((line) => {
-      const speakerIndex = labels.indexOf(line.speaker);
-      const daemon = speakerIndex >= 0 && speakerIndex < daemons.length
-        ? daemons[speakerIndex] : daemons[0];
-
-      return {
-        speakerId: line.speaker,
-        speakerName: daemon.definition.name,
-        message: (line.message || "...").slice(0, 150),
-        mood: validMoods.includes(line.mood) ? line.mood : "neutral",
-        emote: line.emote?.slice(0, 60),
-      };
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: 1024,
+      system,
+      messages: [
+        {
+          role: "user",
+          content: `${names} are all hanging out together on the street. Write their group conversation.`,
+        },
+      ],
     });
-  } catch {
-    return [];
-  }
+
+    const textBlock = response.content.find((b) => b.type === "text");
+    if (!textBlock || textBlock.type !== "text") {
+      return [];
+    }
+
+    try {
+      const jsonText = stripJsonFences(textBlock.text.trim());
+      const lines = JSON.parse(jsonText) as Array<{
+        speaker: string;
+        message: string;
+        mood: DaemonMood;
+        emote?: string;
+      }>;
+
+      const validMoods: DaemonMood[] = ["happy", "neutral", "bored", "excited", "annoyed", "curious"];
+
+      return lines.slice(0, totalLines).map((line) => {
+        const speakerIndex = labels.indexOf(line.speaker);
+        const daemon = speakerIndex >= 0 && speakerIndex < daemons.length
+          ? daemons[speakerIndex] : daemons[0];
+
+        return {
+          speakerId: line.speaker,
+          speakerName: daemon.definition.name,
+          message: (line.message || "...").slice(0, 150),
+          mood: validMoods.includes(line.mood) ? line.mood : "neutral",
+          emote: line.emote?.slice(0, 60),
+        };
+      });
+    } catch {
+      return [];
+    }
+  }, []);
 }

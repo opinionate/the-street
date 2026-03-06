@@ -5,3 +5,9 @@ dist/
 .env
 .env.local
 .env.*.local
+
+# Large binary assets (user uploads, cached meshes/rigs, default models)
+packages/server/data/assets/
+packages/server/data/models/
+dump.rdb
+*.tgz

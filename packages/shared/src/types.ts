@@ -6,6 +6,10 @@ export interface Vector3 {
   z: number;
 }
 
+export interface SavedPosition extends Vector3 {
+  rotation: number;
+}
+
 export interface Quaternion {
   x: number;
   y: number;
@@ -125,7 +129,7 @@ export interface AvatarDefinition {
   avatarIndex: number;                  // fallback default avatar
   customAppearance?: AvatarAppearance;  // AI-generated description
   customMeshHash?: string;              // content hash of custom GLB
-  meshyTaskId?: string;                 // if mesh is still generating
+  uploadedModelId?: string;             // UUID for directly uploaded character models
 }
 
 export interface PlayerState {
@@ -171,9 +175,10 @@ export interface DaemonDefinition {
   appearance: AvatarAppearance;
   behavior: DaemonBehavior;
   personality: DaemonPersonality;
-  plotUuid: string;
+  plotUuid?: string;
   position: Vector3;
   rotation: number;
+  meshDescription?: string;
 }
 
 export type DaemonAction = "idle" | "walking" | "talking" | "waving" | "thinking" | "laughing" | "emoting";
@@ -294,6 +299,18 @@ export interface PlatformPrimitive {
   parameters: ParameterDef[];
   interactions: InteractionType[];
   defaultRenderCost: number;
+}
+
+// --- User Roles ---
+
+export type UserRole = "user" | "super_admin";
+
+export interface UserProfile {
+  userId: string;
+  clerkId: string;
+  displayName: string;
+  role: UserRole;
+  avatarDefinition: AvatarDefinition;
 }
 
 // --- Assets ---

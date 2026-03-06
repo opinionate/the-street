@@ -1,11 +1,11 @@
 import { Router } from "express";
 import { getPool } from "../database/pool.js";
-import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
+import { requireAuth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 
 const router = Router();
 
-// POST /api/moderation/action — platform operator moderation
-router.post("/action", ...requireAuth(), async (req, res) => {
+// POST /api/moderation/action — platform operator moderation (super_admin only)
+router.post("/action", ...requireAuth(), requireRole("super_admin"), async (req, res) => {
   const authedReq = req as AuthedRequest;
   try {
     const { targetType, targetId, action, reasoning } = req.body;
@@ -37,9 +37,6 @@ router.post("/action", ...requireAuth(), async (req, res) => {
         .json({ error: "targetId and reasoning required" });
       return;
     }
-
-    // TODO: V1 — verify moderator role (for now, any authenticated user)
-    // In production, check against a moderators table or Clerk role
 
     const pool = getPool();
     const { rows } = await pool.query(

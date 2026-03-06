@@ -260,6 +260,91 @@ const MIGRATIONS: { name: string; up: string }[] = [
       ALTER TABLE avatar_history ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
     `,
   },
+  {
+    name: "015_daemon_mesh_columns",
+    up: `
+      ALTER TABLE daemons ADD COLUMN IF NOT EXISTS mesh_description TEXT;
+      ALTER TABLE daemons ADD COLUMN IF NOT EXISTS meshy_task_id TEXT;
+      ALTER TABLE daemons ADD COLUMN IF NOT EXISTS rig_task_id TEXT;
+      ALTER TABLE daemons ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
+    `,
+  },
+  {
+    name: "016_daemon_memory_summaries",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_memory_summaries (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        target_id TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        sentiment TEXT NOT NULL DEFAULT 'neutral',
+        interaction_count INTEGER NOT NULL DEFAULT 0,
+        topic_history JSONB NOT NULL DEFAULT '[]',
+        gossip JSONB NOT NULL DEFAULT '[]',
+        nickname TEXT,
+        last_interaction TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemon_memory_summaries_daemon ON daemon_memory_summaries(daemon_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_memory_summaries_unique ON daemon_memory_summaries(daemon_id, target_id);
+    `,
+  },
+  {
+    name: "017_add_user_role",
+    up: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+      CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+    `,
+  },
+  {
+    name: "018_local_asset_cache",
+    up: `
+      ALTER TABLE avatar_history ADD COLUMN IF NOT EXISTS assets_cached BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE daemons ADD COLUMN IF NOT EXISTS assets_cached BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE generated_objects ADD COLUMN IF NOT EXISTS assets_cached BOOLEAN NOT NULL DEFAULT false;
+    `,
+  },
+  {
+    name: "019_custom_animations",
+    up: `
+      CREATE TABLE IF NOT EXISTS custom_animations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('avatar', 'daemon')),
+        entity_id TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        original_filename TEXT,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(entity_type, entity_id, slot)
+      );
+    `,
+  },
+  {
+    name: "020_avatar_uploads",
+    up: `
+      CREATE TABLE IF NOT EXISTS avatar_uploads (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id),
+        original_filename TEXT NOT NULL,
+        file_size_bytes INTEGER NOT NULL,
+        bone_space TEXT NOT NULL DEFAULT 'mixamo',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_avatar_uploads_user ON avatar_uploads(user_id, created_at DESC);
+    `,
+  },
+  {
+    name: "021_daemon_nullable_plot",
+    up: `
+      ALTER TABLE daemons ALTER COLUMN plot_uuid DROP NOT NULL;
+      ALTER TABLE daemons DROP CONSTRAINT IF EXISTS daemons_plot_uuid_fkey;
+      ALTER TABLE daemons ADD CONSTRAINT daemons_plot_uuid_fkey
+        FOREIGN KEY (plot_uuid) REFERENCES plots(uuid) ON DELETE SET NULL;
+    `,
+  },
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

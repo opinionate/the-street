@@ -15,17 +15,24 @@ import { AvatarPanel } from "./ui/AvatarPanel.js";
 import { DaemonPanel } from "./ui/DaemonPanel.js";
 import { DaemonChatUI } from "./ui/DaemonChatUI.js";
 import { getDefaultSpawnPoint, getAllPlotPositions } from "@the-street/shared";
-import type { WorldObject, PlotSnapshot, DaemonState } from "@the-street/shared";
+import type { WorldObject, PlotSnapshot, DaemonDefinition } from "@the-street/shared";
+import { AuthManager } from "./auth/AuthManager.js";
+import { LoginUI } from "./ui/LoginUI.js";
+import { AdminPanel } from "./ui/AdminPanel.js";
+import { AnimationPanel } from "./ui/AnimationPanel.js";
+import { AnimationConverterTool } from "./ui/AnimationConverterTool.js";
+import { DefaultModelUploader } from "./ui/DefaultModelUploader.js";
+import type { UserRole } from "@the-street/shared";
 import * as THREE from "three";
 
 const WALK_SPEED = 5;
-const RUN_SPEED = 12;
+const RUN_SPEED = 36;
 const SEND_RATE = 1 / 20; // 20Hz position updates to server
 const JUMP_VELOCITY = 6;
 const GRAVITY = -15;
 const ACCEL = 12;   // ~0.1s to full walk speed
 const DECEL = 8;    // ~0.15s slide on release
-const TURN_SPEED = 14;
+const TURN_SPEED = 3.0; // keyboard turning ~170°/s
 
 async function init() {
   // Scene
@@ -36,12 +43,50 @@ async function init() {
   const plotRenderer = new PlotRenderer();
   streetScene.scene.add(plotRenderer.plotGroup);
 
+  const apiUrl = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`;
+
+  // --- Auth ---
+  let authManager: AuthManager | null = null;
+  let sessionToken: string | undefined;
+  let userRole: UserRole = "user";
+
+  const clerkKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+  if (clerkKey) {
+    authManager = new AuthManager(clerkKey);
+    await authManager.init();
+
+    if (!authManager.isSignedIn) {
+      const loginUI = new LoginUI(authManager);
+      await new Promise<void>((resolve) => {
+        loginUI.onAuthenticated = resolve;
+        loginUI.show();
+      });
+      loginUI.destroy();
+    }
+
+    sessionToken = (await authManager.getToken()) ?? undefined;
+  }
+
+  // Helper to add auth header to all API calls
+  async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(options.headers);
+    if (authManager) {
+      const token = await authManager.getToken();
+      if (token) headers.set("Authorization", `Bearer ${token}`);
+    }
+    return fetch(url, { ...options, headers });
+  }
+
   const avatarManager = new AvatarManager(streetScene.scene);
-  avatarManager.apiUrl = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`;
+  avatarManager.apiUrl = apiUrl;
   const daemonRenderer = new DaemonRenderer(streetScene.scene);
+  daemonRenderer.apiUrl = apiUrl;
   const objectRenderer = new ObjectRenderer(streetScene.scene);
   const cameraController = new CameraController(streetScene.camera);
   const inputManager = new InputManager(streetScene.renderer.domElement);
+
+  // AdminPanel created early so inputManager can reference it
+  const adminPanel = new AdminPanel();
 
   // Track generated objects
   let objectCounter = 0;
@@ -56,21 +101,53 @@ async function init() {
   const galleryPanel = new GalleryPanel(
     import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`,
   );
+  galleryPanel.fetchFn = authFetch;
   const avatarPanel = new AvatarPanel();
   const daemonPanel = new DaemonPanel();
   const daemonChatUI = new DaemonChatUI();
   const targetingSystem = new TargetingSystem(streetScene.scene, avatarManager, daemonRenderer);
 
+  // Block mouse input from reaching the game when UI panels are open
+  inputManager.isUIBlocking = () =>
+    avatarPanel.isVisible() ||
+    creationPanel.isVisible() ||
+    galleryPanel.isVisible() ||
+    daemonPanel.isVisible() ||
+    adminPanel.isVisible ||
+    daemonChatUI.isVisible();
+
   // Build button (B key) / Gallery (G key)
+  // Escape handler uses capture phase so it fires before any element can stopPropagation
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+      // Cancel emote if playing
+      const myId = avatarManager.localPlayerId || "";
+      if (avatarManager.isEmoting(myId)) {
+        avatarManager.stopEmote(myId);
+      } else if (avatarPanel.isVisible()) { avatarPanel.hide(); }
+      else if (daemonPanel.isVisible()) { daemonPanel.hide(); }
+      else if (adminPanel.isVisible) { adminPanel.hide(); }
+      else if (creationPanel.isVisible()) { creationPanel.hide(); }
+      else if (galleryPanel.isVisible()) { galleryPanel.hide(); }
+      else { targetingSystem.deselect(); }
+    }
+  }, true); // capture phase
+
+  // Other hotkeys use normal bubbling
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") return; // handled above in capture
+    // Skip hotkeys when typing in input fields
     if (
       document.activeElement?.tagName === "INPUT" ||
       document.activeElement?.tagName === "TEXTAREA"
     ) return;
 
-    if (e.key === "Escape") {
-      targetingSystem.deselect();
-    } else if (e.key.toLowerCase() === "b") {
+    if (e.key.toLowerCase() === "b") {
       creationPanel.toggle();
     } else if (e.key.toLowerCase() === "g") {
       galleryPanel.toggle();
@@ -78,6 +155,8 @@ async function init() {
       avatarPanel.toggle();
     } else if (e.key.toLowerCase() === "n") {
       daemonPanel.toggle();
+    } else if (e.key === "F9" && userRole === "super_admin") {
+      adminPanel.toggle();
     }
   });
 
@@ -99,19 +178,19 @@ async function init() {
     import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:2567`;
 
   const network = new NetworkManager(wsUrl, {
-    onWorldSnapshot(yourUserId, players, plots, daemons) {
+    onWorldSnapshot(yourUserId, yourRole: UserRole, players, plots, daemons) {
       avatarManager.localPlayerId = yourUserId;
+      userRole = yourRole;
+      if (authManager) authManager.role = yourRole;
+      daemonPanel.setSuperAdmin(yourRole === "super_admin");
       for (const p of players) {
         avatarManager.addPlayer(p);
       }
       avatarManager.hideLocalNameLabel();
       for (const p of players) {
-        // Load custom avatar mesh if available
-        if (p.avatarDefinition.meshyTaskId) {
-          avatarManager.loadCustomAvatar(
-            p.userId,
-            `${import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`}/api/avatar/mesh/${p.avatarDefinition.meshyTaskId}/model`,
-          );
+        // Load custom uploaded avatar if available
+        if (p.avatarDefinition.uploadedModelId) {
+          avatarManager.loadUploadedAvatar(p.userId, p.avatarDefinition.uploadedModelId);
         }
       }
       // Store plot data for tracking and rendering
@@ -137,11 +216,8 @@ async function init() {
     },
     onPlayerJoin(player) {
       avatarManager.addPlayer(player);
-      if (player.avatarDefinition.meshyTaskId) {
-        avatarManager.loadCustomAvatar(
-          player.userId,
-          `${import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`}/api/avatar/mesh/${player.avatarDefinition.meshyTaskId}/model`,
-        );
+      if (player.avatarDefinition.uploadedModelId) {
+        avatarManager.loadUploadedAvatar(player.userId, player.avatarDefinition.uploadedModelId);
       }
     },
     onPlayerLeave(userId) {
@@ -197,10 +273,16 @@ async function init() {
       const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
       chatUI.addMessage(daemonId, name, emote, "daemon-emote");
     },
+    onDaemonAnimatedEmote(daemonId, emoteId) {
+      daemonRenderer.playDaemonEmote(daemonId, emoteId);
+    },
     onDaemonThought(daemonId, thought) {
       daemonRenderer.showDaemonThought(daemonId, thought);
       const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
       chatUI.addMessage(daemonId, name, thought, "daemon-thought");
+    },
+    onPlayerEmote(userId, emoteId) {
+      avatarManager.playEmote(userId, emoteId);
     },
   });
 
@@ -276,229 +358,59 @@ async function init() {
     // Broadcast to other players
     network.sendChat(`/me ${emoteText}`);
   };
+  chatUI.onAnimatedEmote = (emoteId, verb) => {
+    const myId = avatarManager.localPlayerId || "local";
+    const emoteText = `${verb}.`;
+    // Show in chat + bubble
+    chatUI.addMessage(myId, "You", emoteText, "player-emote");
+    avatarManager.showChatBubble(myId, "You", emoteText);
+    // Play animation locally
+    avatarManager.playEmote(myId, emoteId);
+    // Broadcast emote to other players (animation) + chat text
+    network.sendEmote(emoteId);
+    network.sendChat(`/me ${emoteText}`);
+  };
 
-  // Creation panel wiring
-  const apiUrl =
-    import.meta.env.VITE_API_URL || `http://${window.location.hostname}:3000`;
+  // "/" key opens chat with slash pre-filled for command autocomplete
+  inputManager.onSlashCommand = () => {
+    chatUI.showWithText("/");
+  };
 
   // Avatar panel wiring
-  avatarPanel.onGenerate = async (description) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
-    try {
-      const res = await fetch(`${apiUrl}/api/avatar/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({ description }),
-      });
-      clearTimeout(timeout);
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Generation failed" }));
-        throw new Error(err.error || "Generation failed");
-      }
-      const result = await res.json();
-      avatarPanel.setGenerationResult(result.appearance, result.meshDescription);
-    } catch (err) {
-      clearTimeout(timeout);
-      throw err;
-    }
-  };
-
-  avatarPanel.onStartMesh = async (description) => {
-    const res = await fetch(`${apiUrl}/api/generate/mesh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ description, poseMode: "a-pose" }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: "Mesh generation failed" }));
-      throw new Error(err.error || "Mesh generation failed");
-    }
-    const { taskId } = await res.json();
-    avatarPanel.setMeshyTaskId(taskId);
-    pollAvatarMesh(taskId);
-  };
-
-  /** Poll Meshy avatar mesh: preview → refine → rig → load */
-  async function pollAvatarMesh(previewTaskId: string): Promise<void> {
-    const POLL_MS = 3000;
-    const MAX_POLLS = 80; // generous for the full pipeline
-    const localId = avatarManager.localPlayerId || "local";
-
-    // ── Stage 1: Preview (0-25%) ──
-    avatarPanel.setMeshProgress(0, "Generating 3D model...");
-
-    const previewDone = await pollStage(
-      `${apiUrl}/api/avatar/mesh/${previewTaskId}`,
-      (pct) => avatarPanel.setMeshProgress(Math.round(pct * 0.25), "Generating 3D model..."),
-      MAX_POLLS,
-    );
-
-    if (!previewDone) {
-      avatarPanel.setMeshProgress(0, "3D model generation failed");
-      return;
-    }
-
-    // ── Stage 2: Refine (25-55%) ──
-    avatarPanel.setMeshProgress(25, "Adding textures...");
-
-    let refineTaskId: string;
-    try {
-      const refineRes = await fetch(`${apiUrl}/api/generate/mesh/refine`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ previewTaskId }),
-      });
-      if (!refineRes.ok) {
-        // Refine failed to start — fall back to rigging the preview
-        console.warn("Refine start failed, rigging preview model");
-        await rigOrFallback(previewTaskId, localId, 25);
-        return;
-      }
-      ({ taskId: refineTaskId } = await refineRes.json());
-    } catch {
-      await rigOrFallback(previewTaskId, localId, 25);
-      return;
-    }
-
-    // Update the panel's meshyTaskId to the refined one (for save)
-    avatarPanel.setMeshyTaskId(refineTaskId);
-
-    const refineDone = await pollStage(
-      `${apiUrl}/api/avatar/mesh/${refineTaskId}`,
-      (pct) => avatarPanel.setMeshProgress(25 + Math.round(pct * 0.30), "Adding textures..."),
-      MAX_POLLS,
-    );
-
-    if (!refineDone) {
-      // Refine failed — fall back to rigging the preview
-      console.warn("Refine failed, rigging preview model");
-      await rigOrFallback(previewTaskId, localId, 55);
-      return;
-    }
-
-    // Grab thumbnail URL from the completed refine task
-    try {
-      const thumbRes = await fetch(`${apiUrl}/api/avatar/mesh/${refineTaskId}`);
-      if (thumbRes.ok) {
-        const thumbData = await thumbRes.json();
-        if (thumbData.thumbnailUrl) {
-          avatarPanel.setThumbnailUrl(thumbData.thumbnailUrl);
-        }
-      }
-    } catch {
-      // Non-critical — thumbnail is optional
-    }
-
-    // ── Stage 3: Rig the refined model (55-95%) ──
-    await rigOrFallback(refineTaskId, localId, 55);
-  }
-
-  /** Generic stage poller. Calls progressCb(0-100) and returns true on SUCCEEDED. */
-  async function pollStage(
-    url: string,
-    progressCb: (pct: number) => void,
-    maxPolls: number,
-  ): Promise<boolean> {
-    const POLL_MS = 3000;
-    for (let i = 0; i < maxPolls; i++) {
-      await new Promise((r) => setTimeout(r, POLL_MS));
-      try {
-        const res = await fetch(url);
-        if (!res.ok) continue;
-        const status = await res.json();
-        if (status.status === "SUCCEEDED") return true;
-        if (status.status === "FAILED") return false;
-        progressCb(status.progress || 0);
-      } catch {
-        // network error, keep polling
-      }
-    }
-    return false; // timed out
-  }
-
-  /** Rig a completed mesh task, or fall back to static model on failure. */
-  async function rigOrFallback(meshTaskId: string, localId: string, baseProgress: number): Promise<void> {
-    const MAX_POLLS = 60;
-
-    try {
-      avatarPanel.setMeshProgress(baseProgress, "Rigging character...");
-
-      const rigRes = await fetch(`${apiUrl}/api/avatar/rig`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ meshTaskId }),
-      });
-
-      if (rigRes.ok) {
-        const { rigTaskId } = await rigRes.json();
-
-        const rigDone = await pollStage(
-          `${apiUrl}/api/avatar/rig/${rigTaskId}`,
-          (pct) => avatarPanel.setMeshProgress(
-            baseProgress + Math.round(pct * ((95 - baseProgress) / 100)),
-            "Rigging character...",
-          ),
-          MAX_POLLS,
-        );
-
-        if (rigDone) {
-          const riggedModelUrl = `${apiUrl}/api/avatar/rig/${rigTaskId}/model`;
-          await avatarManager.loadRiggedAvatar(localId, riggedModelUrl);
-          avatarPanel.setMeshComplete();
-          avatarPanel.refreshPreview();
-          return;
-        }
-      }
-    } catch (err) {
-      console.warn("Rigging error:", err);
-    }
-
-    // Fallback: load static (unrigged) model
-    console.warn("Rigging failed, loading static model");
-    await avatarManager.loadCustomAvatar(localId, `${apiUrl}/api/avatar/mesh/${meshTaskId}/model`);
-    avatarPanel.setMeshComplete();
-    avatarPanel.refreshPreview();
-  }
-
-  avatarPanel.onSave = async (avatarDefinition, meshDescription, meshyTaskId) => {
+  avatarPanel.onSave = async (avatarDefinition) => {
     const thumbnailUrl = avatarPanel.getThumbnailUrl() || undefined;
-    const res = await fetch(`${apiUrl}/api/avatar/save`, {
+    const res = await authFetch(`${apiUrl}/api/avatar/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ avatarDefinition, meshDescription, meshyTaskId, thumbnailUrl }),
+      body: JSON.stringify({ avatarDefinition, thumbnailUrl }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "Save failed" }));
       throw new Error(err.error || "Save failed");
     }
-    // Don't re-load the model — it's already loaded from the generation pipeline.
-    // Re-loading via updatePlayerAvatar would replace a rigged model with static.
-    // Just broadcast so other clients pick up the change.
+    // Broadcast so other clients pick up the change.
     network.sendAvatarUpdate(avatarDefinition);
   };
 
   avatarPanel.onLoadHistory = async () => {
-    const res = await fetch(`${apiUrl}/api/avatar/history`);
+    const res = await authFetch(`${apiUrl}/api/avatar/history`);
     if (!res.ok) throw new Error("Failed to load history");
     const data = await res.json();
     return data.history;
   };
 
   avatarPanel.onSelectHistoryItem = async (avatarDefinition) => {
-    const def = avatarDefinition as any;
     const localId = avatarManager.localPlayerId || "local";
 
-    // Load the saved avatar's mesh if it has one
-    if (def.meshyTaskId) {
-      const modelUrl = `${apiUrl}/api/avatar/mesh/${def.meshyTaskId}/model`;
-      await avatarManager.loadRiggedAvatar(localId, modelUrl);
+    // Load the saved avatar's uploaded model if available
+    const historyId = avatarPanel.getSelectedHistoryId() ?? undefined;
+    if (avatarDefinition.uploadedModelId) {
+      await avatarManager.loadUploadedAvatar(localId, avatarDefinition.uploadedModelId, historyId);
     }
 
-    // Apply appearance colors (skip re-loading the mesh — already loaded above)
-    if (def.customAppearance) {
-      avatarManager.applyAppearance(localId, def.customAppearance);
+    // Apply appearance colors
+    if (avatarDefinition.customAppearance) {
+      avatarManager.applyAppearance(localId, avatarDefinition.customAppearance);
     }
     // Broadcast to other players
     network.sendAvatarUpdate(avatarDefinition);
@@ -508,7 +420,7 @@ async function init() {
   };
 
   avatarPanel.onDeleteHistoryItem = async (id) => {
-    const res = await fetch(`${apiUrl}/api/avatar/history/${id}`, { method: "DELETE" });
+    const res = await authFetch(`${apiUrl}/api/avatar/history/${id}`, { method: "DELETE" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "Delete failed" }));
       throw new Error(err.error || "Delete failed");
@@ -520,12 +432,87 @@ async function init() {
     return avatarManager.getPreviewModel(localId);
   };
 
+  // Auth token helper for animation panels
+  const getAuthTokenStr = async () => (await authManager?.getToken()) ?? "";
+
+  // Animation panel for avatar
+  const avatarAnimPanel = new AnimationPanel({
+    entityType: "avatar",
+    getEntityId: () => avatarPanel.getSelectedHistoryId(),
+    apiUrl,
+    getAuthToken: getAuthTokenStr,
+  });
+  avatarAnimPanel.onAnimationChanged = () => {
+    // Reload the avatar so the new custom animation takes effect
+    const localId = avatarManager.localPlayerId || "local";
+    const historyId = avatarPanel.getSelectedHistoryId();
+    if (!historyId) return;
+    const item = avatarPanel.getSelectedHistoryItem?.();
+    if (!item) return;
+    const def = item.avatar_definition;
+    if (def?.uploadedModelId) {
+      avatarManager.loadUploadedAvatar(localId, def.uploadedModelId, historyId);
+    }
+  };
+  avatarPanel.setAnimationPanel(avatarAnimPanel);
+
+  // Upload Mixamo character handler
+  avatarPanel.onUploadCharacter = async (file: File) => {
+    avatarPanel.setStatus("Converting FBX to GLB...");
+    const { convertFbxCharacterToGlb } = await import("./avatar/animation-converter.js");
+    const glb = await convertFbxCharacterToGlb(file);
+
+    avatarPanel.setStatus("Uploading character...");
+    const token = await getAuthTokenStr();
+    const uploadRes = await fetch(`${apiUrl}/api/avatar/upload-character`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "x-original-filename": file.name,
+        Authorization: `Bearer ${token}`,
+      },
+      body: glb,
+    });
+
+    if (!uploadRes.ok) {
+      const err = await uploadRes.json().catch(() => ({ error: uploadRes.statusText }));
+      throw new Error(err.error || "Upload failed");
+    }
+    const { uploadId } = await uploadRes.json();
+
+    avatarPanel.setStatus("Loading character...");
+    const localId = avatarManager.localPlayerId || "local";
+    await avatarManager.loadUploadedAvatar(localId, uploadId);
+
+    avatarPanel.setUploadedModelId(uploadId);
+    avatarPanel.refreshPreview();
+    avatarPanel.setStatus("Character loaded! Click Save to keep it.");
+  };
+
+  // Animation panel factory for daemons
+  daemonPanel.createAnimationPanel = (daemonId: string) => {
+    return new AnimationPanel({
+      entityType: "daemon",
+      getEntityId: () => daemonId,
+      apiUrl,
+      getAuthToken: getAuthTokenStr,
+    });
+  };
+
   // Daemon panel wiring
+  daemonPanel.onPlacementChange = (mode) => {
+    if (mode === "no-plot") {
+      loadGlobalDaemons();
+    } else if (currentPlotUuid) {
+      loadPlotDaemons(currentPlotUuid);
+    }
+  };
+
   daemonPanel.onGenerate = async (description) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
     try {
-      const res = await fetch(`${apiUrl}/api/daemons/generate`, {
+      const res = await authFetch(`${apiUrl}/api/daemons/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -545,12 +532,11 @@ async function init() {
   };
 
   daemonPanel.onCreate = async (definition) => {
-    const plotUuid = daemonPanel.getPlotUuid();
-    if (!plotUuid) throw new Error("Not on a plot");
+    const plotUuid = daemonPanel.getEffectivePlotUuid();
 
-    const fullDefinition = {
-      ...(definition as object),
-      plotUuid,
+    const fullDefinition: DaemonDefinition = {
+      ...definition,
+      ...(plotUuid ? { plotUuid } : {}),
       position: { x: localPosition.x, y: 0, z: localPosition.z },
       rotation: localRotation,
     };
@@ -558,7 +544,7 @@ async function init() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
     try {
-      const res = await fetch(`${apiUrl}/api/daemons/create`, {
+      const res = await authFetch(`${apiUrl}/api/daemons/create`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -572,17 +558,21 @@ async function init() {
       const result = await res.json();
 
       // Spawn the daemon locally so it's visible immediately
-      const def = fullDefinition as any;
       daemonRenderer.spawnDaemon({
         daemonId: result.id,
-        definition: def,
-        currentPosition: def.position || { x: localPosition.x, y: 0, z: localPosition.z },
-        currentRotation: def.rotation || localRotation,
+        definition: fullDefinition,
+        currentPosition: fullDefinition.position || { x: localPosition.x, y: 0, z: localPosition.z },
+        currentRotation: fullDefinition.rotation || localRotation,
         currentAction: "idle",
+        mood: "neutral",
       });
 
-      // Reload daemon list for this plot
-      loadPlotDaemons(plotUuid);
+      // Reload daemon list for this plot (or global daemons if no plot)
+      if (plotUuid) {
+        loadPlotDaemons(plotUuid);
+      } else {
+        loadGlobalDaemons();
+      }
     } catch (err) {
       clearTimeout(timeout);
       throw err;
@@ -590,12 +580,16 @@ async function init() {
   };
 
   daemonPanel.onDelete = async (daemonId) => {
-    const res = await fetch(`${apiUrl}/api/daemons/${daemonId}`, {
+    const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}`, {
       method: "DELETE",
     });
     if (!res.ok) return;
-    const plotUuid = daemonPanel.getPlotUuid();
-    if (plotUuid) loadPlotDaemons(plotUuid);
+    const effectivePlotUuid = daemonPanel.getEffectivePlotUuid();
+    if (effectivePlotUuid) {
+      loadPlotDaemons(effectivePlotUuid);
+    } else {
+      loadGlobalDaemons();
+    }
   };
 
   daemonPanel.onRecall = (daemonId) => {
@@ -608,7 +602,7 @@ async function init() {
 
   daemonPanel.onFetchActivity = async (daemonId) => {
     try {
-      const res = await fetch(`${apiUrl}/api/daemons/${daemonId}/activity`);
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/activity`);
       if (!res.ok) return [];
       const data = await res.json();
       return data.activity || [];
@@ -619,7 +613,18 @@ async function init() {
 
   async function loadPlotDaemons(plotUuid: string) {
     try {
-      const res = await fetch(`${apiUrl}/api/daemons/plot/${plotUuid}`);
+      const res = await authFetch(`${apiUrl}/api/daemons/plot/${plotUuid}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      daemonPanel.setDaemonList(data.daemons || []);
+    } catch {
+      // silent
+    }
+  }
+
+  async function loadGlobalDaemons() {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/global`);
       if (!res.ok) return;
       const data = await res.json();
       daemonPanel.setDaemonList(data.daemons || []);
@@ -635,7 +640,7 @@ async function init() {
     // Step 1: AI generates object definition
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60000);
-    const res = await fetch(`${apiUrl}/api/generate`, {
+    const res = await authFetch(`${apiUrl}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
@@ -688,16 +693,12 @@ async function init() {
       objectRenderer.renderObject(id, obj, spawnPos);
     }
 
-    // Step 3: If novel mesh, kick off Meshy generation in background
-    if (result.meshRoute === "novel" && result.novelDescription) {
-      startMeshGeneration(id, result.novelDescription, result.galleryId);
-    }
   };
 
   // Gallery panel wiring
   galleryPanel.onSelect = async (item) => {
     try {
-      const detailRes = await fetch(`${apiUrl}/api/gallery/${item.id}`);
+      const detailRes = await authFetch(`${apiUrl}/api/gallery/${item.id}`);
       if (!detailRes.ok) return;
       const detail = await detailRes.json();
       const obj = detail.object_definition as WorldObject;
@@ -728,98 +729,9 @@ async function init() {
     }
   };
 
-  async function startMeshGeneration(objectId: string, description: string, galleryId?: string) {
-    try {
-      // ── Stage 1: Preview (fast, ~60s, geometry only) ──
-      objectRenderer.setProgress(objectId, 0, "Preview...");
-
-      const startRes = await fetch(`${apiUrl}/api/generate/mesh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ description }),
-      });
-
-      if (!startRes.ok) {
-        objectRenderer.setProgress(objectId, 0, "Failed");
-        return;
-      }
-
-      const { taskId: previewTaskId } = await startRes.json();
-      const previewGlb = await pollMeshUntilDone(objectId, previewTaskId, "Preview", galleryId);
-      if (!previewGlb) return;
-
-      // Load preview model (with AI material colors)
-      objectRenderer.setProgress(objectId, 100, "Loading preview...");
-      await objectRenderer.loadGLB(objectId, previewGlb, true);
-
-      // ── Stage 2: Refine (slower, ~60-90s, full PBR textures) ──
-      objectRenderer.setProgress(objectId, 0, "Refining...");
-
-      const refineRes = await fetch(`${apiUrl}/api/generate/mesh/refine`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ previewTaskId }),
-      });
-
-      if (!refineRes.ok) {
-        // Preview is still loaded — refine is a nice-to-have
-        objectRenderer.clearProgress(objectId);
-        return;
-      }
-
-      const { taskId: refineTaskId } = await refineRes.json();
-      const refineGlb = await pollMeshUntilDone(objectId, refineTaskId, "Refining", galleryId);
-      if (!refineGlb) return;
-
-      // Upgrade to refined model (with Meshy's own PBR textures)
-      objectRenderer.setProgress(objectId, 100, "Loading HD...");
-      await objectRenderer.loadGLB(objectId, refineGlb, false);
-      objectRenderer.clearProgress(objectId);
-    } catch (err) {
-      console.error("Mesh generation error:", err);
-      objectRenderer.setProgress(objectId, 0, "Error");
-    }
-  }
-
-  /** Poll a mesh task until it succeeds, fails, or times out. Returns proxy GLB URL or null. */
-  async function pollMeshUntilDone(
-    objectId: string,
-    taskId: string,
-    label: string,
-    galleryId?: string,
-  ): Promise<string | null> {
-    const POLL_MS = 3000;
-    const MAX_POLLS = 60;
-
-    for (let i = 0; i < MAX_POLLS; i++) {
-      await new Promise((r) => setTimeout(r, POLL_MS));
-
-      const qs = galleryId ? `?galleryId=${encodeURIComponent(galleryId)}` : "";
-      const pollRes = await fetch(`${apiUrl}/api/generate/mesh/${taskId}${qs}`);
-      if (!pollRes.ok) continue;
-
-      const status = await pollRes.json();
-
-      if (status.status === "SUCCEEDED" && status.glbUrl) {
-        return `${apiUrl}/api/generate/mesh/${taskId}/model`;
-      }
-
-      if (status.status === "FAILED") {
-        objectRenderer.setProgress(objectId, 0, `${label} failed`);
-        return null;
-      }
-
-      const pct = Math.round(status.progress || 0);
-      objectRenderer.setProgress(objectId, pct, `${label}...`);
-    }
-
-    objectRenderer.setProgress(objectId, 0, "Timed out");
-    return null;
-  }
-
   // Try to connect (non-blocking — game works offline for dev)
   try {
-    await network.connect();
+    await network.connect(sessionToken);
     // localPlayerId is set by onWorldSnapshot callback using yourUserId
   } catch {
     console.warn("Could not connect to server — running in offline mode");
@@ -849,6 +761,135 @@ async function init() {
     }));
   }
 
+  // --- Admin Panel ---
+  adminPanel.onLoadUsers = async () => {
+    const res = await authFetch(`${apiUrl}/api/admin/users`);
+    if (!res.ok) throw new Error("Failed to load users");
+    const data = await res.json();
+    return data.users;
+  };
+  adminPanel.onSetRole = async (userId: string, role: UserRole) => {
+    const res = await authFetch(`${apiUrl}/api/admin/users/${userId}/role`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role }),
+    });
+    if (!res.ok) throw new Error("Failed to set role");
+  };
+
+  // Fetch role from server if not received via WebSocket yet
+  if (authManager && userRole === "user") {
+    try {
+      const meRes = await authFetch(`${apiUrl}/api/admin/me`);
+      if (meRes.ok) {
+        const me = await meRes.json();
+        userRole = me.role;
+        authManager.role = me.role;
+        daemonPanel.setSuperAdmin(me.role === "super_admin");
+      }
+    } catch { /* role will come from world_snapshot */ }
+  }
+
+  // Admin badge + sign out UI
+  if (userRole === "super_admin") {
+    const badge = document.createElement("div");
+    badge.textContent = "ADMIN";
+    badge.style.cssText = `
+      position: fixed; top: 12px; right: 12px;
+      background: rgba(255, 68, 68, 0.2);
+      border: 1px solid rgba(255, 68, 68, 0.4);
+      color: #ff4444; font-size: 11px; font-weight: bold;
+      padding: 4px 10px; border-radius: 4px;
+      font-family: system-ui, sans-serif;
+      z-index: 50; cursor: pointer;
+      pointer-events: auto;
+    `;
+    badge.addEventListener("click", () => adminPanel.toggle());
+    document.body.appendChild(badge);
+
+    // Add animation converter tool to admin panel
+    (async () => {
+      const token = (await authManager?.getToken()) ?? "";
+      const converterTool = new AnimationConverterTool(apiUrl, token);
+      converterTool.onSharedAnimsUploaded = () => {
+        avatarManager.reloadSharedAnimClips();
+      };
+      adminPanel.appendSection(converterTool.element);
+
+      // Default model uploader
+      const defaultModelUploader = new DefaultModelUploader(apiUrl, async () => {
+        return (await authManager?.getToken()) ?? "";
+      });
+      defaultModelUploader.onModelUploaded = () => {
+        // Reload all avatars that are using the default model
+        avatarManager.reloadDefaultModels();
+      };
+      adminPanel.appendSection(defaultModelUploader.element);
+    })();
+  }
+
+  // In dev mode (no auth), always show admin badge + tools
+  if (!authManager) {
+    userRole = "super_admin";
+    daemonPanel.setSuperAdmin(true);
+    const badge = document.createElement("div");
+    badge.textContent = "ADMIN (DEV)";
+    badge.style.cssText = `
+      position: fixed; top: 12px; right: 12px;
+      background: rgba(255, 140, 0, 0.2);
+      border: 1px solid rgba(255, 140, 0, 0.4);
+      color: #ffa500; font-size: 11px; font-weight: bold;
+      padding: 4px 10px; border-radius: 4px;
+      font-family: system-ui, sans-serif;
+      z-index: 50; cursor: pointer;
+      pointer-events: auto;
+    `;
+    badge.addEventListener("click", () => adminPanel.toggle());
+    document.body.appendChild(badge);
+
+    const converterTool = new AnimationConverterTool(apiUrl, "");
+    converterTool.onSharedAnimsUploaded = () => {
+      avatarManager.reloadSharedAnimClips();
+    };
+    adminPanel.appendSection(converterTool.element);
+
+    // Default model uploader (dev mode — no auth needed)
+    const defaultModelUploader = new DefaultModelUploader(apiUrl, async () => "");
+    defaultModelUploader.onModelUploaded = () => {
+      avatarManager.reloadDefaultModels();
+    };
+    adminPanel.appendSection(defaultModelUploader.element);
+  }
+
+  if (authManager) {
+    const userMenu = document.createElement("div");
+    userMenu.style.cssText = `
+      position: fixed; top: 12px; left: 12px;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 12px; font-family: system-ui, sans-serif;
+      z-index: 50; display: flex; gap: 8px; align-items: center;
+      pointer-events: auto;
+    `;
+    const nameEl = document.createElement("span");
+    nameEl.textContent = authManager.displayName;
+    userMenu.appendChild(nameEl);
+
+    const signOutBtn = document.createElement("button");
+    signOutBtn.textContent = "Sign Out";
+    signOutBtn.style.cssText = `
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 3px; color: rgba(255, 255, 255, 0.6);
+      font-size: 11px; padding: 3px 8px; cursor: pointer;
+    `;
+    signOutBtn.addEventListener("click", async () => {
+      await authManager!.signOut();
+      window.location.reload();
+    });
+    userMenu.appendChild(signOutBtn);
+    document.body.appendChild(userMenu);
+  }
+
   // Find which plot (if any) contains the given position
   function findPlotAtPosition(pos: THREE.Vector3): string | null {
     for (const plot of plotSnapshots) {
@@ -870,21 +911,35 @@ async function init() {
     return null;
   }
 
+  // Camera orbit state: when left-click orbiting, the camera stays at the orbited
+  // position until the character moves, at which point it smoothly returns behind.
+  let cameraFreeOrbit = false; // true while camera is orbited away from behind-character
+
   // Game loop
-  streetScene.onUpdate((dt) => {
-    // Input → movement
-    if (inputManager.isPointerLocked() && !chatUI.isVisible()) {
+  streetScene.onUpdate((rawDt) => {
+    // Cap at 100ms to prevent teleportation when tab is backgrounded
+    const dt = Math.min(rawDt, 0.1);
+
+    // Input → movement (keyboard always active unless chat is open)
+    if (!chatUI.isVisible()) {
       const mouse = inputManager.consumeMouse();
-      cameraController.applyMouseDelta(mouse.x, mouse.y);
 
-      // Smooth character rotation (visual facing only)
-      const targetYaw = cameraController.getYaw();
-      let yawDiff = targetYaw - localRotation;
-      while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
-      while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
-      localRotation += yawDiff * Math.min(dt * TURN_SPEED, 1);
+      if (inputManager.isLeftMouseDragging() && !inputManager.isRightMouseDragging()) {
+        // Left-click drag → orbit camera freely (no character movement)
+        cameraController.applyMouseDelta(mouse.x, mouse.y);
+        cameraFreeOrbit = true;
+      } else if (inputManager.isRightMouseDragging()) {
+        // Right-click drag → rotate character + adjust camera pitch
+        localRotation -= mouse.x * 0.003;
+        cameraController.applyMouseDelta(0, mouse.y);
+        cameraFreeOrbit = false; // right-click resets to behind character
+      }
 
-      // Compute target velocity from input
+      // A/D keyboard turning (avatar-relative)
+      if (inputManager.state.turnLeft) localRotation += TURN_SPEED * dt;
+      if (inputManager.state.turnRight) localRotation -= TURN_SPEED * dt;
+
+      // Compute target velocity from input (avatar-relative)
       const moveVec = inputManager.getMovementVector();
       let desiredSpeed = inputManager.state.sprint ? RUN_SPEED : WALK_SPEED;
 
@@ -898,8 +953,8 @@ async function init() {
       let targetVX = 0;
       let targetVZ = 0;
       if (moveVec.x !== 0 || moveVec.z !== 0) {
-        // Movement direction from camera yaw (camera-relative controls)
-        const angle = targetYaw;
+        // Movement direction from avatar facing
+        const angle = localRotation;
         targetVX = (moveVec.x * Math.cos(angle) + moveVec.z * Math.sin(angle)) * desiredSpeed;
         targetVZ = (-moveVec.x * Math.sin(angle) + moveVec.z * Math.cos(angle)) * desiredSpeed;
       }
@@ -919,6 +974,11 @@ async function init() {
       localPosition.z += velocityZ * dt;
 
       const currentSpeed = Math.sqrt(velocityX * velocityX + velocityZ * velocityZ);
+
+      // Cancel emote on movement or turning
+      if ((currentSpeed > 0.5 || inputManager.isTurning()) && avatarManager.isEmoting(avatarManager.localPlayerId || "")) {
+        avatarManager.stopEmote(avatarManager.localPlayerId || "");
+      }
 
       // Edge-triggered jump
       if (inputManager.state.jump && !wasJumping && isGrounded) {
@@ -943,7 +1003,21 @@ async function init() {
         { x: localPosition.x, y: localPosition.y, z: localPosition.z },
         localRotation
       );
-      avatarManager.setLocalMoving(currentSpeed);
+
+      // Determine turning state: right-click mouse turning OR keyboard turning
+      let turningState = 0;
+      if (inputManager.state.turnLeft) turningState = -1;
+      else if (inputManager.state.turnRight) turningState = 1;
+      else if (inputManager.isRightMouseDragging() && mouse.x !== 0) {
+        turningState = mouse.x > 0 ? 1 : -1;
+      }
+
+      avatarManager.setLocalMovementState({
+        speed: currentSpeed,
+        turning: turningState,
+        strafing: inputManager.state.strafeLeft ? -1 : inputManager.state.strafeRight ? 1 : 0,
+        jumping: !isGrounded,
+      });
 
       // Send position to server at SEND_RATE
       sendTimer += dt;
@@ -961,7 +1035,7 @@ async function init() {
     } else {
       // Consume mouse to prevent accumulation
       inputManager.consumeMouse();
-      avatarManager.setLocalMoving(0);
+      avatarManager.setLocalMovementState({ speed: 0, turning: 0, strafing: 0, jumping: false });
     }
 
     // Update current plot based on player position
@@ -988,6 +1062,18 @@ async function init() {
     daemonRenderer.update(dt);
     objectRenderer.update(elapsedTime);
     targetingSystem.update();
+    // Camera yaw: when free-orbiting, camera stays put; when character moves, snap back behind
+    if (cameraFreeOrbit) {
+      // Character is moving or turning → smoothly return camera behind character
+      const isMovingOrTurning = inputManager.isMoving() || inputManager.isTurning() || inputManager.isRightMouseDragging();
+      if (isMovingOrTurning) {
+        cameraFreeOrbit = false;
+      }
+      // else: camera stays at current yaw (free orbit position)
+    }
+    if (!cameraFreeOrbit) {
+      cameraController.setYaw(localRotation + Math.PI);
+    }
     const playerPos = avatarManager.getLocalPlayerPosition();
     if (playerPos) {
       cameraController.update(playerPos, dt);
@@ -1009,7 +1095,7 @@ async function init() {
     z-index: 50;
   `;
   info.innerHTML =
-    "Click to look around | WASD to move | Shift to run | Enter to chat | Tab to target | B to build | G gallery | V avatar | N daemons";
+    "Click to look around | W/S move | A/D turn | Q/E strafe | Shift run | Space jump | Enter chat | Tab target | B build | G gallery | V avatar | N daemons";
   document.body.appendChild(info);
 
   // Location HUD (top right, discreet)

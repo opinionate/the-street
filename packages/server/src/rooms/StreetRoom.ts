@@ -15,11 +15,14 @@ import {
 } from "@the-street/shared";
 import type {
   Vector3,
+  SavedPosition,
   PlayerState as IPlayerState,
   PlotSnapshot,
   WorldObject,
   AvatarDefinition,
+  UserRole,
 } from "@the-street/shared";
+import { VALID_EMOTE_IDS } from "@the-street/shared";
 import { DaemonManager } from "../daemons/DaemonManager.js";
 
 // Colyseus schema for syncing player state
@@ -62,8 +65,9 @@ interface ClientAuth {
   userId: string;
   clerkId: string;
   displayName: string;
+  role: UserRole;
   avatarDefinition: AvatarDefinition;
-  lastPosition: Vector3 | null;
+  lastPosition: SavedPosition | null;
 }
 
 // Track which plot a player is currently on
@@ -88,10 +92,15 @@ export class StreetRoom extends Room<StreetRoomState> {
   private daemonManager: DaemonManager | null = null;
   /** Full avatar definitions keyed by sessionId (schema only stores avatarIndex) */
   private avatarDefinitions = new Map<string, AvatarDefinition>();
+  private clientRoles = new Map<string, UserRole>();
   /** Resolves when plots + daemons are loaded; clients wait on this before getting snapshot */
   private dataReady: Promise<void> = Promise.resolve();
 
   override maxClients = MAX_CLIENTS;
+
+  private isClientAdmin(sessionId: string): boolean {
+    return this.clientRoles.get(sessionId) === "super_admin";
+  }
 
   override onCreate(): void {
     this.setState(new StreetRoomState());
@@ -99,6 +108,7 @@ export class StreetRoom extends Room<StreetRoomState> {
     // Register message handlers
     this.onMessage("move", (client, data) => this.handleMove(client, data));
     this.onMessage("chat", (client, data) => this.handleChat(client, data));
+    this.onMessage("emote", (client, data) => this.handleEmote(client, data));
     this.onMessage("interact", (client, data) =>
       this.handleInteract(client, data),
     );
@@ -164,11 +174,12 @@ export class StreetRoom extends Room<StreetRoomState> {
     options: { token: string },
   ): Promise<ClientAuth> {
     // Dev bypass — skip Clerk auth in development
-    if (process.env.NODE_ENV === "development" || !process.env.CLERK_SECRET_KEY) {
+    if (process.env.NODE_ENV === "development") {
       return {
         userId: "00000000-0000-0000-0000-000000000000",
         clerkId: "dev_clerk_id",
         displayName: "Dev User",
+        role: (process.env.DEV_USER_ROLE as UserRole) || "super_admin",
         avatarDefinition: { avatarIndex: 0 },
         lastPosition: null,
       };
@@ -187,7 +198,7 @@ export class StreetRoom extends Room<StreetRoomState> {
 
     const clerkId = payload.sub;
     const { rows } = await pool.query(
-      "SELECT id, display_name, avatar_definition, last_position FROM users WHERE clerk_id = $1",
+      "SELECT id, display_name, role, avatar_definition, last_position FROM users WHERE clerk_id = $1",
       [clerkId],
     );
 
@@ -200,6 +211,7 @@ export class StreetRoom extends Room<StreetRoomState> {
       userId: user.id,
       clerkId,
       displayName: user.display_name,
+      role: user.role ?? "user",
       avatarDefinition: user.avatar_definition ?? { avatarIndex: 0 },
       lastPosition: user.last_position,
     };
@@ -217,10 +229,11 @@ export class StreetRoom extends Room<StreetRoomState> {
     player.posX = spawn.x;
     player.posY = spawn.y;
     player.posZ = spawn.z;
-    player.rotation = 0;
+    player.rotation = auth.lastPosition?.rotation ?? 0;
 
     this.state.players.set(client.sessionId, player);
     this.avatarDefinitions.set(client.sessionId, auth.avatarDefinition);
+    this.clientRoles.set(client.sessionId, auth.role);
     this.playerVisits.set(client.sessionId, null);
 
     // Send world snapshot to joining client
@@ -239,6 +252,7 @@ export class StreetRoom extends Room<StreetRoomState> {
     client.send("world_snapshot", {
       type: "world_snapshot" as const,
       yourUserId: auth.userId,
+      yourRole: auth.role,
       players,
       plots: this.plotCache,
       daemons: this.daemonManager?.getDaemonStates() || [],
@@ -299,6 +313,7 @@ export class StreetRoom extends Room<StreetRoomState> {
 
     this.state.players.delete(client.sessionId);
     this.avatarDefinitions.delete(client.sessionId);
+    this.clientRoles.delete(client.sessionId);
     this.playerVisits.delete(client.sessionId);
   }
 
@@ -319,6 +334,25 @@ export class StreetRoom extends Room<StreetRoomState> {
   ): void {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
+
+    // Validate position data
+    if (
+      !data.position ||
+      typeof data.position.x !== "number" ||
+      typeof data.position.y !== "number" ||
+      typeof data.position.z !== "number" ||
+      !Number.isFinite(data.position.x) ||
+      !Number.isFinite(data.position.y) ||
+      !Number.isFinite(data.position.z)
+    ) return;
+
+    // Reject positions outside world bounds
+    const BOUNDS = 10000;
+    if (
+      data.position.x < -BOUNDS || data.position.x > BOUNDS ||
+      data.position.y < -BOUNDS || data.position.y > BOUNDS ||
+      data.position.z < -BOUNDS || data.position.z > BOUNDS
+    ) return;
 
     // Anti-cheat: reject impossible movement speeds
     const dx = data.position.x - player.posX;
@@ -356,11 +390,12 @@ export class StreetRoom extends Room<StreetRoomState> {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
-    // Rate limit: 1 message/second
-    const allowed = await checkChatRateLimit(player.userId);
+    // Rate limit: 1 message/second (admins exempt)
+    const role = this.clientRoles.get(client.sessionId);
+    const allowed = await checkChatRateLimit(player.userId, role);
     if (!allowed) return; // silently drop
 
-    if (!data.content || data.content.length > 500) return;
+    if (!data.content || typeof data.content !== "string" || data.content.length > 500) return;
 
     const senderPos = { x: player.posX, y: player.posY, z: player.posZ };
 
@@ -414,6 +449,35 @@ export class StreetRoom extends Room<StreetRoomState> {
     }
   }
 
+  private handleEmote(
+    client: Client,
+    data: { emoteId: string },
+  ): void {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    if (!VALID_EMOTE_IDS.includes(data.emoteId as any)) return;
+
+    const senderPos = { x: player.posX, y: player.posY, z: player.posZ };
+
+    this.clients.forEach((c) => {
+      if (c.sessionId === client.sessionId) return;
+      const other = this.state.players.get(c.sessionId);
+      if (!other) return;
+      const d = Math.sqrt(
+        (other.posX - senderPos.x) ** 2 +
+          (other.posY - senderPos.y) ** 2 +
+          (other.posZ - senderPos.z) ** 2,
+      );
+      if (d <= CHAT_RADIUS) {
+        c.send("player_emote", {
+          userId: player.userId,
+          emoteId: data.emoteId,
+        });
+      }
+    });
+  }
+
   private handleInteract(
     client: Client,
     data: { objectId: string; interaction: string },
@@ -438,11 +502,10 @@ export class StreetRoom extends Room<StreetRoomState> {
 
     const pool = getPool();
 
-    // Verify plot ownership
-    const { rows } = await pool.query(
-      "SELECT uuid FROM plots WHERE uuid = $1 AND owner_id = $2",
-      [data.plotUUID, player.userId],
-    );
+    // Verify plot ownership (admins bypass)
+    const { rows } = this.isClientAdmin(client.sessionId)
+      ? await pool.query("SELECT uuid FROM plots WHERE uuid = $1", [data.plotUUID])
+      : await pool.query("SELECT uuid FROM plots WHERE uuid = $1 AND owner_id = $2", [data.plotUUID, player.userId]);
     if (rows.length === 0) return;
 
     const obj = data.objectDefinition;
@@ -516,13 +579,15 @@ export class StreetRoom extends Room<StreetRoomState> {
 
     const pool = getPool();
 
-    // Verify ownership via plot
-    const { rows } = await pool.query(
-      `SELECT wo.id FROM world_objects wo
-       JOIN plots p ON p.uuid = wo.plot_uuid
-       WHERE wo.id = $1 AND p.owner_id = $2`,
-      [data.objectId, player.userId],
-    );
+    // Verify ownership via plot (admins bypass)
+    const { rows } = this.isClientAdmin(client.sessionId)
+      ? await pool.query("SELECT wo.id FROM world_objects wo WHERE wo.id = $1", [data.objectId])
+      : await pool.query(
+          `SELECT wo.id FROM world_objects wo
+           JOIN plots p ON p.uuid = wo.plot_uuid
+           WHERE wo.id = $1 AND p.owner_id = $2`,
+          [data.objectId, player.userId],
+        );
     if (rows.length === 0) return;
 
     await pool.query("DELETE FROM world_objects WHERE id = $1", [
@@ -615,12 +680,11 @@ export class StreetRoom extends Room<StreetRoomState> {
     const player = this.state.players.get(client.sessionId);
     if (!player || !this.daemonManager) return;
 
-    // Verify ownership
+    // Verify ownership (admins bypass)
     const pool = getPool();
-    const { rows } = await pool.query(
-      "SELECT id FROM daemons WHERE id = $1 AND owner_id = $2",
-      [data.daemonId, player.userId],
-    );
+    const { rows } = this.isClientAdmin(client.sessionId)
+      ? await pool.query("SELECT id FROM daemons WHERE id = $1", [data.daemonId])
+      : await pool.query("SELECT id FROM daemons WHERE id = $1 AND owner_id = $2", [data.daemonId, player.userId]);
     if (rows.length === 0) return;
 
     this.daemonManager.recallDaemon(data.daemonId);
@@ -633,12 +697,11 @@ export class StreetRoom extends Room<StreetRoomState> {
     const player = this.state.players.get(client.sessionId);
     if (!player || !this.daemonManager) return;
 
-    // Verify ownership
+    // Verify ownership (admins bypass)
     const pool = getPool();
-    const { rows } = await pool.query(
-      "SELECT id FROM daemons WHERE id = $1 AND owner_id = $2",
-      [data.daemonId, player.userId],
-    );
+    const { rows } = this.isClientAdmin(client.sessionId)
+      ? await pool.query("SELECT id FROM daemons WHERE id = $1", [data.daemonId])
+      : await pool.query("SELECT id FROM daemons WHERE id = $1 AND owner_id = $2", [data.daemonId, player.userId]);
     if (rows.length === 0) return;
 
     this.daemonManager.setRoaming(data.daemonId, data.enabled);
@@ -650,6 +713,10 @@ export class StreetRoom extends Room<StreetRoomState> {
   ): void {
     const player = this.state.players.get(client.sessionId);
     if (!player || !data.avatarDefinition) return;
+
+    // Validate avatarDefinition is an object and not excessively large
+    if (typeof data.avatarDefinition !== "object" || data.avatarDefinition === null) return;
+    if (JSON.stringify(data.avatarDefinition).length > 50000) return;
 
     // Update stored definition
     player.avatarIndex = data.avatarDefinition.avatarIndex ?? 0;

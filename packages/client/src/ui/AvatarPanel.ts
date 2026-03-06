@@ -1,37 +1,31 @@
 import * as THREE from "three";
+import type { AvatarDefinition, AvatarAppearance } from "@the-street/shared";
+import { AnimationPanel } from "./AnimationPanel.js";
 
 export interface AvatarHistoryItem {
   id: string;
-  avatar_definition: unknown;
+  avatar_definition: AvatarDefinition;
   mesh_description: string | null;
-  meshy_task_id: string | null;
   thumbnail_url: string | null;
   created_at: string;
 }
 
 export class AvatarPanel {
   private container: HTMLDivElement;
-  private input: HTMLTextAreaElement;
-  private generateBtn: HTMLButtonElement;
   private saveBtn: HTMLButtonElement;
   private status: HTMLDivElement;
-  private meshPromptArea: HTMLDivElement;
-  private meshPromptInput: HTMLTextAreaElement;
-  private startMeshBtn: HTMLButtonElement;
-  private meshProgress: HTMLDivElement;
-  private meshProgressBar: HTMLDivElement;
-  private meshProgressLabel: HTMLDivElement;
   private galleryStrip: HTMLDivElement;
   private galleryInfo: HTMLDivElement;
   private promptViewer: HTMLDivElement;
   private previewCanvas: HTMLCanvasElement;
   private visible = false;
-  private currentAppearance: unknown = null;
-  private currentMeshDescription: string | null = null;
-  private currentMeshyTaskId: string | null = null;
+  private currentAppearance: AvatarAppearance | null = null;
+  private currentUploadedModelId: string | null = null;
   private currentThumbnailUrl: string | null = null;
   private selectedHistoryId: string | null = null;
   private historyItems: AvatarHistoryItem[] = [];
+  animationPanel: AnimationPanel | null = null;
+  private animPanelContainer!: HTMLDivElement;
 
   // 3D Preview
   private previewRenderer: THREE.WebGLRenderer | null = null;
@@ -41,15 +35,14 @@ export class AvatarPanel {
   private previewAnimId: number = 0;
   private isDragging = false;
   private dragStartX = 0;
-  private previewRotationY = 0;
+  private previewRotationY = Math.PI + Math.PI / 6; // 180° flip + ~30° turn to the left
 
-  onGenerate: ((description: string) => Promise<void>) | null = null;
-  onSave: ((avatarDefinition: unknown, meshDescription?: string, meshyTaskId?: string) => Promise<void>) | null = null;
-  onStartMesh: ((description: string) => Promise<void>) | null = null;
+  onSave: ((avatarDefinition: AvatarDefinition) => Promise<void>) | null = null;
   onLoadHistory: (() => Promise<AvatarHistoryItem[]>) | null = null;
-  onSelectHistoryItem: ((avatarDefinition: unknown) => void) | null = null;
+  onSelectHistoryItem: ((avatarDefinition: AvatarDefinition) => void) | null = null;
   onDeleteHistoryItem: ((id: string) => Promise<void>) | null = null;
   onGetPreviewModel: (() => THREE.Group | null) | null = null;
+  onUploadCharacter: ((file: File) => Promise<void>) | null = null;
 
   constructor() {
     this.container = document.createElement("div");
@@ -152,42 +145,45 @@ export class AvatarPanel {
     ctrlTitle.style.cssText = "font-size:14px;font-weight:bold;color:rgba(255,255,255,0.8);margin-bottom:4px;";
     controlCol.appendChild(ctrlTitle);
 
-    // Description input
-    this.input = document.createElement("textarea");
-    this.input.placeholder = "Describe your avatar...\ne.g. A cyber-punk warrior with neon blue hair";
-    this.input.style.cssText = `
-      width: 100%;
-      height: 70px;
-      padding: 8px;
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 4px;
-      color: white;
-      font-family: system-ui, sans-serif;
-      font-size: 13px;
-      resize: vertical;
-      outline: none;
-      box-sizing: border-box;
-    `;
-    this.input.addEventListener("keydown", (e) => e.stopPropagation());
-    controlCol.appendChild(this.input);
-
-    // Generate button
-    this.generateBtn = document.createElement("button");
-    this.generateBtn.textContent = "Generate";
-    this.generateBtn.style.cssText = `
+    // Upload Character button
+    const uploadCharBtn = document.createElement("button");
+    uploadCharBtn.textContent = "Upload Mixamo Character";
+    uploadCharBtn.style.cssText = `
       width: 100%;
       padding: 9px;
-      background: #00aacc;
-      border: none;
+      background: rgba(255, 170, 0, 0.15);
+      border: 1px solid rgba(255, 170, 0, 0.3);
       border-radius: 4px;
-      color: white;
-      font-size: 13px;
-      font-weight: bold;
+      color: #ffaa00;
+      font-size: 12px;
       cursor: pointer;
+      margin-top: 4px;
     `;
-    this.generateBtn.addEventListener("click", () => this.handleGenerate());
-    controlCol.appendChild(this.generateBtn);
+    const fbxInput = document.createElement("input");
+    fbxInput.type = "file";
+    fbxInput.accept = ".fbx";
+    fbxInput.style.display = "none";
+    fbxInput.addEventListener("change", async () => {
+      const file = fbxInput.files?.[0];
+      if (!file) return;
+      fbxInput.value = "";
+      if (this.onUploadCharacter) {
+        try {
+          uploadCharBtn.disabled = true;
+          uploadCharBtn.textContent = "Converting...";
+          await this.onUploadCharacter(file);
+          uploadCharBtn.textContent = "Upload Mixamo Character";
+          uploadCharBtn.disabled = false;
+        } catch (err) {
+          this.setStatus(`Upload failed: ${err instanceof Error ? err.message : err}`, true);
+          uploadCharBtn.textContent = "Upload Mixamo Character";
+          uploadCharBtn.disabled = false;
+        }
+      }
+    });
+    uploadCharBtn.addEventListener("click", () => fbxInput.click());
+    controlCol.appendChild(uploadCharBtn);
+    controlCol.appendChild(fbxInput);
 
     // Status
     this.status = document.createElement("div");
@@ -197,65 +193,6 @@ export class AvatarPanel {
       min-height: 18px;
     `;
     controlCol.appendChild(this.status);
-
-    // Mesh prompt area (hidden until generation)
-    this.meshPromptArea = document.createElement("div");
-    this.meshPromptArea.style.cssText = "display:none;";
-    const meshLabel = document.createElement("div");
-    meshLabel.textContent = "3D Model Prompt";
-    meshLabel.style.cssText = "font-size:12px;font-weight:bold;color:rgba(255,255,255,0.7);margin-bottom:4px;";
-    this.meshPromptArea.appendChild(meshLabel);
-
-    this.meshPromptInput = document.createElement("textarea");
-    this.meshPromptInput.style.cssText = `
-      width: 100%;
-      min-height: 55px;
-      padding: 8px;
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(0, 170, 204, 0.4);
-      border-radius: 4px;
-      color: white;
-      font-family: system-ui, sans-serif;
-      font-size: 12px;
-      resize: vertical;
-      outline: none;
-      box-sizing: border-box;
-      overflow: hidden;
-    `;
-    this.meshPromptInput.addEventListener("keydown", (e) => e.stopPropagation());
-    this.meshPromptArea.appendChild(this.meshPromptInput);
-
-    this.startMeshBtn = document.createElement("button");
-    this.startMeshBtn.textContent = "Generate 3D Model";
-    this.startMeshBtn.style.cssText = `
-      margin-top: 6px;
-      width: 100%;
-      padding: 8px;
-      background: #00aacc;
-      border: none;
-      border-radius: 4px;
-      color: white;
-      font-size: 13px;
-      font-weight: bold;
-      cursor: pointer;
-    `;
-    this.startMeshBtn.addEventListener("click", () => this.handleStartMesh());
-    this.meshPromptArea.appendChild(this.startMeshBtn);
-    controlCol.appendChild(this.meshPromptArea);
-
-    // Mesh progress
-    this.meshProgress = document.createElement("div");
-    this.meshProgress.style.cssText = "display:none;";
-    this.meshProgressLabel = document.createElement("div");
-    this.meshProgressLabel.style.cssText = "font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:4px;";
-    this.meshProgress.appendChild(this.meshProgressLabel);
-    const progressTrack = document.createElement("div");
-    progressTrack.style.cssText = "width:100%;height:6px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden;";
-    this.meshProgressBar = document.createElement("div");
-    this.meshProgressBar.style.cssText = "width:0%;height:100%;background:#00aacc;border-radius:3px;transition:width 0.3s;";
-    progressTrack.appendChild(this.meshProgressBar);
-    this.meshProgress.appendChild(progressTrack);
-    controlCol.appendChild(this.meshProgress);
 
     // Save button
     this.saveBtn = document.createElement("button");
@@ -274,6 +211,10 @@ export class AvatarPanel {
     `;
     this.saveBtn.addEventListener("click", () => this.handleSave());
     controlCol.appendChild(this.saveBtn);
+
+    // Animation panel placeholder — populated via setAnimationPanel()
+    this.animPanelContainer = document.createElement("div");
+    controlCol.appendChild(this.animPanelContainer);
 
     body.appendChild(controlCol);
     this.container.appendChild(body);
@@ -453,7 +394,6 @@ export class AvatarPanel {
     }
     this.initPreview();
     this.updatePreviewModel();
-    setTimeout(() => this.input.focus(), 50);
     this.loadHistory();
   }
 
@@ -472,42 +412,17 @@ export class AvatarPanel {
     return this.visible;
   }
 
-  getMeshyTaskId(): string | null {
-    return this.currentMeshyTaskId;
-  }
-
   getThumbnailUrl(): string | null {
     return this.currentThumbnailUrl;
   }
 
-  setMeshProgress(progress: number, label: string): void {
-    this.meshProgress.style.display = "block";
-    this.meshProgressLabel.textContent = label;
-    this.meshProgressBar.style.width = `${Math.round(progress)}%`;
-  }
-
-  clearMeshProgress(): void {
-    this.meshProgress.style.display = "none";
-  }
-
-  setMeshComplete(): void {
-    this.meshProgressLabel.textContent = "3D model ready!";
-    this.meshProgressLabel.style.color = "#44ff88";
-    this.meshProgressBar.style.width = "100%";
-    this.meshProgressBar.style.background = "#44ff88";
-
-    this.meshPromptArea.style.display = "none";
-    this.saveBtn.style.display = "block";
-    // Keep Generate visible so user can always start a new avatar
-    this.generateBtn.style.display = "block";
-    this.generateBtn.disabled = false;
-    this.generateBtn.textContent = "Generate";
-    // Preview refresh is handled externally via refreshPreview() after model loads
-  }
-
   /** Refresh the 3D preview with the current avatar model and capture thumbnail */
   refreshPreview(): void {
-    if (!this.visible) return;
+    // If panel is hidden, do an offscreen thumbnail capture
+    if (!this.visible) {
+      this.captureOffscreenThumbnail();
+      return;
+    }
     this.updatePreviewModel();
     // Capture thumbnail after two frames so the renderer has drawn the model
     requestAnimationFrame(() => {
@@ -515,6 +430,44 @@ export class AvatarPanel {
         this.capturePreviewThumbnail();
       });
     });
+  }
+
+  /** Capture a thumbnail via a temporary offscreen renderer (when panel is hidden) */
+  private captureOffscreenThumbnail(): void {
+    const model = this.onGetPreviewModel?.();
+    if (!model) return;
+
+    const size = 256;
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(size, size);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x14141e);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(2, 3, 2);
+    scene.add(dirLight);
+
+    model.rotation.y = Math.PI + Math.PI / 6;
+    scene.add(model);
+
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 50);
+    camera.position.set(0, 1.0, 3.5);
+    camera.lookAt(0, 0.9, 0);
+
+    renderer.render(scene, camera);
+
+    const thumbCanvas = document.createElement("canvas");
+    thumbCanvas.width = 128;
+    thumbCanvas.height = 128;
+    const ctx = thumbCanvas.getContext("2d");
+    if (ctx) {
+      ctx.drawImage(renderer.domElement, 0, 0, size, size, 0, 0, 128, 128);
+      this.currentThumbnailUrl = thumbCanvas.toDataURL("image/jpeg", 0.75);
+    }
+
+    scene.remove(model);
+    renderer.dispose();
   }
 
   /** Capture the preview canvas as a small JPEG data URL for thumbnails */
@@ -537,32 +490,19 @@ export class AvatarPanel {
     this.currentThumbnailUrl = thumbCanvas.toDataURL("image/jpeg", 0.75);
   }
 
-  setGenerationResult(appearance: unknown, meshDescription?: string): void {
-    this.currentAppearance = appearance;
-    this.currentMeshDescription = meshDescription || null;
-    this.currentMeshyTaskId = null;
-
-    this.saveBtn.style.display = "none";
-    // Keep Generate visible for starting over with a new description
-    this.generateBtn.style.display = "block";
-    this.generateBtn.disabled = false;
-    this.generateBtn.textContent = "Generate";
-    if (meshDescription) {
-      this.meshPromptInput.value = meshDescription;
-      this.meshPromptArea.style.display = "block";
-      this.startMeshBtn.style.display = "block";
-      this.startMeshBtn.textContent = "Generate 3D Model";
-      this.startMeshBtn.disabled = false;
-      this.autoExpandTextarea(this.meshPromptInput);
-    }
-  }
-
-  setMeshyTaskId(taskId: string): void {
-    this.currentMeshyTaskId = taskId;
-  }
-
   setThumbnailUrl(url: string): void {
     this.currentThumbnailUrl = url;
+  }
+
+  setUploadedModelId(uploadId: string): void {
+    this.currentUploadedModelId = uploadId;
+    // Show save button for uploaded characters
+    this.saveBtn.style.display = "block";
+  }
+
+  setStatus(msg: string, isError = false): void {
+    this.status.textContent = msg;
+    this.status.style.color = isError ? "#ff4444" : "rgba(255, 255, 255, 0.6)";
   }
 
   private async loadHistory(): Promise<void> {
@@ -586,9 +526,9 @@ export class AvatarPanel {
     for (const item of items) {
       const card = document.createElement("div");
       card.dataset.historyId = item.id;
-      const def = item.avatar_definition as Record<string, unknown>;
-      const appearance = def?.customAppearance as Record<string, unknown> | undefined;
-      const accent = (appearance?.accentColor as string) || "#00aacc";
+      const def = item.avatar_definition;
+      const appearance = def?.customAppearance;
+      const accent = appearance?.accentColor || "#00aacc";
       const isSelected = item.id === this.selectedHistoryId;
 
       card.style.cssText = `
@@ -637,13 +577,10 @@ export class AvatarPanel {
   }
 
   private selectHistoryItem(item: AvatarHistoryItem): void {
-    const def = item.avatar_definition as Record<string, unknown>;
-    const appearance = def?.customAppearance as Record<string, unknown> | undefined;
+    const def = item.avatar_definition;
 
     this.selectedHistoryId = item.id;
-    this.currentAppearance = appearance || null;
-    this.currentMeshyTaskId = (def?.meshyTaskId as string) || null;
-    this.currentMeshDescription = item.mesh_description || null;
+    this.currentAppearance = def?.customAppearance || null;
 
     // Apply avatar — the callback in main.ts loads the model and calls refreshPreview()
     this.onSelectHistoryItem?.(item.avatar_definition);
@@ -656,43 +593,31 @@ export class AvatarPanel {
         : "rgba(255, 255, 255, 0.15)";
     });
 
-    // Reset control panel — keep Generate visible for new avatar creation
-    this.generateBtn.style.display = "block";
-    this.generateBtn.disabled = false;
-    this.generateBtn.textContent = "Generate";
+    // Reset control panel
     this.saveBtn.style.display = "none";
-    this.meshPromptArea.style.display = "none";
-    this.meshProgress.style.display = "none";
-    this.meshProgressLabel.style.color = "rgba(255, 255, 255, 0.7)";
-    this.meshProgressBar.style.background = "#00aacc";
-
-    const hasMesh = !!(def?.meshyTaskId);
-    if (item.mesh_description) {
-      this.meshPromptInput.value = item.mesh_description;
-      this.meshPromptArea.style.display = "block";
-      this.startMeshBtn.style.display = "block";
-      this.startMeshBtn.textContent = hasMesh ? "Regenerate 3D Model" : "Generate 3D Model";
-      this.startMeshBtn.disabled = false;
-      this.autoExpandTextarea(this.meshPromptInput);
-      this.status.textContent = hasMesh
-        ? "Avatar loaded. Edit prompt to regenerate."
-        : "Loaded. Edit prompt or generate 3D model.";
-    } else {
-      this.status.textContent = "Loaded from history.";
-    }
+    this.status.textContent = "Loaded from history.";
     this.status.style.color = "#00aacc";
 
     // Show info row
     this.updateGalleryInfo(item);
+
+    // Show animation panel for uploaded avatars
+    if (this.animationPanel) {
+      if (def?.uploadedModelId) {
+        this.animationPanel.show();
+      } else {
+        this.animationPanel.hide();
+      }
+    }
   }
 
   private updateGalleryInfo(item: AvatarHistoryItem): void {
     this.galleryInfo.innerHTML = "";
     this.galleryInfo.style.display = "flex";
 
-    const def = item.avatar_definition as Record<string, unknown>;
-    const appearance = def?.customAppearance as Record<string, unknown> | undefined;
-    const outfit = (appearance?.outfit as string) || "Custom avatar";
+    const def = item.avatar_definition;
+    const appearance = def?.customAppearance;
+    const outfit = appearance?.outfit || "Custom avatar";
 
     // Outfit description
     const descEl = document.createElement("span");
@@ -768,84 +693,23 @@ export class AvatarPanel {
     this.galleryInfo.appendChild(deleteBtn);
   }
 
-  private autoExpandTextarea(textarea: HTMLTextAreaElement): void {
-    requestAnimationFrame(() => {
-      textarea.style.height = "auto";
-      textarea.style.height = `${textarea.scrollHeight}px`;
-    });
-  }
-
-  private async handleGenerate(): Promise<void> {
-    const description = this.input.value.trim();
-    if (!description) return;
-
-    this.generateBtn.disabled = true;
-    this.generateBtn.textContent = "Generating...";
-    this.status.textContent = "AI is designing your avatar...";
-    this.status.style.color = "#00aacc";
-    // Reset any in-progress state
-    this.saveBtn.style.display = "none";
-    this.meshPromptArea.style.display = "none";
-    this.meshProgress.style.display = "none";
-    this.selectedHistoryId = null;
-    this.currentMeshyTaskId = null;
-    this.currentThumbnailUrl = null;
-
-    try {
-      await this.onGenerate?.(description);
-      this.generateBtn.textContent = "Generate";
-      this.generateBtn.disabled = false;
-      this.status.textContent = "Edit the 3D prompt below, then generate.";
-      this.status.style.color = "#44ff88";
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Generation failed";
-      this.status.textContent = `Error: ${message}`;
-      this.status.style.color = "#ff4444";
-      this.generateBtn.textContent = "Generate";
-      this.generateBtn.disabled = false;
-      this.generateBtn.style.display = "block";
-    }
-  }
-
-  private async handleStartMesh(): Promise<void> {
-    const description = this.meshPromptInput.value.trim();
-    if (!description) return;
-
-    this.startMeshBtn.disabled = true;
-    this.startMeshBtn.textContent = "Starting...";
-
-    try {
-      await this.onStartMesh?.(description);
-      this.startMeshBtn.style.display = "none";
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Mesh generation failed";
-      this.status.textContent = `Error: ${message}`;
-      this.status.style.color = "#ff4444";
-      this.startMeshBtn.textContent = "Generate 3D Model";
-      this.startMeshBtn.disabled = false;
-    }
-  }
-
   private async handleSave(): Promise<void> {
-    if (!this.currentAppearance) return;
+    if (!this.currentAppearance && !this.currentUploadedModelId) return;
 
     this.saveBtn.disabled = true;
     this.saveBtn.textContent = "Saving...";
 
     try {
-      const avatarDefinition = {
+      const avatarDefinition: AvatarDefinition = {
         avatarIndex: 0,
-        customAppearance: this.currentAppearance,
-        meshyTaskId: this.currentMeshyTaskId,
+        customAppearance: this.currentAppearance || undefined,
+        uploadedModelId: this.currentUploadedModelId || undefined,
       };
-      await this.onSave?.(avatarDefinition, this.currentMeshDescription || undefined, this.currentMeshyTaskId || undefined);
+      await this.onSave?.(avatarDefinition);
       this.status.textContent = "Avatar saved!";
       this.status.style.color = "#44ff88";
       // Reset to initial state
       this.saveBtn.style.display = "none";
-      this.meshPromptArea.style.display = "none";
-      this.meshProgress.style.display = "none";
-      this.generateBtn.style.display = "block";
       this.currentThumbnailUrl = null;
       // Refresh gallery
       this.loadHistory();
@@ -858,4 +722,20 @@ export class AvatarPanel {
       this.saveBtn.disabled = false;
     }
   }
+
+  setAnimationPanel(panel: AnimationPanel): void {
+    this.animationPanel = panel;
+    this.animPanelContainer.appendChild(panel.element);
+  }
+
+  /** Get currently selected avatar history item ID (for animation assignment) */
+  getSelectedHistoryId(): string | null {
+    return this.selectedHistoryId;
+  }
+
+  getSelectedHistoryItem(): AvatarHistoryItem | null {
+    if (!this.selectedHistoryId) return null;
+    return this.historyItems.find((h) => h.id === this.selectedHistoryId) ?? null;
+  }
+
 }

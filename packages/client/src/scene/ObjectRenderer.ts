@@ -19,7 +19,7 @@ export class ObjectRenderer {
   }
 
   /** Replace a placeholder with a loaded GLB model.
-   *  Set applyMaterials=true for Meshy preview models that lack proper textures. */
+   *  Set applyMaterials=true for models that lack proper textures. */
   async loadGLB(objectId: string, glbUrl: string, applyMaterials = true): Promise<void> {
     const existing = this.objectMeshes.get(objectId);
     if (!existing) return;

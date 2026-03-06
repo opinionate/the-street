@@ -120,7 +120,7 @@ export class DaemonRenderer {
     );
     group.rotation.y = daemon.currentRotation;
 
-    const behaviorType = daemon.definition.behavior.type;
+    const behaviorType = daemon.definition.behavior.type ?? "default";
     const accent = NPC_ACCENT_COLORS[behaviorType] || 0x44ff88;
 
     const parts = this.createNPCBody(accent);
@@ -156,7 +156,7 @@ export class DaemonRenderer {
       speed: 0,
       action: daemon.currentAction as DaemonAction,
       mood: daemon.mood || "neutral",
-      behaviorType: daemon.definition.behavior.type,
+      behaviorType: daemon.definition.behavior.type ?? "default",
       chatBubbles: [],
       emoteParticles: [],
       emoteLabels: [],

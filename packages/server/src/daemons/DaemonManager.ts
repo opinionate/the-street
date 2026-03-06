@@ -8,11 +8,16 @@ import type {
   Vector3,
   PersonalityManifest,
   WorldStateContext,
+  VisitorImpression,
 } from "@the-street/shared";
 import { V1_CONFIG, getStreetPosition } from "@the-street/shared";
 import { WorldEventBus, EventPriority, type WorldEvent } from "./WorldEventBus.js";
 import { DaemonBehaviorTree, type BehaviorCallbacks, type BehaviorState } from "./DaemonBehaviorTree.js";
 import { ConversationSessionManager, type SessionCallbacks } from "./ConversationSessionManager.js";
+import {
+  getVisitorImpression,
+  summarizeAndPersistImpression,
+} from "../services/VisitorImpressionStore.js";
 
 interface PlayerInfo {
   userId: string;
@@ -203,6 +208,8 @@ export class DaemonManager {
   private sessionManager: ConversationSessionManager;
   // Personality manifests cache (daemonId -> manifest)
   private manifests = new Map<string, PersonalityManifest>();
+  // Visitor impression cache (daemonId:visitorId -> impression)
+  private visitorImpressionCache = new Map<string, VisitorImpression>();
 
   constructor(
     broadcast: BroadcastFn,
@@ -378,10 +385,14 @@ export class DaemonManager {
         });
       },
 
-      onSummarize: (daemonId, session, _turns) => {
-        // Summarization hook — will be implemented by ts-70l (visitor impression store)
+      onSummarize: (daemonId, session, turns) => {
         console.log(`[SessionManager] Summarization triggered for daemon=${daemonId} session=${session.sessionId} turns=${session.turnCount}`);
         if (session.participantType === "visitor") {
+          const daemon = this.daemons.get(daemonId);
+          const daemonName = daemon?.state.definition.name ?? "Unknown";
+          summarizeAndPersistImpression(daemonId, daemonName, session, turns).catch((err) => {
+            console.error(`[SessionManager] Visitor impression persistence failed for daemon=${daemonId}:`, err);
+          });
           this.persistRelationship(daemonId, session.participantId).catch(() => {});
         }
       },
@@ -412,9 +423,9 @@ export class DaemonManager {
         } satisfies WorldStateContext;
       },
 
-      getVisitorImpression: (_daemonId, _visitorId) => {
-        // Will be provided by ts-70l (visitor impression store)
-        return undefined;
+      getVisitorImpression: (daemonId, visitorId) => {
+        // Synchronous lookup from cache; async load happens at session start
+        return this.visitorImpressionCache.get(`${daemonId}:${visitorId}`);
       },
 
       getDaemonRelationship: (_daemonId, _targetDaemonId) => {
@@ -1544,6 +1555,20 @@ export class DaemonManager {
       try {
         // Start session if not already active
         if (!this.sessionManager.hasActiveSession(daemonId)) {
+          // Pre-load visitor impression into cache for context injection
+          if (participantType === "visitor") {
+            try {
+              const impression = await getVisitorImpression(daemonId, participantId);
+              const cacheKey = `${daemonId}:${participantId}`;
+              if (impression) {
+                this.visitorImpressionCache.set(cacheKey, impression);
+              } else {
+                this.visitorImpressionCache.delete(cacheKey);
+              }
+            } catch (err) {
+              console.warn(`[DaemonManager] Failed to load visitor impression:`, err);
+            }
+          }
           await this.sessionManager.startSession(daemonId, participantId, participantName, participantType);
         }
 

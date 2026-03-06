@@ -6,4 +6,6 @@ export { generateDaemon } from "./daemon-generate.js";
 export type { DaemonGenerationResult } from "./daemon-generate.js";
 export { generateDaemonResponse, generateDaemonConversation, generateGroupConversation } from "./daemon-converse.js";
 export type { DaemonResponse, DaemonConversationLine } from "./daemon-converse.js";
+export { expandPrompt } from "./prompt-expand.js";
+export type { ExpandPromptOptions, ExpandPromptResult } from "./prompt-expand.js";
 export { MODEL, FALLBACK_MODEL, getClient, stripJsonFences, sanitizeUserInput } from "./utils.js";

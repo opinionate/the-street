@@ -6,8 +6,5 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "noEmit": true
   },
-  "include": ["src"],
-  "references": [
-    { "path": "../shared" }
-  ]
+  "include": ["src"]
 }

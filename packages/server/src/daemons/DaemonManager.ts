@@ -477,7 +477,7 @@ export class DaemonManager {
               });
             }
             // Persist to DB with AI summarization
-            const summary = turns.map((t) => `${t.role}: ${t.content}`).join("\n").slice(0, 500);
+            const summary = turns.map((t) => `${t.speaker.actorType}: ${t.speech}`).join("\n").slice(0, 500);
             summarizeAndPersistDaemonRelationship(
               daemonId,
               daemon.state.definition.name,
@@ -2373,7 +2373,7 @@ export class DaemonManager {
     for (const [_id, daemon] of this.daemons) {
       if (daemon.isMuted) continue;
 
-      const behaviorType = daemon.behavior.type;
+      const behaviorType = daemon.behavior.type ?? "default";
       let emote: string | null = null;
       let mood: DaemonMood = daemon.state.mood;
 
@@ -2470,7 +2470,7 @@ export class DaemonManager {
     daemon.routineTimer = (40 + Math.random() * 50) * getTimeChattinessFactor(this.lastTimeOfDay);
 
     const time = this.lastTimeOfDay;
-    const type = daemon.behavior.type;
+    const type = daemon.behavior.type ?? "default";
     const routine = this.getRoutineAction(daemon, type, time, players);
     if (!routine) return;
 

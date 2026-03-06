@@ -197,7 +197,7 @@ Does this event match the trigger conditions for this trait?`,
       inferenceLatencyMs: latencyMs,
       payload: {
         eventType: `trigger_classify:${trait.traitId}`,
-        result: answer,
+        details: { result: answer },
       },
     });
 
@@ -260,6 +260,7 @@ Propose a new value for this trait based on the event.`,
       inferenceLatencyMs: latencyMs,
       payload: {
         eventType: `amendment_propose:${trait.traitId}`,
+        details: {},
       },
     });
 

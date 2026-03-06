@@ -66,8 +66,3 @@ export async function uploadAsset(data: Buffer): Promise<UploadResult> {
     isDuplicate: false,
   };
 }
-
-/** Get CDN URL for an asset by content hash */
-export function getAssetUrl(contentHash: string): string {
-  return `${CDN_BASE}/assets/${contentHash}.glb`;
-}

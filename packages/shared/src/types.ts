@@ -283,27 +283,6 @@ export interface ValidationResult {
   errors: ValidationError[];
 }
 
-// --- Platform Primitives ---
-
-export interface ParameterDef {
-  name: string;
-  type: "number" | "string" | "boolean" | "color";
-  default: unknown;
-  min?: number;
-  max?: number;
-  options?: string[];
-}
-
-export interface PlatformPrimitive {
-  id: string; // "std:door", "std:tree_oak", etc.
-  category: string;
-  defaultMesh: string; // content_hash of the default glTF
-  variants: string[];
-  parameters: ParameterDef[];
-  interactions: InteractionType[];
-  defaultRenderCost: number;
-}
-
 // --- User Roles ---
 
 export type UserRole = "user" | "super_admin";
@@ -314,22 +293,6 @@ export interface UserProfile {
   displayName: string;
   role: UserRole;
   avatarDefinition: AvatarDefinition;
-}
-
-// --- Assets ---
-
-export interface AssetRecord {
-  contentHash: string;
-  creatorId: string;
-  creatorPublicKey: string;
-  signature: string;
-  assetType: string;
-  s3Key: string;
-  fileSizeBytes: number;
-  metadata: Record<string, unknown>;
-  dependencies: string[];
-  adoptionCount: number;
-  createdAt: string;
 }
 
 // --- Daemon Intelligence ---
@@ -443,13 +406,6 @@ export interface BudgetStatus {
   rateLimitWindowCallsRemaining: number;
 }
 
-export interface TokenCost {
-  callCount: number;
-  tokensIn: number;
-  tokensOut: number;
-  estimatedCostUSD: number;
-}
-
 export interface InferenceContext {
   systemPrompt: string;
   worldStateContext: WorldStateContext;
@@ -470,14 +426,6 @@ export interface InferenceValidationResult<T> {
 }
 
 // --- Daemon Memory ---
-
-export interface DaemonMemoryStore {
-  daemonId: string;
-  visitorImpressions: Map<UserId, VisitorImpression>;
-  maxVisitorImpressions: number;
-  daemonRelationships: Map<DaemonId, DaemonRelationship>;
-  worldStateContext: WorldStateContext;
-}
 
 export interface VisitorImpression {
   userId: UserId;
@@ -607,27 +555,6 @@ export interface InferenceFailurePayload {
 }
 
 // --- Daemon Creation ---
-
-export interface DaemonCreationDraft {
-  draftId: string;
-  adminId: string;
-  createdAt: timestamp;
-  updatedAt: timestamp;
-
-  characterUploadId?: string;
-  emoteUploadIds: string[];
-
-  adminPrompt?: string;
-  expandedFields?: ExpandedManifestFields;
-  expansionStatus: "none" | "processing" | "ready" | "failed";
-
-  maxConversationTurns: number;
-  maxDailyCalls: number;
-  dailyBudgetResetsAt: string;
-  rememberVisitors: boolean;
-
-  status: "draft" | "finalized" | "abandoned";
-}
 
 export interface ExpandedManifestFields {
   name: string;

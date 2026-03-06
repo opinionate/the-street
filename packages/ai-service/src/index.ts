@@ -1,6 +1,4 @@
 export { generate } from "./generate.js";
-export { routeMesh } from "./mesh-router.js";
-export type { MeshRoute, ArchetypeRoute, NovelRoute } from "./mesh-router.js";
 export { buildSystemPrompt } from "./system-prompt.js";
 export { generateDaemon } from "./daemon-generate.js";
 export type { DaemonGenerationResult } from "./daemon-generate.js";

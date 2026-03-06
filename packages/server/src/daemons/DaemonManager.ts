@@ -8,6 +8,8 @@ import type {
   Vector3,
 } from "@the-street/shared";
 import { V1_CONFIG, getStreetPosition } from "@the-street/shared";
+import { WorldEventBus, EventPriority, type WorldEvent } from "./WorldEventBus.js";
+import { DaemonBehaviorTree, type BehaviorCallbacks, type BehaviorState } from "./DaemonBehaviorTree.js";
 
 interface PlayerInfo {
   userId: string;
@@ -98,6 +100,8 @@ interface DaemonInstance {
   // Control
   isMuted: boolean;
   isRecalled: boolean;
+  // Behavior tree
+  behaviorTree: DaemonBehaviorTree;
 }
 
 type BroadcastFn = (type: string, data: unknown) => void;
@@ -187,6 +191,10 @@ export class DaemonManager {
   private crowdReactionCooldown = 0;
   private compactionTimer = 0;
   private consecutiveAiFailures = 0;
+  // Event-driven behavior tree
+  private eventBus = new WorldEventBus();
+  private ambientTickTimer = 0;
+  private behaviorTreeTickTimer = 0;
 
   constructor(
     broadcast: BroadcastFn,
@@ -194,6 +202,77 @@ export class DaemonManager {
   ) {
     this.broadcast = broadcast;
     this.sendToClient = sendToClient;
+  }
+
+  /** Create behavior tree callbacks bound to this manager instance. */
+  private createBehaviorCallbacks(): BehaviorCallbacks {
+    return {
+      onEnterIdle: (_daemonId: string) => {
+        // Daemon returned to idle — ambient behaviors resume via ambient tick
+      },
+      onEnterAttention: (daemonId: string, event: WorldEvent) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon || daemon.isMuted) return;
+        // Face the source of attention
+        if (event.position) {
+          const dx = event.position.x - daemon.state.currentPosition.x;
+          const dz = event.position.z - daemon.state.currentPosition.z;
+          daemon.state.currentRotation = Math.atan2(dx, dz);
+          this.broadcast("daemon_move", {
+            type: "daemon_move" as const,
+            daemonId,
+            position: daemon.state.currentPosition,
+            rotation: daemon.state.currentRotation,
+            action: daemon.state.currentAction,
+          });
+        }
+      },
+      onStartConversation: (daemonId: string, participantId: string, participantName: string, participantType: "visitor" | "daemon", speech?: string) => {
+        if (participantType === "visitor") {
+          // Route to existing handleInteract which manages AI, memory, relationships
+          this.handleInteract(daemonId, participantId, "", speech, participantName);
+        }
+        // Daemon-daemon conversations handled separately via existing tickDaemonConversations
+      },
+      onBusyResponse: (daemonId: string, _speakerId: string, speakerName: string) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon || daemon.isMuted) return;
+        const name = daemon.state.definition.name;
+        const busyMessages = [
+          `*${name} glances over briefly* Sorry, I'm in the middle of something.`,
+          `*${name} nods at ${speakerName}* One moment, please.`,
+          `Hang on, ${speakerName} — talking to someone right now.`,
+        ];
+        this.broadcastDaemonChat(daemon, pick(busyMessages));
+      },
+      onPostInteraction: (daemonId: string, context) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon) return;
+        // Fire summarization and relationship hooks
+        if (context.participantType === "visitor") {
+          this.persistRelationship(daemonId, context.participantId).catch(() => {});
+        }
+        // Reset action to idle visually
+        daemon.state.currentAction = "idle";
+        daemon.state.targetPlayerId = undefined;
+        daemon.state.targetDaemonId = undefined;
+      },
+      isKnownVisitor: (daemonId: string, visitorId: string) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon) return false;
+        const rel = daemon.relationships.get(visitorId);
+        return !!rel && rel.interactionCount > 0;
+      },
+      getDistance: (a: Vector3, b: Vector3) => this.distance(a, b),
+      getDaemonPosition: (daemonId: string) => {
+        const daemon = this.daemons.get(daemonId);
+        return daemon ? daemon.state.currentPosition : null;
+      },
+      getDaemonRadius: (daemonId: string) => {
+        const daemon = this.daemons.get(daemonId);
+        return daemon ? daemon.behavior.interactionRadius : 10;
+      },
+    };
   }
 
   async loadDaemons(plotUuids: string[]): Promise<void> {
@@ -253,6 +332,15 @@ export class DaemonManager {
   }
 
   private createInstance(state: DaemonState, behavior: DaemonBehavior): DaemonInstance {
+    const bt = new DaemonBehaviorTree(state.daemonId, this.createBehaviorCallbacks());
+
+    // Subscribe this daemon to the event bus
+    this.eventBus.subscribe(state.daemonId, (event: WorldEvent) => {
+      const d = this.daemons.get(state.daemonId);
+      if (!d || d.isMuted) return;
+      bt.handleEvent(event);
+    });
+
     return {
       state,
       behavior,
@@ -285,11 +373,23 @@ export class DaemonManager {
       lastChatToPlayer: new Map(),
       isMuted: false,
       isRecalled: false,
+      behaviorTree: bt,
     };
   }
 
   getDaemonStates(): DaemonState[] {
     return Array.from(this.daemons.values()).map((d) => d.state);
+  }
+
+  /** Get behavior tree state for a daemon (for observability). */
+  getDaemonBehaviorState(daemonId: string): BehaviorState | null {
+    const daemon = this.daemons.get(daemonId);
+    return daemon ? daemon.behaviorTree.state : null;
+  }
+
+  /** Get the world event bus (for external event emission). */
+  getEventBus(): WorldEventBus {
+    return this.eventBus;
   }
 
   /** Set world objects so daemons can notice nearby items */
@@ -637,6 +737,9 @@ export class DaemonManager {
     const daemon = this.daemons.get(id);
     const removedName = daemon?.state.definition.name || "someone";
 
+    // Unsubscribe from event bus
+    this.eventBus.unsubscribe(id);
+
     this.daemons.delete(id);
     this.broadcast("daemon_despawn", {
       type: "daemon_despawn" as const,
@@ -654,6 +757,8 @@ export class DaemonManager {
     daemon.isRecalled = true;
     daemon.roamTarget = null;
     daemon.isReturningHome = true;
+    // Force behavior tree back to idle (end any conversation)
+    daemon.behaviorTree.forceIdle();
   }
 
   /** Toggle roaming for a daemon */
@@ -678,6 +783,16 @@ export class DaemonManager {
 
   /** Called when a player leaves the world — daemons who know them react */
   onPlayerLeave(playerId: string, playerName: string, position: Vector3): void {
+    // Emit departure event to the event bus
+    this.eventBus.emit({
+      type: "visitor_departure",
+      priority: EventPriority.Ambient,
+      sourceId: playerId,
+      sourceName: playerName,
+      position,
+      timestamp: Date.now(),
+    });
+
     let reactors = 0;
 
     for (const [, daemon] of this.daemons) {
@@ -790,6 +905,16 @@ export class DaemonManager {
 
   /** Called when a world event happens near daemons (object placed, player runs past, etc.) */
   onWorldEvent(eventType: "object_placed" | "object_removed" | "player_sprint", position: Vector3, playerName?: string): void {
+    // Emit to event bus
+    this.eventBus.emit({
+      type: eventType,
+      priority: EventPriority.Ambient,
+      sourceId: playerName || "world",
+      sourceName: playerName,
+      position,
+      timestamp: Date.now(),
+    });
+
     for (const [_id, daemon] of this.daemons) {
       if (daemon.isMuted) continue;
       if (daemon.state.currentAction !== "idle") continue;
@@ -834,6 +959,17 @@ export class DaemonManager {
 
   /** Called when a player sends a chat message — daemons may overhear and react */
   onPlayerChat(playerId: string, playerName: string, content: string, position: Vector3): void {
+    // Emit speech event to the event bus for behavior tree processing
+    this.eventBus.emit({
+      type: "visitor_speech",
+      priority: EventPriority.NewSpeech,
+      sourceId: playerId,
+      sourceName: playerName,
+      position,
+      speech: content,
+      timestamp: Date.now(),
+    });
+
     const now = Date.now();
     const contentLower = content.toLowerCase();
 
@@ -975,6 +1111,8 @@ export class DaemonManager {
   }
 
   tick(dt: number, players: PlayerInfo[]): void {
+    const dtMs = dt * 1000;
+
     // Memory compaction timer (every 10 minutes)
     this.compactionTimer = (this.compactionTimer || 0) + dt;
     if (this.compactionTimer >= 600) {
@@ -988,43 +1126,121 @@ export class DaemonManager {
     if (timeOfDay !== this.lastTimeOfDay) {
       this.onTimeOfDayChange(this.lastTimeOfDay, timeOfDay);
       this.lastTimeOfDay = timeOfDay;
+      // Emit time change event
+      this.eventBus.emit({
+        type: "time_change",
+        priority: EventPriority.Ambient,
+        sourceId: "system",
+        metadata: { from: this.lastTimeOfDay, to: timeOfDay },
+        timestamp: Date.now(),
+      });
     }
 
     // Track player movement patterns
     this.updatePlayerMovement(dt, players);
 
-    for (const [_daemonId, daemon] of this.daemons) {
-      // Update mood
-      this.tickMood(daemon, dt);
+    // Emit proximity events for players near daemons
+    this.emitProximityEvents(players);
 
-      // Attention system — idle daemons look at nearby activity
-      if (daemon.state.currentAction === "idle" && !daemon.isReturningHome) {
-        this.tickAttention(daemon, dt, players);
+    // Tick behavior trees for active states (attention/post_interaction transitions)
+    this.behaviorTreeTickTimer += dtMs;
+    if (this.behaviorTreeTickTimer >= 500) { // Check active state transitions every 500ms
+      for (const [, daemon] of this.daemons) {
+        if (daemon.isMuted) continue;
+        const btState = daemon.behaviorTree.state;
+        if (btState === "attention" || btState === "post_interaction") {
+          daemon.behaviorTree.tick(this.behaviorTreeTickTimer);
+        }
+      }
+      this.behaviorTreeTickTimer = 0;
+    }
+
+    // Low-frequency ambient tick (10s) for idle daemon behaviors
+    this.ambientTickTimer += dt;
+    if (this.ambientTickTimer >= 10) {
+      const ambientDt = this.ambientTickTimer;
+      this.ambientTickTimer = 0;
+
+      // Emit ambient tick event
+      this.eventBus.emit({
+        type: "ambient_tick",
+        priority: EventPriority.Ambient,
+        sourceId: "system",
+        timestamp: Date.now(),
+      });
+
+      for (const [, daemon] of this.daemons) {
+        if (daemon.isMuted) continue;
+
+        // Only run ambient behaviors for idle daemons
+        if (daemon.behaviorTree.state === "idle") {
+          // Mood decay
+          this.tickMood(daemon, ambientDt);
+
+          // Attention system — idle daemons look at nearby activity
+          if (daemon.state.currentAction === "idle" && !daemon.isReturningHome) {
+            this.tickAttention(daemon, ambientDt, players);
+          }
+
+          // Idle chatter
+          this.tickIdleChatter(daemon, ambientDt, players);
+
+          // Daily routine actions
+          this.tickDailyRoutine(daemon, ambientDt, players);
+
+          // Territorial awareness
+          this.tickTerritory(daemon, ambientDt);
+
+          // Spontaneous personality-based gestures
+          this.tickSpontaneousGestures(daemon, ambientDt, players);
+
+          // Thought bubbles
+          this.tickThoughts(daemon, ambientDt, players);
+
+          // Missing players
+          this.tickMissingPlayers(daemon, ambientDt);
+
+          // Secret sharing
+          this.tickSecretSharing(daemon, ambientDt, players);
+
+          // Proactive engagement
+          this.tickProactiveEngagement(daemon, ambientDt, players);
+
+          // Reputation announcements
+          this.tickReputationAnnouncements(daemon, ambientDt, players);
+
+          // Movement pattern reactions
+          this.tickMovementReactions(daemon, ambientDt, players);
+        }
+
+        // Daemon-daemon conversations (tick even if not idle — they have their own state)
+        this.tickDaemonConversations(daemon, ambientDt);
       }
 
-      // Behavior-specific logic
+      // Global ambient systems
+      this.tickCrowdAwareness(ambientDt, players);
+      this.tickEmotionalContagion(ambientDt);
+      this.detectDaemonProximity();
+      this.tickGatherings(ambientDt, players);
+      this.tickChallenges(ambientDt, players);
+      this.tickEvents(ambientDt, players);
+    }
+
+    // These run every tick regardless (movement is continuous)
+    for (const [, daemon] of this.daemons) {
+      if (daemon.isMuted) continue;
+
+      // Behavior-specific ticking (greeting proximity checks, etc.)
       switch (daemon.behavior.type) {
-        case "greeter":
-          this.tickGreeter(daemon, dt, players);
-          break;
-        case "shopkeeper":
-          this.tickShopkeeper(daemon, dt, players);
-          break;
-        case "guide":
-          this.tickGuide(daemon, dt, players);
-          break;
-        case "guard":
-          this.tickGuard(daemon, dt, players);
-          break;
-        case "roamer":
-          this.tickRoamer(daemon, dt, players);
-          break;
-        case "socialite":
-          this.tickSocialite(daemon, dt, players);
-          break;
+        case "greeter": this.tickGreeter(daemon, dt, players); break;
+        case "shopkeeper": this.tickShopkeeper(daemon, dt, players); break;
+        case "guide": this.tickGuide(daemon, dt, players); break;
+        case "guard": this.tickGuard(daemon, dt, players); break;
+        case "roamer": this.tickRoamer(daemon, dt, players); break;
+        case "socialite": this.tickSocialite(daemon, dt, players); break;
       }
 
-      // Free roaming (for all types that have it enabled)
+      // Free roaming (continuous movement)
       if (daemon.behavior.roamingEnabled && !daemon.isRecalled) {
         this.tickRoaming(daemon, dt);
       }
@@ -1033,67 +1249,57 @@ export class DaemonManager {
       if (daemon.isReturningHome) {
         this.tickReturnHome(daemon, dt);
       }
-
-      // Idle chatter (all types)
-      this.tickIdleChatter(daemon, dt, players);
-
-      // Daily routine actions (time-of-day specific behaviors)
-      this.tickDailyRoutine(daemon, dt, players);
-
-      // Proactive engagement — unsolicited remarks to nearby players
-      this.tickProactiveEngagement(daemon, dt, players);
-
-      // Reputation announcements — gossip about players to other players
-      this.tickReputationAnnouncements(daemon, dt, players);
-
-      // Territorial awareness — daemons protect and prefer their turf
-      this.tickTerritory(daemon, dt);
-
-      // Movement pattern reactions — notice sprinting, lurking, hovering
-      this.tickMovementReactions(daemon, dt, players);
-
-      // Spontaneous personality-based gestures
-      this.tickSpontaneousGestures(daemon, dt, players);
-
-      // Thought bubbles — visible internal state
-      this.tickThoughts(daemon, dt, players);
-
-      // Missing players — wonder about friends who haven't been around
-      this.tickMissingPlayers(daemon, dt);
-
-      // Secret sharing — whisper gossip to trusted players
-      this.tickSecretSharing(daemon, dt, players);
-
-      // Daemon-daemon conversations
-      this.tickDaemonConversations(daemon, dt);
     }
-
-    // Crowd awareness — daemons react to player count changes
-    this.tickCrowdAwareness(dt, players);
-
-    // Emotional contagion — moods spread between nearby daemons
-    this.tickEmotionalContagion(dt);
-
-    // Detect daemon-daemon proximity for new conversations
-    this.detectDaemonProximity();
-
-    // Detect and animate daemon gatherings (3+ idle daemons nearby)
-    this.tickGatherings(dt, players);
-
-    // Daemon challenges — fun competitions between daemons
-    this.tickChallenges(dt, players);
-
-    // Scheduled mini-events
-    this.tickEvents(dt, players);
 
     // Process AI conversation queue
     this.processAiQueue();
+  }
+
+  /** Emit proximity events for players near daemons. */
+  private emitProximityEvents(players: PlayerInfo[]): void {
+    for (const player of players) {
+      for (const [daemonId, daemon] of this.daemons) {
+        if (daemon.isMuted) continue;
+        if (daemon.behaviorTree.state !== "idle") continue;
+
+        const dist = this.distance(player.position, daemon.state.currentPosition);
+        if (dist > daemon.behavior.interactionRadius) continue;
+
+        const isKnown = daemon.relationships.has(player.userId) &&
+          (daemon.relationships.get(player.userId)!.interactionCount > 0);
+
+        this.eventBus.emit({
+          type: "visitor_proximity",
+          priority: isKnown ? EventPriority.KnownVisitorReturning : EventPriority.UnknownVisitor,
+          sourceId: player.userId,
+          sourceName: player.displayName,
+          targetDaemonId: daemonId,
+          position: player.position,
+          timestamp: Date.now(),
+        });
+      }
+    }
   }
 
   /** Handle player interacting with a daemon — triggers AI conversation */
   handleInteract(daemonId: string, playerId: string, playerSessionId: string, playerMessage?: string, playerName?: string): void {
     const daemon = this.daemons.get(daemonId);
     if (!daemon || daemon.isMuted) return;
+
+    // If the behavior tree is idle, emit a speech event to trigger state transition
+    if (daemon.behaviorTree.state === "idle" && playerMessage) {
+      this.eventBus.emit({
+        type: "visitor_speech",
+        priority: EventPriority.ActiveParticipantSpeech,
+        sourceId: playerId,
+        sourceName: playerName,
+        targetDaemonId: daemonId,
+        speech: playerMessage,
+        timestamp: Date.now(),
+      });
+      // The behavior tree will call back into handleInteract via onStartConversation
+      return;
+    }
 
     // Rate limit AI calls
     const now = Date.now();
@@ -1245,16 +1451,17 @@ export class DaemonManager {
 
         this.broadcastDaemonChat(daemon, fullMessage, playerId);
 
-        // Return to idle after a delay
+        // End conversation via behavior tree after a delay
         setTimeout(() => {
           if (daemon.state.targetPlayerId === playerId) {
-            daemon.state.currentAction = "idle";
-            daemon.state.targetPlayerId = undefined;
+            daemon.behaviorTree.endConversation();
           }
         }, 4000);
       } catch (err) {
         console.error(`AI conversation failed for daemon ${daemonId}:`, err);
         this.sendCannedResponse(daemon, playerId);
+        // End conversation on failure too
+        daemon.behaviorTree.endConversation();
       }
     });
   }
@@ -1287,8 +1494,7 @@ export class DaemonManager {
         this.broadcastDaemonChat(daemon, response, playerId);
 
         setTimeout(() => {
-          daemon.state.currentAction = "idle";
-          daemon.state.targetPlayerId = undefined;
+          daemon.behaviorTree.endConversation();
         }, 3000);
       }
     } else if (behavior.greetingMessage) {

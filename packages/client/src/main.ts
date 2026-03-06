@@ -20,6 +20,7 @@ import { AuthManager } from "./auth/AuthManager.js";
 import { LoginUI } from "./ui/LoginUI.js";
 import { AdminPanel } from "./ui/AdminPanel.js";
 import { DaemonCreationPanel } from "./ui/DaemonCreationPanel.js";
+import { DaemonPlacementPanel } from "./ui/DaemonPlacementPanel.js";
 import { AnimationPanel } from "./ui/AnimationPanel.js";
 import { AnimationConverterTool } from "./ui/AnimationConverterTool.js";
 import { DefaultModelUploader } from "./ui/DefaultModelUploader.js";
@@ -90,6 +91,7 @@ async function init() {
   // AdminPanel created early so inputManager can reference it
   const adminPanel = new AdminPanel();
   const daemonCreationPanel = new DaemonCreationPanel();
+  const daemonPlacementPanel = new DaemonPlacementPanel();
 
   // Track generated objects
   let objectCounter = 0;
@@ -118,6 +120,7 @@ async function init() {
     daemonPanel.isVisible() ||
     adminPanel.isVisible ||
     daemonCreationPanel.isVisible() ||
+    daemonPlacementPanel.isVisible() ||
     daemonChatUI.isVisible();
 
   // Build button (B key) / Gallery (G key)
@@ -133,7 +136,8 @@ async function init() {
       const myId = avatarManager.localPlayerId || "";
       if (avatarManager.isEmoting(myId)) {
         avatarManager.stopEmote(myId);
-      } else if (daemonCreationPanel.isVisible()) { daemonCreationPanel.hide(); }
+      } else if (daemonPlacementPanel.isVisible()) { daemonPlacementPanel.hide(); }
+      else if (daemonCreationPanel.isVisible()) { daemonCreationPanel.hide(); }
       else if (avatarPanel.isVisible()) { avatarPanel.hide(); }
       else if (daemonPanel.isVisible()) { daemonPanel.hide(); }
       else if (adminPanel.isVisible) { adminPanel.hide(); }
@@ -924,6 +928,84 @@ async function init() {
     }
   };
 
+  // --- Daemon Placement Panel ---
+  daemonPlacementPanel.onListPlaceable = async () => {
+    const res = await authFetch(`${apiUrl}/api/daemons/placeable`);
+    if (!res.ok) throw new Error("Failed to list placeable daemons");
+    const data = await res.json();
+    return data.daemons;
+  };
+
+  daemonPlacementPanel.onListPlots = async () => {
+    const res = await authFetch(`${apiUrl}/api/plots`);
+    if (!res.ok) throw new Error("Failed to list plots");
+    const data = await res.json();
+    return data.plots.map((p: PlotSnapshot) => ({
+      uuid: p.uuid,
+      position: p.position,
+      ownerName: p.ownerName,
+      neighborhood: p.neighborhood,
+      ring: p.ring,
+    }));
+  };
+
+  daemonPlacementPanel.onGetPlacement = async (daemonId: string) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/placement`);
+    if (!res.ok) throw new Error("Failed to get placement");
+    const data = await res.json();
+    return data.placement;
+  };
+
+  daemonPlacementPanel.onSetPlacement = async (daemonId, placement) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/placement`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(placement),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
+      throw new Error(err.error || "Placement failed");
+    }
+    const data = await res.json();
+    return data.placement;
+  };
+
+  daemonPlacementPanel.onUpdatePlacement = async (daemonId, placement) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/placement`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(placement),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
+      throw new Error(err.error || "Update failed");
+    }
+    const data = await res.json();
+    return data.placement;
+  };
+
+  daemonPlacementPanel.onActivate = async (daemonId: string) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/activate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
+      throw new Error(err.error || "Activation failed");
+    }
+  };
+
+  daemonPlacementPanel.onDeactivate = async (daemonId: string) => {
+    const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/deactivate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Failed" }));
+      throw new Error(err.error || "Deactivation failed");
+    }
+  };
+
   // Fetch role from server if not received via WebSocket yet
   if (authManager && userRole === "user") {
     try {
@@ -1003,6 +1085,30 @@ async function init() {
     });
     daemonCreateSection.appendChild(daemonCreateBtn);
     adminPanel.appendSection(daemonCreateSection);
+
+    // Daemon placement button in admin panel
+    const daemonPlaceSection = document.createElement("div");
+    daemonPlaceSection.style.cssText = `
+      padding: 4px 20px 12px 20px;
+    `;
+    const daemonPlaceBtn = document.createElement("button");
+    daemonPlaceBtn.textContent = "Place Daemon in World";
+    daemonPlaceBtn.style.cssText = `
+      background: rgba(0, 200, 120, 0.15);
+      border: 1px solid rgba(0, 200, 120, 0.4);
+      border-radius: 6px;
+      color: #00c878;
+      font-size: 13px;
+      padding: 8px 16px;
+      cursor: pointer;
+      width: 100%;
+      font-family: system-ui, sans-serif;
+    `;
+    daemonPlaceBtn.addEventListener("click", () => {
+      daemonPlacementPanel.toggle();
+    });
+    daemonPlaceSection.appendChild(daemonPlaceBtn);
+    adminPanel.appendSection(daemonPlaceSection);
   }
 
   // In dev mode (no auth), always show admin badge + tools
@@ -1066,6 +1172,30 @@ async function init() {
     });
     daemonCreateSectionDev.appendChild(daemonCreateBtnDev);
     adminPanel.appendSection(daemonCreateSectionDev);
+
+    // Daemon placement button in admin panel (dev mode)
+    const daemonPlaceSectionDev = document.createElement("div");
+    daemonPlaceSectionDev.style.cssText = `
+      padding: 4px 20px 12px 20px;
+    `;
+    const daemonPlaceBtnDev = document.createElement("button");
+    daemonPlaceBtnDev.textContent = "Place Daemon in World";
+    daemonPlaceBtnDev.style.cssText = `
+      background: rgba(0, 200, 120, 0.15);
+      border: 1px solid rgba(0, 200, 120, 0.4);
+      border-radius: 6px;
+      color: #00c878;
+      font-size: 13px;
+      padding: 8px 16px;
+      cursor: pointer;
+      width: 100%;
+      font-family: system-ui, sans-serif;
+    `;
+    daemonPlaceBtnDev.addEventListener("click", () => {
+      daemonPlacementPanel.toggle();
+    });
+    daemonPlaceSectionDev.appendChild(daemonPlaceBtnDev);
+    adminPanel.appendSection(daemonPlaceSectionDev);
   }
 
   if (authManager) {

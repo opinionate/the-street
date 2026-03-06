@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth, requireRole, isAdmin, type AuthedRequest } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rate-limit.js";
-import { RATE_LIMITS } from "@the-street/shared";
+import { RATE_LIMITS, getPlotPosition, V1_CONFIG } from "@the-street/shared";
 import type { PersonalityManifest, LogEntryType } from "@the-street/shared";
 import { getPool } from "../database/pool.js";
 import { getActiveDaemonManager } from "../rooms/StreetRoom.js";
@@ -1105,6 +1105,420 @@ router.get(
     } catch (err) {
       console.error("GET /api/daemons/:id/token-summary error:", err);
       res.status(500).json({ error: "Failed to get token summary" });
+    }
+  },
+);
+
+// ==================== World Placement API ====================
+
+// GET /api/daemons/placeable — List finalized daemons without active placements (admin only)
+router.get(
+  "/placeable",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const pool = getPool();
+      const { rows } = await pool.query(
+        `SELECT d.id, d.name, d.description, d.is_active,
+                dp.id as placement_id, dp.active as placement_active
+         FROM daemons d
+         LEFT JOIN daemon_placements dp ON dp.daemon_id = d.id
+         WHERE dp.id IS NULL
+         ORDER BY d.created_at DESC`,
+      );
+
+      res.json({ daemons: rows });
+    } catch (err) {
+      console.error("GET /api/daemons/placeable error:", err);
+      res.status(500).json({ error: "Failed to list placeable daemons" });
+    }
+  },
+);
+
+// GET /api/daemons/:id/placement — Get placement for a daemon
+router.get(
+  "/:id/placement",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const pool = getPool();
+      const { rows } = await pool.query(
+        `SELECT dp.*, p.position as plot_position, p.neighborhood, p.ring
+         FROM daemon_placements dp
+         JOIN plots p ON p.uuid = dp.plot_uuid
+         WHERE dp.daemon_id = $1`,
+        [req.params.id],
+      );
+
+      if (rows.length === 0) {
+        res.json({ placement: null });
+        return;
+      }
+
+      const row = rows[0];
+      res.json({
+        placement: {
+          daemonId: row.daemon_id,
+          plotUUID: row.plot_uuid,
+          spawnPoint: { x: row.spawn_x, y: row.spawn_y, z: row.spawn_z },
+          facingDirection: row.facing_direction,
+          roamRadius: row.roam_radius,
+          interactionRange: row.interaction_range,
+          active: row.active,
+        },
+      });
+    } catch (err) {
+      console.error("GET /api/daemons/:id/placement error:", err);
+      res.status(500).json({ error: "Failed to get placement" });
+    }
+  },
+);
+
+// POST /api/daemons/:id/placement — Create placement for a daemon
+router.post(
+  "/:id/placement",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const daemonId = req.params.id as string;
+      const { plotUUID, spawnPoint, facingDirection, roamRadius, interactionRange } = req.body;
+
+      if (!plotUUID || !spawnPoint) {
+        res.status(400).json({ error: "plotUUID and spawnPoint are required" });
+        return;
+      }
+
+      const roam = roamRadius ?? 5;
+      const interaction = interactionRange ?? 10;
+
+      if (roam > interaction) {
+        res.status(400).json({ error: "roamRadius must be <= interactionRange" });
+        return;
+      }
+
+      const pool = getPool();
+
+      // Verify daemon exists
+      const { rows: daemonRows } = await pool.query(
+        "SELECT id FROM daemons WHERE id = $1",
+        [daemonId],
+      );
+      if (daemonRows.length === 0) {
+        res.status(404).json({ error: "Daemon not found" });
+        return;
+      }
+
+      // Verify plot exists and get bounds for spawn point validation
+      const { rows: plotRows } = await pool.query(
+        "SELECT uuid, position FROM plots WHERE uuid = $1",
+        [plotUUID],
+      );
+      if (plotRows.length === 0) {
+        res.status(404).json({ error: "Plot not found" });
+        return;
+      }
+
+      // Check spawn point is within plot bounds
+      const plotPlacement = getPlotPosition(plotRows[0].position, V1_CONFIG);
+      const halfW = plotPlacement.bounds.width / 2;
+      const halfD = plotPlacement.bounds.depth / 2;
+      const cos = Math.cos(plotPlacement.rotation);
+      const sin = Math.sin(plotPlacement.rotation);
+      // Transform spawn point to plot-local coordinates
+      const dx = spawnPoint.x - plotPlacement.position.x;
+      const dz = spawnPoint.z - plotPlacement.position.z;
+      const localX = dx * cos + dz * sin;
+      const localZ = -dx * sin + dz * cos;
+      if (Math.abs(localX) > halfW || Math.abs(localZ) > halfD) {
+        res.status(400).json({ error: "spawnPoint is outside plot bounds" });
+        return;
+      }
+
+      // Check for existing placement
+      const { rows: existing } = await pool.query(
+        "SELECT id FROM daemon_placements WHERE daemon_id = $1",
+        [daemonId],
+      );
+      if (existing.length > 0) {
+        res.status(409).json({ error: "Daemon already has a placement. Use PUT to update." });
+        return;
+      }
+
+      const { rows: inserted } = await pool.query(
+        `INSERT INTO daemon_placements
+          (daemon_id, plot_uuid, spawn_x, spawn_y, spawn_z,
+           facing_direction, roam_radius, interaction_range)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [
+          daemonId, plotUUID,
+          spawnPoint.x, spawnPoint.y ?? 0, spawnPoint.z,
+          facingDirection ?? 0, roam, interaction,
+        ],
+      );
+
+      const row = inserted[0];
+      res.json({
+        placement: {
+          daemonId: row.daemon_id,
+          plotUUID: row.plot_uuid,
+          spawnPoint: { x: row.spawn_x, y: row.spawn_y, z: row.spawn_z },
+          facingDirection: row.facing_direction,
+          roamRadius: row.roam_radius,
+          interactionRange: row.interaction_range,
+          active: row.active,
+        },
+      });
+    } catch (err) {
+      console.error("POST /api/daemons/:id/placement error:", err);
+      res.status(500).json({ error: "Failed to create placement" });
+    }
+  },
+);
+
+// PUT /api/daemons/:id/placement — Update placement for a daemon
+router.put(
+  "/:id/placement",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const daemonId = req.params.id as string;
+      const { plotUUID, spawnPoint, facingDirection, roamRadius, interactionRange } = req.body;
+
+      const pool = getPool();
+
+      // Load existing placement
+      const { rows: existing } = await pool.query(
+        "SELECT * FROM daemon_placements WHERE daemon_id = $1",
+        [daemonId],
+      );
+      if (existing.length === 0) {
+        res.status(404).json({ error: "No placement found. Use POST to create." });
+        return;
+      }
+
+      const current = existing[0];
+      const newPlotUUID = plotUUID ?? current.plot_uuid;
+      const newSpawnX = spawnPoint?.x ?? current.spawn_x;
+      const newSpawnY = spawnPoint?.y ?? current.spawn_y;
+      const newSpawnZ = spawnPoint?.z ?? current.spawn_z;
+      const newFacing = facingDirection ?? current.facing_direction;
+      const newRoam = roamRadius ?? current.roam_radius;
+      const newInteraction = interactionRange ?? current.interaction_range;
+
+      if (newRoam > newInteraction) {
+        res.status(400).json({ error: "roamRadius must be <= interactionRange" });
+        return;
+      }
+
+      // Validate spawn point within plot bounds if plot or spawn changed
+      if (plotUUID || spawnPoint) {
+        const { rows: plotRows } = await pool.query(
+          "SELECT uuid, position FROM plots WHERE uuid = $1",
+          [newPlotUUID],
+        );
+        if (plotRows.length === 0) {
+          res.status(404).json({ error: "Plot not found" });
+          return;
+        }
+
+        const plotPlacement = getPlotPosition(plotRows[0].position, V1_CONFIG);
+        const halfW = plotPlacement.bounds.width / 2;
+        const halfD = plotPlacement.bounds.depth / 2;
+        const cos = Math.cos(plotPlacement.rotation);
+        const sin = Math.sin(plotPlacement.rotation);
+        const dx = newSpawnX - plotPlacement.position.x;
+        const dz = newSpawnZ - plotPlacement.position.z;
+        const localX = dx * cos + dz * sin;
+        const localZ = -dx * sin + dz * cos;
+        if (Math.abs(localX) > halfW || Math.abs(localZ) > halfD) {
+          res.status(400).json({ error: "spawnPoint is outside plot bounds" });
+          return;
+        }
+      }
+
+      const { rows: updated } = await pool.query(
+        `UPDATE daemon_placements
+         SET plot_uuid = $1, spawn_x = $2, spawn_y = $3, spawn_z = $4,
+             facing_direction = $5, roam_radius = $6, interaction_range = $7,
+             updated_at = now()
+         WHERE daemon_id = $8
+         RETURNING *`,
+        [newPlotUUID, newSpawnX, newSpawnY, newSpawnZ, newFacing, newRoam, newInteraction, daemonId],
+      );
+
+      const row = updated[0];
+      res.json({
+        placement: {
+          daemonId: row.daemon_id,
+          plotUUID: row.plot_uuid,
+          spawnPoint: { x: row.spawn_x, y: row.spawn_y, z: row.spawn_z },
+          facingDirection: row.facing_direction,
+          roamRadius: row.roam_radius,
+          interactionRange: row.interaction_range,
+          active: row.active,
+        },
+      });
+    } catch (err) {
+      console.error("PUT /api/daemons/:id/placement error:", err);
+      res.status(500).json({ error: "Failed to update placement" });
+    }
+  },
+);
+
+// POST /api/daemons/:id/activate — Activate daemon (appears in world)
+router.post(
+  "/:id/activate",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const daemonId = req.params.id as string;
+      const pool = getPool();
+
+      // Must have a placement
+      const { rows: placementRows } = await pool.query(
+        "SELECT * FROM daemon_placements WHERE daemon_id = $1",
+        [daemonId],
+      );
+      if (placementRows.length === 0) {
+        res.status(400).json({ error: "Daemon must have a placement before activation" });
+        return;
+      }
+
+      const placement = placementRows[0];
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Set daemon active and update position to spawn point
+        await client.query(
+          `UPDATE daemons
+           SET is_active = true, plot_uuid = $1,
+               position_x = $2, position_y = $3, position_z = $4,
+               rotation = $5
+           WHERE id = $6`,
+          [
+            placement.plot_uuid,
+            placement.spawn_x, placement.spawn_y, placement.spawn_z,
+            placement.facing_direction, daemonId,
+          ],
+        );
+
+        // Mark placement as active
+        await client.query(
+          "UPDATE daemon_placements SET active = true, updated_at = now() WHERE daemon_id = $1",
+          [daemonId],
+        );
+
+        await client.query("COMMIT");
+      } catch (txErr) {
+        await client.query("ROLLBACK");
+        throw txErr;
+      } finally {
+        client.release();
+      }
+
+      // Notify DaemonManager to spawn in world
+      const dm = getActiveDaemonManager();
+      if (dm) {
+        const { rows: daemonRows } = await pool.query(
+          "SELECT * FROM daemons WHERE id = $1",
+          [daemonId],
+        );
+        if (daemonRows.length > 0) {
+          const d = daemonRows[0];
+          dm.addDaemon(d.id, d.daemon_definition, d.behavior);
+        }
+      }
+
+      res.json({ success: true, active: true });
+    } catch (err) {
+      console.error("POST /api/daemons/:id/activate error:", err);
+      res.status(500).json({ error: "Failed to activate daemon" });
+    }
+  },
+);
+
+// POST /api/daemons/:id/deactivate — Deactivate daemon (remove from world, preserve data)
+router.post(
+  "/:id/deactivate",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const daemonId = req.params.id as string;
+      const pool = getPool();
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Deactivate daemon
+        await client.query(
+          "UPDATE daemons SET is_active = false WHERE id = $1",
+          [daemonId],
+        );
+
+        // Mark placement as inactive
+        await client.query(
+          "UPDATE daemon_placements SET active = false, updated_at = now() WHERE daemon_id = $1",
+          [daemonId],
+        );
+
+        await client.query("COMMIT");
+      } catch (txErr) {
+        await client.query("ROLLBACK");
+        throw txErr;
+      } finally {
+        client.release();
+      }
+
+      // Notify DaemonManager to remove from world
+      const dm = getActiveDaemonManager();
+      if (dm) {
+        dm.removeDaemon(daemonId);
+      }
+
+      res.json({ success: true, active: false });
+    } catch (err) {
+      console.error("POST /api/daemons/:id/deactivate error:", err);
+      res.status(500).json({ error: "Failed to deactivate daemon" });
     }
   },
 );

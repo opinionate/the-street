@@ -24,7 +24,7 @@ export interface SessionCallbacks {
   /** Broadcast busy response to non-participant */
   onBusyResponse: (daemonId: string, speakerId: string, speakerName: string) => void;
   /** End session in behavior tree */
-  onSessionEnd: (daemonId: string) => void;
+  onSessionEnd: (daemonId: string, sessionId: string, reason: string) => void;
   /** Fire summarization */
   onSummarize: (daemonId: string, session: ConversationSession, turns: ConversationTurn[]) => void;
   /** Get manifest for a daemon */
@@ -336,7 +336,7 @@ export class ConversationSessionManager {
     this.activeSessions.delete(daemonId);
 
     // Notify behavior tree
-    this.callbacks.onSessionEnd(daemonId);
+    this.callbacks.onSessionEnd(daemonId, active.session.sessionId, status);
   }
 
   /**

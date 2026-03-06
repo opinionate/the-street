@@ -1,4 +1,4 @@
-export type ChatMessageType = "player" | "player-emote" | "daemon-chat" | "daemon-emote" | "daemon-thought";
+export type ChatMessageType = "player" | "player-emote" | "daemon-chat" | "daemon-emote" | "daemon-thought" | "daemon-speech";
 
 interface ChatMessage {
   senderId: string;
@@ -17,6 +17,7 @@ const TYPE_STYLES: Record<ChatMessageType, { nameColor: string; textColor: strin
   "daemon-chat":   { nameColor: "#66ff99", textColor: "#ccffcc",  fontStyle: "normal" },
   "daemon-emote":  { nameColor: "#999999", textColor: "#aaaaaa",  fontStyle: "italic" },
   "daemon-thought":{ nameColor: "#6699ff", textColor: "#99bbff",  fontStyle: "italic" },
+  "daemon-speech": { nameColor: "#44ff88", textColor: "#eeffee",  fontStyle: "normal" },
 };
 
 /** Slash-emote definitions: /command → verb for "[Name] verbs." */
@@ -328,6 +329,8 @@ export class ChatUI {
       ? `* ${this.escapeHtml(senderName)} `
       : type === "daemon-thought"
       ? `${this.escapeHtml(senderName)} thinks: `
+      : type === "daemon-speech"
+      ? `<span style="color:#44ff88;font-size:10px;font-weight:bold;background:rgba(68,255,136,0.15);padding:1px 4px;border-radius:2px;margin-right:4px">[NPC]</span><span style="color:${style.nameColor};font-weight:bold">${this.escapeHtml(senderName)}</span>: `
       : `<span style="color:${style.nameColor};font-weight:bold">${this.escapeHtml(senderName)}</span>: `;
 
     el.innerHTML = prefix + this.escapeHtml(content);

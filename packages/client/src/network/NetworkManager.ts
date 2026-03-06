@@ -7,6 +7,7 @@ import type {
   AvatarDefinition,
   DaemonState,
   DaemonMood,
+  MovementIntent,
   UserRole,
 } from "@the-street/shared";
 
@@ -39,6 +40,9 @@ export interface NetworkCallbacks {
   onDaemonEmote?: (daemonId: string, emote: string, mood: DaemonMood) => void;
   onDaemonAnimatedEmote?: (daemonId: string, emoteId: string) => void;
   onDaemonThought?: (daemonId: string, thought: string) => void;
+  onDaemonSpeechStream?: (daemonId: string, daemonName: string, speech: string, emote: string | undefined, movement: MovementIntent | undefined, addressedTo: "ambient" | string, position: Vector3) => void;
+  onDaemonConversationStart?: (daemonId: string, daemonName: string, participantId: string, participantType: "visitor" | "daemon") => void;
+  onDaemonConversationEnd?: (daemonId: string, sessionId: string, reason: string) => void;
   onPlayerEmote?: (userId: string, emoteId: string) => void;
 }
 
@@ -137,6 +141,18 @@ export class NetworkManager {
 
     this.room.onMessage("daemon_thought", (data) => {
       this.callbacks.onDaemonThought?.(data.daemonId, data.thought);
+    });
+
+    this.room.onMessage("daemon_speech_stream", (data) => {
+      this.callbacks.onDaemonSpeechStream?.(data.daemonId, data.daemonName, data.speech, data.emote, data.movement, data.addressedTo, data.position);
+    });
+
+    this.room.onMessage("daemon_conversation_start", (data) => {
+      this.callbacks.onDaemonConversationStart?.(data.daemonId, data.daemonName, data.participantId, data.participantType);
+    });
+
+    this.room.onMessage("daemon_conversation_end", (data) => {
+      this.callbacks.onDaemonConversationEnd?.(data.daemonId, data.sessionId, data.reason);
     });
 
     this.room.onMessage("player_emote", (data) => {

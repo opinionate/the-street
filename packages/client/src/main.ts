@@ -286,6 +286,32 @@ async function init() {
       const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
       chatUI.addMessage(daemonId, name, thought, "daemon-thought");
     },
+    onDaemonSpeechStream(daemonId, daemonName, speech, emote, movement, addressedTo, _position) {
+      // Render speech as distinct daemon speech in chat
+      chatUI.addMessage(daemonId, daemonName, speech, "daemon-speech");
+
+      // Show speech bubble on daemon
+      daemonRenderer.showDaemonChat(daemonId, daemonName, speech);
+
+      // Trigger emote animation if provided
+      if (emote) {
+        daemonRenderer.playDaemonEmote(daemonId, emote);
+      }
+
+      // Handle movement intent
+      if (movement) {
+        daemonRenderer.setDaemonMovementIntent(daemonId, movement, addressedTo);
+      }
+    },
+    onDaemonConversationStart(daemonId, daemonName, _participantId, participantType) {
+      const label = participantType === "visitor" ? "a visitor" : "another daemon";
+      chatUI.addMessage(daemonId, daemonName, `started a conversation with ${label}.`, "daemon-emote");
+    },
+    onDaemonConversationEnd(daemonId, _sessionId, reason) {
+      const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
+      const reasonText = reason === "ended_natural" ? "ended the conversation." : `conversation ended (${reason}).`;
+      chatUI.addMessage(daemonId, name, reasonText, "daemon-emote");
+    },
     onPlayerEmote(userId, emoteId) {
       avatarManager.playEmote(userId, emoteId);
     },

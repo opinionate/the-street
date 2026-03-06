@@ -310,6 +310,21 @@ export class DaemonManager {
         daemon.state.targetPlayerId = session.participantType === "visitor" ? session.participantId : undefined;
         daemon.state.targetDaemonId = session.participantType === "daemon" ? session.participantId : undefined;
 
+        // Broadcast the full DaemonThought as a speech stream message
+        if (thought.speech) {
+          this.broadcast("daemon_speech_stream", {
+            type: "daemon_speech_stream" as const,
+            daemonId,
+            daemonName: daemon.state.definition.name,
+            speech: thought.speech,
+            emote: thought.emote,
+            movement: thought.movement,
+            addressedTo: thought.addressedTo,
+            position: daemon.state.currentPosition,
+          });
+        }
+
+        // Legacy daemon_chat for backwards compatibility
         if (thought.speech) {
           this.broadcastDaemonChat(daemon, thought.speech, session.participantType === "visitor" ? session.participantId : undefined);
         }
@@ -323,8 +338,9 @@ export class DaemonManager {
           this.broadcast("daemon_conversation_start", {
             type: "daemon_conversation_start" as const,
             daemonId,
+            daemonName: daemon.state.definition.name,
             participantId: session.participantId,
-            sessionId: session.sessionId,
+            participantType: session.participantType,
           });
         }
       },
@@ -341,7 +357,7 @@ export class DaemonManager {
         this.broadcastDaemonChat(daemon, busyMessages[Math.floor(Math.random() * busyMessages.length)]);
       },
 
-      onSessionEnd: (daemonId) => {
+      onSessionEnd: (daemonId, sessionId, reason) => {
         const daemon = this.daemons.get(daemonId);
         if (!daemon) return;
 
@@ -357,6 +373,8 @@ export class DaemonManager {
         this.broadcast("daemon_conversation_end", {
           type: "daemon_conversation_end" as const,
           daemonId,
+          sessionId,
+          reason,
         });
       },
 

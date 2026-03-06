@@ -834,6 +834,32 @@ export class DaemonRenderer {
     }
   }
 
+  /** Set a movement intent from DaemonThought (approach/retreat/idle/face/patrol) */
+  setDaemonMovementIntent(daemonId: string, movement: string, _addressedTo: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+
+    // Map movement intents to daemon actions
+    switch (movement) {
+      case "approach":
+        daemon.action = "walking";
+        break;
+      case "retreat":
+        daemon.action = "walking";
+        break;
+      case "face":
+        daemon.action = "idle";
+        break;
+      case "patrol":
+        daemon.action = "walking";
+        break;
+      case "idle":
+      default:
+        daemon.action = "idle";
+        break;
+    }
+  }
+
   /** Get the name of a daemon by ID */
   getDaemonName(daemonId: string): string | null {
     return this.daemonNames.get(daemonId) || null;

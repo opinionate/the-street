@@ -31,6 +31,7 @@ import { getPool, closePool } from "./database/pool.js";
 import { closeRedis } from "./database/redis.js";
 import { runMigrations } from "./database/migrate.js";
 import { archiveOldLogEntries } from "./services/ActivityLogService.js";
+import { loadCooldowns } from "./services/DaemonEvolutionEngine.js";
 import { StreetRoom } from "./rooms/StreetRoom.js";
 import { StagingRoom } from "./rooms/StagingRoom.js";
 
@@ -58,6 +59,11 @@ async function main(): Promise<void> {
   // Archive old activity log entries (180-day retention)
   archiveOldLogEntries().catch((err) => {
     console.error("[Startup] Failed to archive old log entries:", err);
+  });
+
+  // Load evolution engine cooldowns from DB
+  loadCooldowns().catch((err) => {
+    console.error("[Startup] Failed to load evolution cooldowns:", err);
   });
 
   // Seed dev user + plots in development mode

@@ -23,6 +23,7 @@ import {
   summarizeAndPersistImpression,
 } from "../services/VisitorImpressionStore.js";
 import { summarizeAndPersistDaemonRelationship } from "../services/DaemonRelationshipStore.js";
+import { evaluateTraitTriggers } from "../services/DaemonEvolutionEngine.js";
 
 interface PlayerInfo {
   userId: string;
@@ -488,6 +489,22 @@ export class DaemonManager {
               console.error(`[SessionManager] Daemon relationship persistence failed for ${daemonId} <-> ${session.participantId}:`, err);
             });
           }
+        }
+
+        // Trigger evolution engine for trait evaluation at session end
+        const manifest = this.manifests.get(daemonId);
+        if (manifest && manifest.mutableTraits.length > 0) {
+          const eventDesc = session.participantType === "visitor"
+            ? `Conversation ended with visitor ${session.participantId} (${session.turnCount} turns, status: ${session.status})`
+            : `Conversation ended with daemon ${session.participantId} (${session.turnCount} turns)`;
+          evaluateTraitTriggers(manifest, {
+            type: "session_end",
+            description: eventDesc,
+            daemonId,
+            session,
+          }).catch((err) => {
+            console.error(`[EvolutionEngine] Trait evaluation failed for daemon=${daemonId}:`, err);
+          });
         }
       },
 

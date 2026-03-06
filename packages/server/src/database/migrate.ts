@@ -345,6 +345,218 @@ const MIGRATIONS: { name: string; up: string }[] = [
         FOREIGN KEY (plot_uuid) REFERENCES plots(uuid) ON DELETE SET NULL;
     `,
   },
+  {
+    name: "022_create_personality_manifests",
+    up: `
+      CREATE TABLE IF NOT EXISTS personality_manifests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL DEFAULT 1,
+        name TEXT NOT NULL,
+        voice_description TEXT NOT NULL,
+        backstory TEXT NOT NULL,
+        compiled_system_prompt TEXT NOT NULL,
+        compiled_token_count INTEGER NOT NULL,
+        compiled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        interests TEXT[] NOT NULL DEFAULT '{}',
+        dislikes TEXT[] NOT NULL DEFAULT '{}',
+        mutable_traits JSONB NOT NULL DEFAULT '[]',
+        available_emotes JSONB NOT NULL DEFAULT '[]',
+        crowd_affinity FLOAT NOT NULL DEFAULT 0,
+        territoriality FLOAT NOT NULL DEFAULT 0,
+        conversation_length TEXT NOT NULL DEFAULT 'moderate'
+          CHECK (conversation_length IN ('brief', 'moderate', 'extended')),
+        initiates_conversation BOOLEAN NOT NULL DEFAULT false,
+        max_conversation_turns INTEGER NOT NULL DEFAULT 10,
+        max_daily_calls INTEGER NOT NULL DEFAULT 200,
+        daily_budget_resets_at TEXT NOT NULL DEFAULT '00:00',
+        remember_visitors BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_personality_manifests_daemon
+        ON personality_manifests(daemon_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_personality_manifests_daemon_version
+        ON personality_manifests(daemon_id, version);
+    `,
+  },
+  {
+    name: "023_create_conversation_sessions",
+    up: `
+      CREATE TABLE IF NOT EXISTS conversation_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        participant_id TEXT NOT NULL,
+        participant_type TEXT NOT NULL CHECK (participant_type IN ('visitor', 'daemon')),
+        started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        ended_at TIMESTAMPTZ,
+        turn_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active'
+          CHECK (status IN ('active', 'ended_natural', 'ended_timeout', 'ended_budget',
+                            'ended_departed', 'ended_context_limit')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_conversation_sessions_daemon
+        ON conversation_sessions(daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_conversation_sessions_daemon_status
+        ON conversation_sessions(daemon_id, status);
+      CREATE INDEX IF NOT EXISTS idx_conversation_sessions_participant
+        ON conversation_sessions(participant_id);
+      CREATE INDEX IF NOT EXISTS idx_conversation_sessions_started
+        ON conversation_sessions(started_at);
+    `,
+  },
+  {
+    name: "024_create_daemon_activity_log",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_activity_log (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        type TEXT NOT NULL CHECK (type IN (
+          'conversation_turn', 'conversation_summary', 'manifest_amendment',
+          'manifest_recompile', 'behavior_event', 'inter_daemon_event',
+          'budget_warning', 'inference_failure'
+        )),
+        timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
+        actors JSONB NOT NULL DEFAULT '[]',
+        tokens_in INTEGER,
+        tokens_out INTEGER,
+        model_used TEXT,
+        inference_latency_ms INTEGER,
+        payload JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemon_activity_log_daemon
+        ON daemon_activity_log(daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_activity_log_daemon_type
+        ON daemon_activity_log(daemon_id, type);
+      CREATE INDEX IF NOT EXISTS idx_daemon_activity_log_timestamp
+        ON daemon_activity_log(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_daemon_activity_log_daemon_timestamp
+        ON daemon_activity_log(daemon_id, timestamp);
+    `,
+  },
+  {
+    name: "025_create_daemon_creation_drafts",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_creation_drafts (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        admin_id UUID NOT NULL REFERENCES users(id),
+        character_upload_id UUID,
+        emote_upload_ids UUID[] NOT NULL DEFAULT '{}',
+        admin_prompt TEXT,
+        expanded_fields JSONB,
+        expansion_status TEXT NOT NULL DEFAULT 'none'
+          CHECK (expansion_status IN ('none', 'processing', 'ready', 'failed')),
+        max_conversation_turns INTEGER NOT NULL DEFAULT 10,
+        max_daily_calls INTEGER NOT NULL DEFAULT 200,
+        daily_budget_resets_at TEXT NOT NULL DEFAULT '00:00',
+        remember_visitors BOOLEAN NOT NULL DEFAULT true,
+        status TEXT NOT NULL DEFAULT 'draft'
+          CHECK (status IN ('draft', 'finalized', 'abandoned')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemon_creation_drafts_admin
+        ON daemon_creation_drafts(admin_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_creation_drafts_status
+        ON daemon_creation_drafts(status);
+    `,
+  },
+  {
+    name: "026_create_daemon_asset_uploads",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_asset_uploads (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID REFERENCES daemons(id) ON DELETE SET NULL,
+        upload_type TEXT NOT NULL CHECK (upload_type IN ('character', 'emote')),
+        fbx_filename TEXT NOT NULL,
+        label TEXT,
+        uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        conversion_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (conversion_status IN ('pending', 'processing', 'ready', 'failed')),
+        gltf_asset_id TEXT,
+        validation_errors JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_daemon_asset_uploads_daemon
+        ON daemon_asset_uploads(daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_asset_uploads_conversion_status
+        ON daemon_asset_uploads(conversion_status);
+    `,
+  },
+  {
+    name: "027_create_daemon_placements",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_placements (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        plot_uuid UUID NOT NULL REFERENCES plots(uuid) ON DELETE CASCADE,
+        spawn_x FLOAT NOT NULL DEFAULT 0,
+        spawn_y FLOAT NOT NULL DEFAULT 0,
+        spawn_z FLOAT NOT NULL DEFAULT 0,
+        facing_direction FLOAT NOT NULL DEFAULT 0,
+        roam_radius FLOAT NOT NULL DEFAULT 5,
+        interaction_range FLOAT NOT NULL DEFAULT 10,
+        active BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_placements_daemon
+        ON daemon_placements(daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_placements_plot
+        ON daemon_placements(plot_uuid);
+      CREATE INDEX IF NOT EXISTS idx_daemon_placements_active
+        ON daemon_placements(active);
+    `,
+  },
+  {
+    name: "028_create_daemon_visitor_impressions",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_visitor_impressions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        visit_count INTEGER NOT NULL DEFAULT 1,
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+        impression TEXT NOT NULL DEFAULT '',
+        relationship_valence TEXT NOT NULL DEFAULT 'neutral'
+          CHECK (relationship_valence IN ('hostile', 'neutral', 'warm', 'trusted')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_visitor_impressions_unique
+        ON daemon_visitor_impressions(daemon_id, user_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_visitor_impressions_daemon
+        ON daemon_visitor_impressions(daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_visitor_impressions_last_seen
+        ON daemon_visitor_impressions(daemon_id, last_seen);
+    `,
+  },
+  {
+    name: "029_create_daemon_relationships",
+    up: `
+      CREATE TABLE IF NOT EXISTS daemon_relationships (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        target_daemon_id UUID NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
+        target_daemon_name TEXT NOT NULL,
+        interaction_count INTEGER NOT NULL DEFAULT 0,
+        last_interaction TIMESTAMPTZ NOT NULL DEFAULT now(),
+        relationship TEXT NOT NULL DEFAULT '',
+        relational_valence TEXT NOT NULL DEFAULT 'neutral'
+          CHECK (relational_valence IN ('rival', 'neutral', 'allied', 'subordinate', 'dominant')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_relationships_unique
+        ON daemon_relationships(daemon_id, target_daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_relationships_daemon
+        ON daemon_relationships(daemon_id);
+      CREATE INDEX IF NOT EXISTS idx_daemon_relationships_target
+        ON daemon_relationships(target_daemon_id);
+    `,
+  },
 ];
 
 export async function runMigrations(pool: pg.Pool): Promise<void> {

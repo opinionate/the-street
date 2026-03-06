@@ -6,10 +6,13 @@ import type {
   DaemonMood,
   DaemonAction,
   Vector3,
+  PersonalityManifest,
+  WorldStateContext,
 } from "@the-street/shared";
 import { V1_CONFIG, getStreetPosition } from "@the-street/shared";
 import { WorldEventBus, EventPriority, type WorldEvent } from "./WorldEventBus.js";
 import { DaemonBehaviorTree, type BehaviorCallbacks, type BehaviorState } from "./DaemonBehaviorTree.js";
+import { ConversationSessionManager, type SessionCallbacks } from "./ConversationSessionManager.js";
 
 interface PlayerInfo {
   userId: string;
@@ -195,6 +198,11 @@ export class DaemonManager {
   private eventBus = new WorldEventBus();
   private ambientTickTimer = 0;
   private behaviorTreeTickTimer = 0;
+  private sessionTickTimer = 0;
+  // Conversation session manager
+  private sessionManager: ConversationSessionManager;
+  // Personality manifests cache (daemonId -> manifest)
+  private manifests = new Map<string, PersonalityManifest>();
 
   constructor(
     broadcast: BroadcastFn,
@@ -202,6 +210,7 @@ export class DaemonManager {
   ) {
     this.broadcast = broadcast;
     this.sendToClient = sendToClient;
+    this.sessionManager = new ConversationSessionManager(this.createSessionCallbacks());
   }
 
   /** Create behavior tree callbacks bound to this manager instance. */
@@ -226,33 +235,47 @@ export class DaemonManager {
             action: daemon.state.currentAction,
           });
         }
+
+        // Check if daemon should initiate conversation on proximity
+        if (event.type === "visitor_proximity" && !event.speech) {
+          const manifest = this.manifests.get(daemonId);
+          if (manifest?.behaviorPreferences.initiatesConversation) {
+            // Check greet cooldown for this visitor
+            const cooldown = daemon.greetCooldowns.get(event.sourceId) || 0;
+            if (Date.now() > cooldown) {
+              daemon.greetCooldowns.set(event.sourceId, Date.now() + PROACTIVE_COOLDOWN_MS);
+              // Emit a proximity-based greeting event to escalate to conversation
+              this.eventBus.emit({
+                type: "visitor_speech",
+                priority: EventPriority.NewSpeech,
+                sourceId: event.sourceId,
+                sourceName: event.sourceName,
+                targetDaemonId: daemonId,
+                speech: `[${event.sourceName || "A visitor"} has entered ${manifest.identity.name}'s proximity]`,
+                timestamp: Date.now(),
+              });
+            }
+          }
+        }
       },
       onStartConversation: (daemonId: string, participantId: string, participantName: string, participantType: "visitor" | "daemon", speech?: string) => {
         if (participantType === "visitor") {
-          // Route to existing handleInteract which manages AI, memory, relationships
-          this.handleInteract(daemonId, participantId, "", speech, participantName);
+          // Route through session manager for managed conversation lifecycle
+          this.handleManagedConversation(daemonId, participantId, participantName, participantType, speech);
         }
         // Daemon-daemon conversations handled separately via existing tickDaemonConversations
       },
-      onBusyResponse: (daemonId: string, _speakerId: string, speakerName: string) => {
-        const daemon = this.daemons.get(daemonId);
-        if (!daemon || daemon.isMuted) return;
-        const name = daemon.state.definition.name;
-        const busyMessages = [
-          `*${name} glances over briefly* Sorry, I'm in the middle of something.`,
-          `*${name} nods at ${speakerName}* One moment, please.`,
-          `Hang on, ${speakerName} — talking to someone right now.`,
-        ];
-        this.broadcastDaemonChat(daemon, pick(busyMessages));
+      onBusyResponse: (daemonId: string, speakerId: string, speakerName: string) => {
+        // Route busy responses through session manager for logging
+        this.sessionManager.handleBusyInterrupt(daemonId, speakerId, speakerName).catch(err => {
+          console.error(`[DaemonManager] Busy interrupt failed:`, err);
+        });
       },
       onPostInteraction: (daemonId: string, context) => {
         const daemon = this.daemons.get(daemonId);
         if (!daemon) return;
-        // Fire summarization and relationship hooks
-        if (context.participantType === "visitor") {
-          this.persistRelationship(daemonId, context.participantId).catch(() => {});
-        }
-        // Reset action to idle visually
+        // Session manager handles summarization and cleanup via onSessionEnd callback.
+        // Post-interaction only resets visual state (session end already handled).
         daemon.state.currentAction = "idle";
         daemon.state.targetPlayerId = undefined;
         daemon.state.targetDaemonId = undefined;
@@ -271,6 +294,114 @@ export class DaemonManager {
       getDaemonRadius: (daemonId: string) => {
         const daemon = this.daemons.get(daemonId);
         return daemon ? daemon.behavior.interactionRadius : 10;
+      },
+    };
+  }
+
+  /** Create session manager callbacks bound to this manager instance. */
+  private createSessionCallbacks(): SessionCallbacks {
+    return {
+      onDaemonSpeech: (daemonId, thought, session) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon || daemon.isMuted) return;
+
+        // Update daemon visual state
+        daemon.state.currentAction = "talking";
+        daemon.state.targetPlayerId = session.participantType === "visitor" ? session.participantId : undefined;
+        daemon.state.targetDaemonId = session.participantType === "daemon" ? session.participantId : undefined;
+
+        if (thought.speech) {
+          this.broadcastDaemonChat(daemon, thought.speech, session.participantType === "visitor" ? session.participantId : undefined);
+        }
+
+        if (thought.emote) {
+          this.broadcastDaemonEmote(daemon, thought.emote, daemon.state.mood);
+        }
+
+        // Broadcast conversation start/end markers
+        if (session.turnCount === 1) {
+          this.broadcast("daemon_conversation_start", {
+            type: "daemon_conversation_start" as const,
+            daemonId,
+            participantId: session.participantId,
+            sessionId: session.sessionId,
+          });
+        }
+      },
+
+      onBusyResponse: (daemonId, _speakerId, speakerName) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon || daemon.isMuted) return;
+        const name = daemon.state.definition.name;
+        const busyMessages = [
+          `*${name} glances over briefly* Sorry, I'm in the middle of something.`,
+          `*${name} nods at ${speakerName}* One moment, please.`,
+          `Hang on, ${speakerName} — talking to someone right now.`,
+        ];
+        this.broadcastDaemonChat(daemon, busyMessages[Math.floor(Math.random() * busyMessages.length)]);
+      },
+
+      onSessionEnd: (daemonId) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon) return;
+
+        // Reset visual state
+        daemon.state.currentAction = "idle";
+        daemon.state.targetPlayerId = undefined;
+        daemon.state.targetDaemonId = undefined;
+
+        // End conversation in behavior tree
+        daemon.behaviorTree.endConversation();
+
+        // Broadcast conversation end
+        this.broadcast("daemon_conversation_end", {
+          type: "daemon_conversation_end" as const,
+          daemonId,
+        });
+      },
+
+      onSummarize: (daemonId, session, _turns) => {
+        // Summarization hook — will be implemented by ts-70l (visitor impression store)
+        console.log(`[SessionManager] Summarization triggered for daemon=${daemonId} session=${session.sessionId} turns=${session.turnCount}`);
+        if (session.participantType === "visitor") {
+          this.persistRelationship(daemonId, session.participantId).catch(() => {});
+        }
+      },
+
+      getManifest: (daemonId) => {
+        return this.manifests.get(daemonId) ?? null;
+      },
+
+      getWorldState: (daemonId) => {
+        const daemon = this.daemons.get(daemonId);
+        const nearbyDaemons: { daemonId: string; name: string }[] = [];
+        if (daemon) {
+          for (const [id, other] of this.daemons) {
+            if (id === daemonId) continue;
+            const dist = this.distance(daemon.state.currentPosition, other.state.currentPosition);
+            if (dist <= 20) {
+              nearbyDaemons.push({ daemonId: id, name: other.state.definition.name });
+            }
+          }
+        }
+
+        return {
+          currentVisitorCount: this.lastPlayerCount,
+          nearbyDaemons,
+          timeOfDay: this.lastTimeOfDay,
+          trafficTrend: "stable" as const,
+          assembledAt: Date.now(),
+        } satisfies WorldStateContext;
+      },
+
+      getVisitorImpression: (_daemonId, _visitorId) => {
+        // Will be provided by ts-70l (visitor impression store)
+        return undefined;
+      },
+
+      getDaemonRelationship: (_daemonId, _targetDaemonId) => {
+        // Will be provided by ts-lly (inter-daemon event routing)
+        return undefined;
       },
     };
   }
@@ -329,6 +460,65 @@ export class DaemonManager {
     }
 
     await this.loadPersistedMemories();
+    await this.loadManifests();
+  }
+
+  /** Load personality manifests from DB for all active daemons. */
+  private async loadManifests(): Promise<void> {
+    const daemonIds = [...this.daemons.keys()];
+    if (daemonIds.length === 0) return;
+
+    try {
+      const pool = getPool();
+      const placeholders = daemonIds.map((_, i) => `$${i + 1}`).join(",");
+      const result = await pool.query(
+        `SELECT DISTINCT ON (daemon_id)
+           daemon_id, version, name, voice_description, backstory,
+           compiled_system_prompt, compiled_token_count, compiled_at,
+           interests, dislikes, mutable_traits, available_emotes,
+           crowd_affinity, territoriality, conversation_length,
+           initiates_conversation, max_conversation_turns, max_daily_calls,
+           daily_budget_resets_at, remember_visitors
+         FROM personality_manifests
+         WHERE daemon_id IN (${placeholders})
+         ORDER BY daemon_id, version DESC`,
+        daemonIds,
+      );
+
+      for (const row of result.rows) {
+        const manifest: PersonalityManifest = {
+          daemonId: row.daemon_id,
+          version: row.version,
+          identity: {
+            name: row.name,
+            voiceDescription: row.voice_description,
+            backstory: row.backstory,
+          },
+          compiledSystemPrompt: row.compiled_system_prompt,
+          compiledTokenCount: row.compiled_token_count,
+          compiledAt: new Date(row.compiled_at).getTime(),
+          interests: row.interests || [],
+          dislikes: row.dislikes || [],
+          mutableTraits: row.mutable_traits || [],
+          availableEmotes: row.available_emotes || [],
+          behaviorPreferences: {
+            crowdAffinity: row.crowd_affinity,
+            territoriality: row.territoriality,
+            conversationLength: row.conversation_length,
+            initiatesConversation: row.initiates_conversation,
+          },
+          maxConversationTurns: row.max_conversation_turns,
+          maxDailyCalls: row.max_daily_calls,
+          dailyBudgetResetsAt: row.daily_budget_resets_at,
+          rememberVisitors: row.remember_visitors,
+        };
+        this.manifests.set(row.daemon_id, manifest);
+      }
+
+      console.log(`[DaemonManager] Loaded ${result.rows.length} personality manifests`);
+    } catch (err) {
+      console.warn(`[DaemonManager] Failed to load manifests (table may not exist yet):`, err);
+    }
   }
 
   private createInstance(state: DaemonState, behavior: DaemonBehavior): DaemonInstance {
@@ -757,6 +947,10 @@ export class DaemonManager {
     daemon.isRecalled = true;
     daemon.roamTarget = null;
     daemon.isReturningHome = true;
+    // End any active session before forcing idle
+    if (this.sessionManager.hasActiveSession(id)) {
+      this.sessionManager.endSession(id, "ended_departed").catch(() => {});
+    }
     // Force behavior tree back to idle (end any conversation)
     daemon.behaviorTree.forceIdle();
   }
@@ -783,6 +977,16 @@ export class DaemonManager {
 
   /** Called when a player leaves the world — daemons who know them react */
   onPlayerLeave(playerId: string, playerName: string, position: Vector3): void {
+    // End any active sessions where this player is the participant
+    for (const [daemonId] of this.daemons) {
+      const session = this.sessionManager.getActiveSession(daemonId);
+      if (session && session.participantId === playerId) {
+        this.sessionManager.handleDeparture(daemonId, playerId).catch(err => {
+          console.error(`[DaemonManager] Failed to end session on departure:`, err);
+        });
+      }
+    }
+
     // Emit departure event to the event bus
     this.eventBus.emit({
       type: "visitor_departure",
@@ -1155,6 +1359,15 @@ export class DaemonManager {
       this.behaviorTreeTickTimer = 0;
     }
 
+    // Session timeout tick (every 5s)
+    this.sessionTickTimer += dtMs;
+    if (this.sessionTickTimer >= 5000) {
+      this.sessionTickTimer = 0;
+      this.sessionManager.tick().catch(err => {
+        console.error("[DaemonManager] Session tick failed:", err);
+      });
+    }
+
     // Low-frequency ambient tick (10s) for idle daemon behaviors
     this.ambientTickTimer += dt;
     if (this.ambientTickTimer >= 10) {
@@ -1279,6 +1492,52 @@ export class DaemonManager {
         });
       }
     }
+  }
+
+  /**
+   * Handle a managed conversation via session manager.
+   * Creates or resumes a session and routes speech to inference controller.
+   */
+  private handleManagedConversation(
+    daemonId: string,
+    participantId: string,
+    participantName: string,
+    participantType: "visitor" | "daemon",
+    speech?: string,
+  ): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon || daemon.isMuted) return;
+
+    // If no manifest loaded, fall back to old handleInteract
+    if (!this.manifests.has(daemonId)) {
+      this.handleInteract(daemonId, participantId, "", speech, participantName);
+      return;
+    }
+
+    const event = {
+      eventType: (participantType === "daemon" ? "daemon_speech" : "visitor_speech") as "visitor_speech" | "daemon_speech",
+      sourceId: participantId,
+      sourceName: participantName,
+      speech,
+      receivedAt: Date.now(),
+    };
+
+    (async () => {
+      try {
+        // Start session if not already active
+        if (!this.sessionManager.hasActiveSession(daemonId)) {
+          await this.sessionManager.startSession(daemonId, participantId, participantName, participantType);
+        }
+
+        // Route speech to session manager
+        await this.sessionManager.handleSpeech(daemonId, event);
+      } catch (err) {
+        console.error(`[DaemonManager] Managed conversation failed for daemon=${daemonId}:`, err);
+        // Fall back to canned response
+        this.sendCannedResponse(daemon, participantId);
+        daemon.behaviorTree.endConversation();
+      }
+    })();
   }
 
   /** Handle player interacting with a daemon — triggers AI conversation */

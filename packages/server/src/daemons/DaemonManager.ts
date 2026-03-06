@@ -8,6 +8,10 @@ import type {
   Vector3,
   PersonalityManifest,
   WorldStateContext,
+  DaemonRelationship,
+  InterDaemonEventPayload,
+  LogEntry,
+  Actor,
 } from "@the-street/shared";
 import { V1_CONFIG, getStreetPosition } from "@the-street/shared";
 import { WorldEventBus, EventPriority, type WorldEvent } from "./WorldEventBus.js";
@@ -127,6 +131,11 @@ const CONTAGION_RADIUS = 15;       // units — mood spreads within this radius
 const CONTAGION_INTERVAL = 8;      // check every 8 seconds
 const CONTAGION_RESIST_BASE = 0.4; // 40% base chance to resist mood spread
 
+// Inter-daemon inference-based conversation limits
+const INTER_DAEMON_TURN_CAP = 15;          // max turns per daemon per session
+const INTER_DAEMON_HOURLY_SESSION_CAP = 5; // max sessions per daemon per hour
+const INTER_DAEMON_HOUR_MS = 3_600_000;    // 1 hour in ms
+
 type TimeOfDay = "morning" | "afternoon" | "evening" | "night";
 
 /** Roam speed multiplier by time of day */
@@ -201,6 +210,8 @@ export class DaemonManager {
   private sessionTickTimer = 0;
   // Conversation session manager
   private sessionManager: ConversationSessionManager;
+  // Inter-daemon session count tracker: daemonId -> timestamps of session starts within last hour
+  private interDaemonSessionLog = new Map<string, number[]>();
   // Personality manifests cache (daemonId -> manifest)
   private manifests = new Map<string, PersonalityManifest>();
 
@@ -259,11 +270,8 @@ export class DaemonManager {
         }
       },
       onStartConversation: (daemonId: string, participantId: string, participantName: string, participantType: "visitor" | "daemon", speech?: string) => {
-        if (participantType === "visitor") {
-          // Route through session manager for managed conversation lifecycle
-          this.handleManagedConversation(daemonId, participantId, participantName, participantType, speech);
-        }
-        // Daemon-daemon conversations handled separately via existing tickDaemonConversations
+        // Route both visitors and daemons through session manager for managed conversation lifecycle
+        this.handleManagedConversation(daemonId, participantId, participantName, participantType, speech);
       },
       onBusyResponse: (daemonId: string, speakerId: string, speakerName: string) => {
         // Route busy responses through session manager for logging
@@ -311,7 +319,9 @@ export class DaemonManager {
         daemon.state.targetDaemonId = session.participantType === "daemon" ? session.participantId : undefined;
 
         if (thought.speech) {
-          this.broadcastDaemonChat(daemon, thought.speech, session.participantType === "visitor" ? session.participantId : undefined);
+          const targetUserId = session.participantType === "visitor" ? session.participantId : undefined;
+          const targetDaemonId = session.participantType === "daemon" ? session.participantId : undefined;
+          this.broadcastDaemonChat(daemon, thought.speech, targetUserId, targetDaemonId);
         }
 
         if (thought.emote) {
@@ -324,8 +334,35 @@ export class DaemonManager {
             type: "daemon_conversation_start" as const,
             daemonId,
             participantId: session.participantId,
+            participantType: session.participantType,
             sessionId: session.sessionId,
           });
+        }
+
+        // Inter-daemon routing: if addressed to another daemon, emit speech event to them
+        if (session.participantType === "daemon" && thought.speech && !thought.endConversation) {
+          const targetDaemon = this.daemons.get(session.participantId);
+          if (targetDaemon && !targetDaemon.isMuted) {
+            // Check turn cap before routing back
+            if (session.turnCount < INTER_DAEMON_TURN_CAP) {
+              this.eventBus.emit({
+                type: "daemon_speech",
+                priority: EventPriority.ActiveParticipantSpeech,
+                sourceId: daemonId,
+                sourceName: daemon.state.definition.name,
+                targetDaemonId: session.participantId,
+                speech: thought.speech,
+                timestamp: Date.now(),
+              });
+            } else {
+              console.log(`[DaemonManager] Inter-daemon turn cap reached (${INTER_DAEMON_TURN_CAP}) for daemon=${daemonId} session=${session.sessionId}`);
+              // End both sessions
+              this.sessionManager.endSession(daemonId, "ended_natural").catch(() => {});
+            }
+          }
+
+          // Log inter_daemon_event
+          this.logInterDaemonEvent(daemonId, session, thought);
         }
       },
 
@@ -345,6 +382,26 @@ export class DaemonManager {
         const daemon = this.daemons.get(daemonId);
         if (!daemon) return;
 
+        // Clean up inter-daemon conversation tracking
+        const targetDaemonId = daemon.state.targetDaemonId;
+        if (targetDaemonId) {
+          const conv = daemon.daemonConversations.get(targetDaemonId);
+          if (conv) conv.isActive = false;
+          // Also clean up and end the other daemon's session if it's with this daemon
+          const otherDaemon = this.daemons.get(targetDaemonId);
+          if (otherDaemon) {
+            const otherConv = otherDaemon.daemonConversations.get(daemonId);
+            if (otherConv) otherConv.isActive = false;
+            // End other daemon's counterpart session (check participantId to avoid loop)
+            const otherSession = this.sessionManager.getActiveSession(targetDaemonId);
+            if (otherSession && otherSession.participantId === daemonId && otherSession.participantType === "daemon") {
+              // Clear targetDaemonId first to prevent re-entry when other's onSessionEnd fires
+              otherDaemon.state.targetDaemonId = undefined;
+              this.sessionManager.endSession(targetDaemonId, "ended_natural").catch(() => {});
+            }
+          }
+        }
+
         // Reset visual state
         daemon.state.currentAction = "idle";
         daemon.state.targetPlayerId = undefined;
@@ -361,10 +418,33 @@ export class DaemonManager {
       },
 
       onSummarize: (daemonId, session, _turns) => {
-        // Summarization hook — will be implemented by ts-70l (visitor impression store)
-        console.log(`[SessionManager] Summarization triggered for daemon=${daemonId} session=${session.sessionId} turns=${session.turnCount}`);
+        console.log(`[SessionManager] Summarization triggered for daemon=${daemonId} session=${session.sessionId} turns=${session.turnCount} type=${session.participantType}`);
         if (session.participantType === "visitor") {
           this.persistRelationship(daemonId, session.participantId).catch(() => {});
+        }
+        if (session.participantType === "daemon") {
+          // Update daemon-daemon relationship tracking
+          const daemon = this.daemons.get(daemonId);
+          const otherDaemon = this.daemons.get(session.participantId);
+          if (daemon && otherDaemon) {
+            const rel = daemon.relationships.get(session.participantId);
+            if (rel) {
+              rel.interactionCount++;
+              rel.lastSeen = Date.now();
+              rel.lastUpdated = Date.now();
+            } else {
+              daemon.relationships.set(session.participantId, {
+                targetName: otherDaemon.state.definition.name,
+                targetType: "daemon",
+                sentiment: "neutral",
+                interactionCount: 1,
+                gossip: [],
+                topicHistory: [],
+                lastSeen: Date.now(),
+                lastUpdated: Date.now(),
+              });
+            }
+          }
         }
       },
 
@@ -399,9 +479,22 @@ export class DaemonManager {
         return undefined;
       },
 
-      getDaemonRelationship: (_daemonId, _targetDaemonId) => {
-        // Will be provided by ts-lly (inter-daemon event routing)
-        return undefined;
+      getDaemonRelationship: (daemonId, targetDaemonId) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon) return undefined;
+        const rel = daemon.relationships.get(targetDaemonId);
+        if (!rel || rel.targetType !== "daemon") return undefined;
+        const targetDaemon = this.daemons.get(targetDaemonId);
+        return {
+          targetDaemonId,
+          targetDaemonName: targetDaemon?.state.definition.name ?? rel.targetName,
+          interactionCount: rel.interactionCount,
+          lastInteraction: rel.lastSeen,
+          relationship: rel.topicHistory.length > 0
+            ? `Topics discussed: ${rel.topicHistory.slice(-3).join(", ")}. ${rel.gossip.length > 0 ? `Gossip: ${rel.gossip.slice(-2).join("; ")}` : ""}`
+            : rel.gossip.length > 0 ? `Gossip: ${rel.gossip.slice(-2).join("; ")}` : "No significant history yet.",
+          relationalValence: this.sentimentToValence(rel.sentiment),
+        } satisfies DaemonRelationship;
       },
     };
   }
@@ -827,6 +920,77 @@ export class DaemonManager {
       daemonId: daemon.state.daemonId,
       thought,
     });
+  }
+
+  /** Map internal sentiment to DaemonRelationship relational valence */
+  private sentimentToValence(sentiment: Sentiment): DaemonRelationship["relationalValence"] {
+    switch (sentiment) {
+      case "friendly": return "allied";
+      case "wary": return "rival";
+      case "curious": return "neutral";
+      case "amused": return "allied";
+      case "neutral":
+      default: return "neutral";
+    }
+  }
+
+  /** Log an inter_daemon_event to the activity log */
+  private logInterDaemonEvent(
+    daemonId: string,
+    session: { sessionId: string; participantId: string },
+    thought: { speech?: string; emote?: string; internalState: string },
+  ): void {
+    const daemon = this.daemons.get(daemonId);
+    const otherDaemon = this.daemons.get(session.participantId);
+    if (!daemon) return;
+
+    const payload: InterDaemonEventPayload = {
+      sessionId: session.sessionId,
+      otherDaemonId: session.participantId,
+      otherDaemonName: otherDaemon?.state.definition.name ?? "unknown",
+      speakerDaemonId: daemonId,
+      speech: thought.speech ?? "",
+      emoteFired: thought.emote,
+      internalState: thought.internalState,
+    };
+
+    const actors: Actor[] = [
+      { actorType: "daemon", actorId: daemonId, actorName: daemon.state.definition.name },
+      { actorType: "daemon", actorId: session.participantId, actorName: otherDaemon?.state.definition.name },
+    ];
+
+    const entry: LogEntry = {
+      entryId: crypto.randomUUID(),
+      daemonId,
+      type: "inter_daemon_event",
+      timestamp: Date.now(),
+      actors,
+      payload,
+    };
+
+    // Persist via ActivityLogService (fire-and-forget)
+    import("../services/ActivityLogService.js").then(({ appendLogEntry }) => {
+      appendLogEntry(entry).catch((err) => {
+        console.error("[DaemonManager] Failed to log inter_daemon_event:", err);
+      });
+    });
+  }
+
+  /** Check if a daemon has exceeded the hourly inter-daemon session cap */
+  private canStartInterDaemonSession(daemonId: string): boolean {
+    const now = Date.now();
+    const log = this.interDaemonSessionLog.get(daemonId) ?? [];
+    // Prune entries older than 1 hour
+    const recent = log.filter(ts => now - ts < INTER_DAEMON_HOUR_MS);
+    this.interDaemonSessionLog.set(daemonId, recent);
+    return recent.length < INTER_DAEMON_HOURLY_SESSION_CAP;
+  }
+
+  /** Record that a daemon started an inter-daemon session */
+  private recordInterDaemonSession(daemonId: string): void {
+    const log = this.interDaemonSessionLog.get(daemonId) ?? [];
+    log.push(Date.now());
+    this.interDaemonSessionLog.set(daemonId, log);
   }
 
   addDaemon(id: string, definition: DaemonDefinition, behavior: DaemonBehavior): void {
@@ -4636,11 +4800,69 @@ export class DaemonManager {
           }, 800);
         }
 
-        // Start a conversation!
-        this.startDaemonConversation(idA, daemonA, idB, daemonB);
+        // Start an inference-based conversation (if both have manifests and haven't hit hourly cap)
+        if (this.manifests.has(idA) && this.manifests.has(idB)
+            && this.canStartInterDaemonSession(idA) && this.canStartInterDaemonSession(idB)) {
+          this.initiateInterDaemonConversation(idA, daemonA, idB, daemonB);
+        } else {
+          // Fallback to scripted conversation if manifests not loaded or hourly cap hit
+          this.startDaemonConversation(idA, daemonA, idB, daemonB);
+        }
         break; // One new conversation per tick per daemon
       }
     }
+  }
+
+  /**
+   * Initiate an inference-based inter-daemon conversation.
+   * Daemon A emits a daemon_speech event to daemon B via the event bus,
+   * which triggers B's behavior tree → session manager → inference controller.
+   * B's response routes back to A, creating a natural turn-by-turn exchange.
+   */
+  private initiateInterDaemonConversation(
+    idA: string, daemonA: DaemonInstance,
+    idB: string, daemonB: DaemonInstance,
+  ): void {
+    const now = Date.now();
+
+    // Record sessions for hourly cap
+    this.recordInterDaemonSession(idA);
+    this.recordInterDaemonSession(idB);
+
+    // Set cooldowns
+    daemonA.conversationCooldown = 30 + Math.random() * 30;
+    daemonB.conversationCooldown = 30 + Math.random() * 30;
+
+    // Update conversation tracking
+    daemonA.daemonConversations.set(idB, {
+      otherDaemonId: idB, lastConversation: now, isActive: true,
+      pendingLines: [], lineIndex: 0, lineTimer: 0,
+    });
+    daemonB.daemonConversations.set(idA, {
+      otherDaemonId: idA, lastConversation: now, isActive: true,
+      pendingLines: [], lineIndex: 0, lineTimer: 0,
+    });
+
+    // Face each other
+    const dx = daemonB.state.currentPosition.x - daemonA.state.currentPosition.x;
+    const dz = daemonB.state.currentPosition.z - daemonA.state.currentPosition.z;
+    daemonA.state.currentRotation = Math.atan2(-dx, -dz);
+    daemonB.state.currentRotation = Math.atan2(dx, dz);
+
+    // Emit daemon_proximity event to daemon A to initiate via behavior tree.
+    // A will enter attention → conversation, run inference, and respond.
+    // The response routes to B via onDaemonSpeech → eventBus.
+    this.eventBus.emit({
+      type: "daemon_speech",
+      priority: EventPriority.NewSpeech,
+      sourceId: idB,
+      sourceName: daemonB.state.definition.name,
+      targetDaemonId: idA,
+      speech: `[${daemonB.state.definition.name} is nearby and catches ${daemonA.state.definition.name}'s attention]`,
+      timestamp: now,
+    });
+
+    console.log(`[DaemonManager] Initiated inference-based inter-daemon conversation: ${daemonA.state.definition.name} ↔ ${daemonB.state.definition.name}`);
   }
 
   private startDaemonConversation(

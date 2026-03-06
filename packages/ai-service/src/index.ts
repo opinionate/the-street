@@ -7,3 +7,5 @@ export type { DaemonGenerationResult } from "./daemon-generate.js";
 export { generateDaemonResponse, generateDaemonConversation, generateGroupConversation } from "./daemon-converse.js";
 export type { DaemonResponse, DaemonConversationLine } from "./daemon-converse.js";
 export { MODEL, FALLBACK_MODEL, getClient, stripJsonFences, sanitizeUserInput } from "./utils.js";
+export { compile, getManifest, setManifest } from "./manifest-compiler.js";
+export type { CompileReason, CompileResult } from "./manifest-compiler.js";

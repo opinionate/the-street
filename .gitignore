@@ -11,3 +11,8 @@ packages/server/data/assets/
 packages/server/data/models/
 dump.rdb
 *.tgz
+
+# Gas Town (added by gt)
+.runtime/
+.claude/commands/
+.logs/

@@ -7,6 +7,8 @@ import type {
   AvatarDefinition,
   DaemonState,
   DaemonMood,
+  DaemonThought,
+  MovementIntent,
   UserRole,
 } from "./types.js";
 
@@ -34,6 +36,7 @@ export type ClientMessage =
   | { type: "daemon_interact"; daemonId: string; message?: string }
   | { type: "daemon_recall"; daemonId: string }
   | { type: "daemon_toggle_roam"; daemonId: string; enabled: boolean }
+  | { type: "daemon_speech"; daemonId: string; message: string }
   | { type: "emote"; emoteId: EmoteId }
   | { type: "avatar_update"; avatarDefinition: AvatarDefinition };
 
@@ -82,6 +85,9 @@ export type ServerMessage =
   | { type: "daemon_emote"; daemonId: string; emote: string; mood: DaemonMood }
   | { type: "daemon_animated_emote"; daemonId: string; emoteId: string }
   | { type: "daemon_thought"; daemonId: string; thought: string }
+  | { type: "daemon_speech_stream"; daemonId: string; daemonName: string; speech: string; emote?: string; movement?: MovementIntent; addressedTo: "ambient" | string; position: Vector3 }
+  | { type: "daemon_conversation_start"; daemonId: string; daemonName: string; participantId: string; participantType: "visitor" | "daemon" }
+  | { type: "daemon_conversation_end"; daemonId: string; sessionId: string; reason: string }
   | { type: "player_emote"; userId: string; emoteId: EmoteId };
 
 // Message type constants for Colyseus
@@ -110,6 +116,10 @@ export const MSG = {
   DAEMON_EMOTE: "daemon_emote",
   DAEMON_ANIMATED_EMOTE: "daemon_animated_emote",
   DAEMON_THOUGHT: "daemon_thought",
+  DAEMON_SPEECH: "daemon_speech",
+  DAEMON_SPEECH_STREAM: "daemon_speech_stream",
+  DAEMON_CONVERSATION_START: "daemon_conversation_start",
+  DAEMON_CONVERSATION_END: "daemon_conversation_end",
   EMOTE: "emote",
   PLAYER_EMOTE: "player_emote",
   AVATAR_UPDATE: "avatar_update",

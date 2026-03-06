@@ -8,7 +8,6 @@ import type {
   DaemonState,
   DaemonMood,
   DaemonAction,
-  DaemonBehaviorType,
   WorldObject,
   InteractionType,
   PhysicsType,
@@ -104,13 +103,6 @@ describe("Type shape validation", () => {
     it("covers all expected actions", () => {
       const actions: DaemonAction[] = ["idle", "walking", "talking", "waving", "thinking", "laughing", "emoting"];
       expect(actions).toHaveLength(7);
-    });
-  });
-
-  describe("DaemonBehaviorType values", () => {
-    it("covers all expected types", () => {
-      const types: DaemonBehaviorType[] = ["greeter", "shopkeeper", "guide", "guard", "roamer", "socialite"];
-      expect(types).toHaveLength(6);
     });
   });
 

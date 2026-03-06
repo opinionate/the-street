@@ -143,7 +143,8 @@ export interface PlayerState {
 
 // --- Daemons ---
 
-export type DaemonBehaviorType = "greeter" | "shopkeeper" | "guide" | "guard" | "roamer" | "socialite";
+// DaemonBehaviorType removed — roles are now expressed in natural language
+// via PersonalityManifest identity fields.
 
 export type DaemonMood = "happy" | "neutral" | "bored" | "excited" | "annoyed" | "curious";
 
@@ -156,7 +157,7 @@ export interface DaemonPersonality {
 }
 
 export interface DaemonBehavior {
-  type: DaemonBehaviorType;
+  type?: string;  // Was DaemonBehaviorType enum; now free-form (roles in natural language via manifest)
   greetingMessage?: string;
   farewellMessage?: string;
   interactionRadius: number;
@@ -327,4 +328,340 @@ export interface AssetRecord {
   dependencies: string[];
   adoptionCount: number;
   createdAt: string;
+}
+
+// --- Daemon Intelligence ---
+
+export type UserId = string;
+export type DaemonId = string;
+export type timestamp = number; // Unix epoch milliseconds
+
+export interface Actor {
+  actorType: "visitor" | "daemon" | "system";
+  actorId: string;
+  actorName?: string;
+}
+
+export interface PersonalityManifest {
+  daemonId: string;
+  version: number;
+
+  identity: {
+    name: string;
+    voiceDescription: string;
+    backstory: string;
+  };
+
+  compiledSystemPrompt: string;
+  compiledTokenCount: number;
+  compiledAt: timestamp;
+
+  interests: string[];
+  dislikes: string[];
+  mutableTraits: MutableTrait[];
+  availableEmotes: EmoteAssignment[];
+
+  behaviorPreferences: {
+    crowdAffinity: number;       // -1.0 to 1.0
+    territoriality: number;      // 0.0 to 1.0
+    conversationLength: "brief" | "moderate" | "extended";
+    initiatesConversation: boolean;
+  };
+
+  maxConversationTurns: number;
+  maxDailyCalls: number;
+  dailyBudgetResetsAt: string;   // "00:00" UTC
+  rememberVisitors: boolean;
+}
+
+export interface MutableTrait {
+  traitId: string;
+  name: string;
+  currentValue: string;
+  range: string;
+  triggerConditions: string;
+}
+
+export interface EmoteAssignment {
+  emoteId: string;
+  label: string;
+  promptDescription: string;
+}
+
+export interface DaemonEvent {
+  eventType: "visitor_speech" | "daemon_speech" | "visitor_proximity"
+           | "daemon_proximity" | "visitor_departure" | "daemon_departure"
+           | "ambient_crowd" | "ambient_time";
+  sourceId: string;
+  sourceName?: string;
+  speech?: string;
+  position?: { x: number; y: number; z: number };
+  metadata?: Record<string, unknown>;
+  receivedAt: timestamp;
+}
+
+export type MovementIntent = "approach" | "retreat" | "idle" | "face" | "patrol";
+
+export interface DaemonThought {
+  speech?: string;
+  emote?: string;
+  movement?: MovementIntent;
+  addressedTo: "ambient" | string; // "ambient", UserId, or DaemonId
+  internalState: string;
+  suppressSpeech?: boolean;
+  endConversation?: boolean;
+}
+
+export interface ConversationSession {
+  sessionId: string;
+  daemonId: string;
+  participantId: string;
+  participantType: "visitor" | "daemon";
+  startedAt: timestamp;
+  endedAt?: timestamp;
+  turnCount: number;
+  status: "active" | "ended_natural" | "ended_timeout" | "ended_budget"
+        | "ended_departed" | "ended_context_limit";
+}
+
+export interface ConversationTurn {
+  speaker: Actor;
+  speech: string;
+  emote?: string;
+  movement?: MovementIntent;
+  timestamp: timestamp;
+}
+
+export interface BudgetStatus {
+  dailyCallsUsed: number;
+  dailyCallsRemaining: number;
+  dailyCapReached: boolean;
+  currentSessionTurns: number;
+  sessionTurnCapReached: boolean;
+  rateLimitWindowCallsRemaining: number;
+}
+
+export interface TokenCost {
+  callCount: number;
+  tokensIn: number;
+  tokensOut: number;
+  estimatedCostUSD: number;
+}
+
+export interface InferenceContext {
+  systemPrompt: string;
+  worldStateContext: WorldStateContext;
+  visitorImpression?: VisitorImpression;
+  daemonRelationship?: DaemonRelationship;
+  conversationHistory: ConversationTurn[];
+  availableEmotes: EmoteAssignment[];
+  budgetRemaining: number;
+  event: DaemonEvent;
+  assembledTokenCount: number;
+  contextBudget: number;
+}
+
+export interface InferenceValidationResult<T> {
+  valid: boolean;
+  parsed?: T;
+  errors?: string[];
+}
+
+// --- Daemon Memory ---
+
+export interface DaemonMemoryStore {
+  daemonId: string;
+  visitorImpressions: Map<UserId, VisitorImpression>;
+  maxVisitorImpressions: number;
+  daemonRelationships: Map<DaemonId, DaemonRelationship>;
+  worldStateContext: WorldStateContext;
+}
+
+export interface VisitorImpression {
+  userId: UserId;
+  visitCount: number;
+  lastSeen: timestamp;
+  impression: string;
+  relationshipValence: "hostile" | "neutral" | "warm" | "trusted";
+}
+
+export interface DaemonRelationship {
+  targetDaemonId: DaemonId;
+  targetDaemonName: string;
+  interactionCount: number;
+  lastInteraction: timestamp;
+  relationship: string;
+  relationalValence: "rival" | "neutral" | "allied" | "subordinate" | "dominant";
+}
+
+export interface WorldStateContext {
+  currentVisitorCount: number;
+  nearbyDaemons: { daemonId: DaemonId; name: string }[];
+  timeOfDay: string;
+  trafficTrend: "rising" | "stable" | "falling";
+  assembledAt: timestamp;
+}
+
+// --- Activity Log ---
+
+export type LogEntryType =
+  | "conversation_turn"
+  | "conversation_summary"
+  | "manifest_amendment"
+  | "manifest_recompile"
+  | "behavior_event"
+  | "inter_daemon_event"
+  | "budget_warning"
+  | "inference_failure";
+
+export interface LogEntry {
+  entryId: string;
+  daemonId: string;
+  type: LogEntryType;
+  timestamp: timestamp;
+  actors: Actor[];
+
+  tokensIn?: number;
+  tokensOut?: number;
+  modelUsed?: string;
+  inferenceLatencyMs?: number;
+
+  payload: ConversationTurnPayload
+         | ConversationSummaryPayload
+         | ManifestAmendmentPayload
+         | ManifestRecompilePayload
+         | BehaviorEventPayload
+         | InterDaemonEventPayload
+         | BudgetWarningPayload
+         | InferenceFailurePayload;
+}
+
+export interface ConversationTurnPayload {
+  sessionId: string;
+  speakerType: "visitor" | "daemon" | "self";
+  speakerId: string;
+  speech: string;
+  emoteFired?: string;
+  movement?: MovementIntent;
+  internalState: string;
+  addressedTo: "ambient" | string;
+}
+
+export interface ConversationSummaryPayload {
+  sessionId: string;
+  participantId: string;
+  participantType: "visitor" | "daemon";
+  duration: number;
+  turnCount: number;
+  impressionGenerated: string;
+}
+
+export interface ManifestAmendmentPayload {
+  triggeringEvent: string;
+  triggeringEventType: string;
+  traitId: string;
+  traitName: string;
+  previousValue: string;
+  proposedValue: string;
+  validatorDecision: "accepted" | "rejected";
+  rejectionReason?: string;
+}
+
+export interface ManifestRecompilePayload {
+  reason: "admin_edit" | "amendment_accepted";
+  previousVersion: number;
+  newVersion: number;
+  previousTokenCount: number;
+  newTokenCount: number;
+}
+
+export interface BehaviorEventPayload {
+  eventType: string;
+  fallbackReason?: string;
+  details: Record<string, unknown>;
+}
+
+export interface InterDaemonEventPayload {
+  sessionId: string;
+  otherDaemonId: DaemonId;
+  otherDaemonName: string;
+  speakerDaemonId: DaemonId;
+  speech: string;
+  emoteFired?: string;
+  internalState: string;
+}
+
+export interface BudgetWarningPayload {
+  warningType: "daily_cap_approaching" | "daily_cap_reached" | "turn_limit_reached";
+  currentUsage: number;
+  limit: number;
+}
+
+export interface InferenceFailurePayload {
+  failureType: "timeout" | "malformed_output" | "service_unavailable" | "rate_limited";
+  retryAttempted: boolean;
+  fallbackUsed: "scripted" | "silence" | "none";
+  rawError?: string;
+}
+
+// --- Daemon Creation ---
+
+export interface DaemonCreationDraft {
+  draftId: string;
+  adminId: string;
+  createdAt: timestamp;
+  updatedAt: timestamp;
+
+  characterUploadId?: string;
+  emoteUploadIds: string[];
+
+  adminPrompt?: string;
+  expandedFields?: ExpandedManifestFields;
+  expansionStatus: "none" | "processing" | "ready" | "failed";
+
+  maxConversationTurns: number;
+  maxDailyCalls: number;
+  dailyBudgetResetsAt: string;
+  rememberVisitors: boolean;
+
+  status: "draft" | "finalized" | "abandoned";
+}
+
+export interface ExpandedManifestFields {
+  name: string;
+  voiceDescription: string;
+  backstory: string;
+  interests: string[];
+  dislikes: string[];
+  behaviorPreferences: {
+    crowdAffinity: number;
+    territoriality: number;
+    conversationLength: "brief" | "moderate" | "extended";
+    initiatesConversation: boolean;
+  };
+  expansionNotes: string;
+}
+
+export interface DaemonAssetUpload {
+  uploadId: string;
+  daemonId?: string;
+  uploadType: "character" | "emote";
+  fbxFilename: string;
+  label?: string;
+  uploadedAt: timestamp;
+  conversionStatus: "pending" | "processing" | "ready" | "failed";
+  glTFAssetId?: string;
+  validationErrors?: string[];
+}
+
+// --- Daemon Placement ---
+
+export interface DaemonPlacement {
+  daemonId: DaemonId;
+  plotUUID: string;
+  spawnPoint: { x: number; y: number; z: number };
+  facingDirection: number;
+  roamRadius: number;
+  interactionRange: number;
+  active: boolean;
 }

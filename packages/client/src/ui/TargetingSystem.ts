@@ -4,7 +4,7 @@ import type { DaemonRenderer } from "../avatar/DaemonRenderer.js";
 
 const TARGET_RANGE = 50;
 
-interface TargetEntity {
+export interface TargetEntity {
   id: string;
   type: "daemon" | "player";
   position: THREE.Vector3;
@@ -23,8 +23,8 @@ export class TargetingSystem {
   // Highlight ring
   private highlightRing: THREE.Mesh | null = null;
 
-  // Info card HTML
-  private infoCard: HTMLDivElement;
+  /** Called when target changes (null = deselected) */
+  onTargetChange: ((target: TargetEntity | null) => void) | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -49,28 +49,28 @@ export class TargetingSystem {
     this.highlightRing.visible = false;
     this.highlightRing.renderOrder = 999;
     this.scene.add(this.highlightRing);
+  }
 
-    // Create info card
-    this.infoCard = document.createElement("div");
-    this.infoCard.id = "target-info-card";
-    this.infoCard.style.cssText = `
-      position: fixed;
-      top: 50%;
-      right: 20px;
-      transform: translateY(-50%);
-      width: 240px;
-      background: rgba(10, 10, 15, 0.9);
-      border: 1px solid rgba(0, 255, 255, 0.3);
-      border-radius: 8px;
-      padding: 16px;
-      color: white;
-      font-family: system-ui, sans-serif;
-      font-size: 13px;
-      z-index: 200;
-      display: none;
-      pointer-events: none;
-    `;
-    document.body.appendChild(this.infoCard);
+  /** Get the current target */
+  getTarget(): TargetEntity | null {
+    return this.currentTarget;
+  }
+
+  /** Select a specific entity by id and type (used by click targeting) */
+  selectById(id: string, type: "daemon" | "player"): void {
+    // Get position
+    let pos: THREE.Vector3 | null = null;
+    if (type === "daemon") {
+      pos = this.daemonRenderer.getDaemonPosition(id);
+    } else {
+      pos = this.avatarManager.getPlayerPosition(id);
+    }
+    if (!pos) return;
+
+    const playerPos = this.avatarManager.getLocalPlayerPosition();
+    const distance = playerPos ? pos.distanceTo(playerPos) : 0;
+
+    this.selectTarget({ id, type, position: pos, distance });
   }
 
   /** Cycle to next target in forward cone */
@@ -110,7 +110,7 @@ export class TargetingSystem {
     this.currentTarget = null;
     this.targetIndex = -1;
     if (this.highlightRing) this.highlightRing.visible = false;
-    this.infoCard.style.display = "none";
+    this.onTargetChange?.(null);
   }
 
   /** Update per frame (move highlight ring to track target) */
@@ -199,8 +199,8 @@ export class TargetingSystem {
     // Show name label on new target
     this.showTargetLabel(target);
 
-    // Update info card
-    this.updateInfoCard(target);
+    // Notify listener
+    this.onTargetChange?.(target);
   }
 
   private showTargetLabel(target: TargetEntity): void {
@@ -219,34 +219,4 @@ export class TargetingSystem {
     }
   }
 
-  private updateInfoCard(target: TargetEntity): void {
-    if (target.type === "daemon") {
-      const info = this.daemonRenderer.getDaemonInfo(target.id);
-      if (!info) {
-        this.infoCard.style.display = "none";
-        return;
-      }
-      this.infoCard.innerHTML = `
-        <div style="font-size:16px;font-weight:bold;margin-bottom:8px;color:#88ddaa">${this.escapeHtml(info.name)}</div>
-        <div style="margin-bottom:4px"><span style="color:#888">Role:</span> ${this.escapeHtml(info.role)}</div>
-        <div style="margin-bottom:4px"><span style="color:#888">Mood:</span> ${this.escapeHtml(info.mood)}</div>
-        <div style="margin-bottom:4px"><span style="color:#888">Action:</span> ${this.escapeHtml(info.action)}</div>
-        <div style="margin-top:8px;color:#666;font-size:11px">Distance: ${target.distance.toFixed(1)}m</div>
-      `;
-    } else {
-      const name = target.id;
-      this.infoCard.innerHTML = `
-        <div style="font-size:16px;font-weight:bold;margin-bottom:8px;color:#aaddff">${this.escapeHtml(name)}</div>
-        <div style="margin-bottom:4px"><span style="color:#888">Player</span></div>
-        <div style="margin-top:8px;color:#666;font-size:11px">Distance: ${target.distance.toFixed(1)}m</div>
-      `;
-    }
-    this.infoCard.style.display = "block";
-  }
-
-  private escapeHtml(text: string): string {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
-  }
 }

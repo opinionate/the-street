@@ -159,9 +159,8 @@ async function init() {
       else if (daemonDirectoryPanel.isVisible) { daemonDirectoryPanel.hide(); }
       else if (creationPanel.isVisible()) { creationPanel.hide(); }
       else if (galleryPanel.isVisible()) { galleryPanel.hide(); }
-      else if (daemonChatUI.isVisible()) { daemonChatUI.hide(); }
-      else if (chatUI.isVisible()) { chatUI.hide(); }
       else if (targetingSystem.hasTarget) { targetingSystem.deselect(); }
+      else if (chatUI.isVisible()) { chatUI.hide(); }
       else { escapeMenu.toggle(); }
     }
   }, true); // capture phase
@@ -213,6 +212,7 @@ async function init() {
       userRole = yourRole;
       if (authManager) authManager.role = yourRole;
       daemonPanel.setSuperAdmin(yourRole === "super_admin");
+      daemonChatUI.setSuperAdmin(yourRole === "super_admin");
       for (const p of players) {
         avatarManager.addPlayer(p);
       }
@@ -421,17 +421,15 @@ async function init() {
     clearObjectSelection();
 
     if (!hit) {
-      // Clicked empty space → deselect and close daemon chat
-      if (daemonChatUI.isVisible()) daemonChatUI.hide();
+      // Clicked empty space → deselect
+      targetingSystem.deselect();
       return;
     }
 
     if (hit.type === "daemon") {
-      const name = daemonRenderer.getDaemonName(hit.id) || "NPC";
-      daemonChatUI.show(hit.id, name);
+      targetingSystem.selectById(hit.id, "daemon");
     } else if (hit.type === "player") {
-      const name = avatarManager.getPlayerName(hit.id) || hit.id;
-      chatUI.addMessage("system", "System", `Selected player: ${name}`, "system");
+      targetingSystem.selectById(hit.id, "player");
     } else if (hit.type === "object") {
       selectedObjectId = hit.id;
       const group = objectGroups.get(selectedObjectId)!;
@@ -481,12 +479,50 @@ async function init() {
     network.sendDaemonInteract(daemonId, message || undefined);
   };
 
+  daemonChatUI.onSendDirective = async (daemonId, directive) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/directive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ directive }),
+      });
+      if (res.ok) {
+        chatUI.addMessage("system", "System", `Directive sent to daemon`, "system");
+      } else {
+        chatUI.addMessage("system", "System", `Failed to send directive`, "system");
+      }
+    } catch {
+      chatUI.addMessage("system", "System", `Failed to send directive`, "system");
+    }
+  };
+
   // Tab targeting
   inputManager.onTabTarget = (reverse) => {
     if (reverse) {
       targetingSystem.cyclePrevious();
     } else {
       targetingSystem.cycleNext();
+    }
+  };
+
+  // Target change → show/hide daemon chat UI
+  targetingSystem.onTargetChange = (target) => {
+    if (!target) {
+      daemonChatUI.hide();
+      return;
+    }
+    if (target.type === "daemon") {
+      const name = daemonRenderer.getDaemonName(target.id) || "NPC";
+      const info = daemonRenderer.getDaemonInfo(target.id);
+      daemonChatUI.show(target.id, name, info ? {
+        role: info.role,
+        mood: info.mood,
+        action: info.action,
+        distance: target.distance,
+      } : undefined);
+    } else {
+      // Player targeted — no chat UI, just ring + label
+      daemonChatUI.hide();
     }
   };
 
@@ -1365,6 +1401,7 @@ async function init() {
         userRole = me.role;
         authManager.role = me.role;
         daemonPanel.setSuperAdmin(me.role === "super_admin");
+        daemonChatUI.setSuperAdmin(me.role === "super_admin");
       }
     } catch { /* role will come from world_snapshot */ }
   }
@@ -1417,6 +1454,7 @@ async function init() {
   if (!authManager) {
     userRole = "super_admin";
     daemonPanel.setSuperAdmin(true);
+    daemonChatUI.setSuperAdmin(true);
     const badge = document.createElement("div");
     badge.textContent = "ADMIN (DEV)";
     badge.style.cssText = `

@@ -548,10 +548,7 @@ export class ObjectRenderer {
     fixture.position.y = size.y * 0.85;
     group.add(fixture);
 
-    // Actual point light
-    const light = new THREE.PointLight(new THREE.Color(emissiveColor), 1, 15);
-    light.position.y = size.y * 0.85;
-    group.add(light);
+    // PointLight removed for performance — emissive material provides visual glow
   }
 
   private buildDoor(

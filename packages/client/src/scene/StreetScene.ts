@@ -1,10 +1,15 @@
 import * as THREE from "three";
 
+const SHADOW_FRUSTUM = 60; // half-size of the shadow camera frustum around player
+
 export class StreetScene {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   renderer: THREE.WebGLRenderer;
   clock: THREE.Clock;
+
+  /** Directional light whose shadow follows the player */
+  private sunLight: THREE.DirectionalLight;
 
   private updateCallbacks: Array<(dt: number) => void> = [];
 
@@ -21,11 +26,11 @@ export class StreetScene {
     );
     this.camera.position.set(0, 10, 30);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ antialias: false });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
@@ -35,19 +40,20 @@ export class StreetScene {
     const ambient = new THREE.AmbientLight(0xccccdd, 2.0);
     this.scene.add(ambient);
 
-    // Main directional light (warm-white, bright)
-    const moon = new THREE.DirectionalLight(0xccccff, 2.5);
-    moon.position.set(50, 200, 50);
-    moon.castShadow = true;
-    moon.shadow.mapSize.width = 2048;
-    moon.shadow.mapSize.height = 2048;
-    moon.shadow.camera.near = 0.5;
-    moon.shadow.camera.far = 500;
-    moon.shadow.camera.left = -250;
-    moon.shadow.camera.right = 250;
-    moon.shadow.camera.top = 250;
-    moon.shadow.camera.bottom = -250;
-    this.scene.add(moon);
+    // Main directional light — shadow frustum follows player each frame
+    this.sunLight = new THREE.DirectionalLight(0xccccff, 2.5);
+    this.sunLight.position.set(50, 200, 50);
+    this.sunLight.castShadow = true;
+    this.sunLight.shadow.mapSize.width = 1024;
+    this.sunLight.shadow.mapSize.height = 1024;
+    this.sunLight.shadow.camera.near = 0.5;
+    this.sunLight.shadow.camera.far = 300;
+    this.sunLight.shadow.camera.left = -SHADOW_FRUSTUM;
+    this.sunLight.shadow.camera.right = SHADOW_FRUSTUM;
+    this.sunLight.shadow.camera.top = SHADOW_FRUSTUM;
+    this.sunLight.shadow.camera.bottom = -SHADOW_FRUSTUM;
+    this.scene.add(this.sunLight);
+    this.scene.add(this.sunLight.target);
 
     // Warm fill light from opposite side
     const fill = new THREE.DirectionalLight(0xddccaa, 1.2);
@@ -61,6 +67,12 @@ export class StreetScene {
     this.clock = new THREE.Clock();
 
     window.addEventListener("resize", this.onResize.bind(this));
+  }
+
+  /** Move the shadow frustum to center on the player */
+  updateShadowTarget(playerPos: THREE.Vector3): void {
+    this.sunLight.target.position.set(playerPos.x, 0, playerPos.z);
+    this.sunLight.position.set(playerPos.x + 50, 200, playerPos.z + 50);
   }
 
   onUpdate(cb: (dt: number) => void): void {

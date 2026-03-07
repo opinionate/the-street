@@ -156,11 +156,6 @@ export class StreetGeometry {
       bulb.position.z = Math.sin(toCenter) * 2.5;
       lampGroup.add(bulb);
 
-      // Single point light per lamp (no shadow — shadow maps are expensive)
-      const lampLight = new THREE.PointLight(0xffcc66, 2.0, 20, 2);
-      lampLight.position.set(bulb.position.x, bulb.position.y - 0.2, bulb.position.z);
-      lampGroup.add(lampLight);
-
       this.mesh.add(lampGroup);
     }
   }

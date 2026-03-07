@@ -654,9 +654,8 @@ export class AvatarManager {
     glow.scale.set(1.4, 1.4, 1);
     body.add(glow);
 
-    // --- Point light for illuminating surroundings ---
-    const light = new THREE.PointLight(0xeeeeff, 1.5, 5, 2);
-    body.add(light);
+    // Stub light (not added to scene — avoids per-player GPU light cost)
+    const light = new THREE.PointLight(0, 0, 0);
 
     // --- Stub limb refs (procedural animation writes to these harmlessly) ---
     const stubMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());

@@ -1352,10 +1352,8 @@ export class DaemonRenderer {
     glow.position.y = 1.0;
     body.add(glow);
 
-    // --- Point light with accent color ---
-    const light = new THREE.PointLight(accentColor, 1.5, 5, 2);
-    light.position.y = 1.0;
-    body.add(light);
+    // Stub light (not added to scene — avoids per-daemon GPU light cost)
+    const light = new THREE.PointLight(accentColor, 0, 0, 0);
 
     // --- Stub mesh refs so procedural animation code writes harmlessly ---
     const stubMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());

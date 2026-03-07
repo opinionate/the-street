@@ -1729,6 +1729,7 @@ async function init() {
     const playerPos = avatarManager.getLocalPlayerPosition();
     if (playerPos) {
       cameraController.update(playerPos, dt);
+      streetScene.updateShadowTarget(playerPos);
     }
   });
 

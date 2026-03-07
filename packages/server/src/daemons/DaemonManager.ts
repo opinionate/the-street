@@ -411,7 +411,7 @@ export class DaemonManager {
           `*${name} nods at ${speakerName}* One moment, please.`,
           `Hang on, ${speakerName} — talking to someone right now.`,
         ];
-        this.broadcastDaemonChat(daemon, busyMessages[Math.floor(Math.random() * busyMessages.length)]);
+        this.broadcastDaemonChat(daemon, busyMessages[Math.floor(Math.random() * busyMessages.length)], undefined, undefined, true);
       },
 
       onSessionEnd: (daemonId, sessionId, reason) => {
@@ -916,12 +916,23 @@ export class DaemonManager {
     return Date.now() - lastChat < GLOBAL_PLAYER_CHAT_COOLDOWN_MS;
   }
 
+  /**
+   * Broadcast scripted daemon chat. Suppressed when the daemon is in a
+   * managed AI conversation (which uses daemon_speech_stream instead).
+   * Pass `force` to bypass the suppression (e.g. busy responses).
+   */
   private broadcastDaemonChat(
     daemon: DaemonInstance,
     content: string,
     targetUserId?: string,
     targetDaemonId?: string,
+    force = false,
   ): void {
+    // Suppress scripted chat when daemon is in a managed AI conversation
+    if (!force && this.sessionManager.hasActiveSession(daemon.state.daemonId)) {
+      return;
+    }
+
     // Track global per-player cooldown
     if (targetUserId) {
       daemon.lastChatToPlayer.set(targetUserId, Date.now());

@@ -43,11 +43,9 @@ export class TargetingSystem {
       transparent: true,
       opacity: 0.5,
       side: THREE.DoubleSide,
-      depthTest: false,
     });
     this.highlightRing = new THREE.Mesh(ringGeo, ringMat);
     this.highlightRing.visible = false;
-    this.highlightRing.renderOrder = 999;
     this.scene.add(this.highlightRing);
   }
 

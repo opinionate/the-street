@@ -1,0 +1,3 @@
+[
+  {"block":"POST /","lines":"17-80","what":"AI object generation via Anthropic with gallery persistence","why":"Used by client CreationPanel","dependencies":"requireAuth, rateLimit, generate (ai-service), validateWorldObject, getPool","status":"ACTIVE"}
+]

@@ -1,0 +1,3 @@
+[
+  {"block":"AuthManager class","lines":"8-83","what":"Clerk auth wrapper: init, sign in/out, token retrieval, display name, role","why":"Used by main.ts for auth flow","dependencies":"@clerk/clerk-js, UserRole","status":"ACTIVE"}
+]

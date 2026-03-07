@@ -1,0 +1,3 @@
+[
+  {"block":"computeContentHash","lines":"4-6","what":"SHA-256 hash of a buffer","why":"Used for content-addressed asset storage","dependencies":"node:crypto","status":"ACTIVE"}
+]

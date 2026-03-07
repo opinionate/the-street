@@ -1,0 +1,3 @@
+[
+  {"block":"TargetingSystem class","lines":"15-234","what":"Tab-targeting system: forward cone target detection (60deg, 30m range), Tab/Shift-Tab cycling through daemons and players sorted by distance, pulsing cyan highlight ring (Three.js mesh), info card showing daemon role/mood/action or player name, per-frame position tracking","why":"Used by main.ts for Tab-targeting","dependencies":"three, AvatarManager, DaemonRenderer","status":"ACTIVE"}
+]

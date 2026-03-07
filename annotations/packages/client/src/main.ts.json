@@ -1,0 +1,7 @@
+[
+  {"block":"Imports","lines":"1-30","what":"Import all scene, avatar, UI, network modules","why":"Client entry point","dependencies":"All client modules, @the-street/shared","status":"ACTIVE"},
+  {"block":"App class","lines":"~32-1400+","what":"Main application orchestrator: auth flow, scene setup, network connection, input handling, game loop, all UI panel wiring","why":"Entry point, coordinates all client systems","dependencies":"StreetScene, StreetGeometry, PlotRenderer, ObjectRenderer, AvatarManager, DaemonRenderer, InputManager, CameraController, NetworkManager, ChatUI, all UI panels, AuthManager","status":"ACTIVE"},
+  {"block":"Movement/rendering loop","lines":"~mid-file","what":"Per-frame: input processing, movement, camera follow, animation, network position sync","why":"Core game loop","dependencies":"InputManager, CameraController, AvatarManager, NetworkManager","status":"ACTIVE"},
+  {"block":"Network callbacks","lines":"~mid-file","what":"Handle world_snapshot, player join/leave/move, chat, object place/remove, daemon events","why":"Process server messages","dependencies":"NetworkCallbacks interface","status":"ACTIVE"},
+  {"block":"UI panel instantiation","lines":"~end of constructor","what":"Create and wire all UI panels (ChatUI, CreationPanel, GalleryPanel, AvatarPanel, DaemonPanel, DaemonCreationPanel, etc.)","why":"Full UI setup","dependencies":"All UI panel classes","status":"ACTIVE"}
+]

@@ -1,0 +1,5 @@
+[
+  {"block":"DaemonGenerationResult","lines":"4-7","what":"Return type for daemon generation","why":"Used by server daemons API","dependencies":"DaemonDefinition","status":"ACTIVE"},
+  {"block":"DAEMON_SYSTEM_PROMPT","lines":"9-76","what":"System prompt for daemon NPC creation","why":"Injected into Claude API call","dependencies":"None","status":"ACTIVE"},
+  {"block":"generateDaemon","lines":"78-164","what":"AI-generate a daemon definition from user description","why":"Called by /api/daemons/generate","dependencies":"MODEL, getClient, stripJsonFences, sanitizeUserInput","status":"ACTIVE"}
+]

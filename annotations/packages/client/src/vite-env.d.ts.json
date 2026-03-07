@@ -1,0 +1,3 @@
+[
+  {"block":"Vite client types","lines":"1","what":"Vite client type reference","why":"TypeScript needs this for Vite-specific features","dependencies":"vite","status":"ACTIVE"}
+]

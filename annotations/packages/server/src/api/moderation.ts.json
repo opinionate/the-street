@@ -1,0 +1,3 @@
+[
+  {"block":"POST /action","lines":"8-53","what":"Log moderation action (warn, remove, suspend)","why":"Platform operator moderation (super_admin only)","dependencies":"requireAuth, requireRole, getPool","status":"ACTIVE"}
+]

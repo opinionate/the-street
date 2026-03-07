@@ -1,0 +1,3 @@
+[
+  {"block":"barrel re-exports","lines":"1-5","what":"Re-exports all shared modules","why":"Single import point for consumers","dependencies":"types, world-geometry, protocol, building-codes, validator","status":"ACTIVE"}
+]

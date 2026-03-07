@@ -1,0 +1,3 @@
+[
+  {"block":"validateWorldObject","lines":"10-260","what":"Validates a WorldObject against building codes (PBR, physics, bounds, signage)","why":"Used in generation endpoint retry loop and plot publish","dependencies":"WorldObject, BoundingBox, BuildingCodeRules, NeighborhoodCodeRules, ValidationResult","status":"ACTIVE"}
+]

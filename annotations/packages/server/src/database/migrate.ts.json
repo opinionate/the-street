@@ -1,0 +1,4 @@
+[
+  {"block":"MIGRATIONS array","lines":"3-572","what":"30 SQL migrations defining full DB schema (users, plots, world_objects, assets, daemons, memories, manifests, sessions, activity_log, etc.)","why":"Applied on server startup via runMigrations","dependencies":"None","status":"ACTIVE"},
+  {"block":"runMigrations","lines":"574-604","what":"Apply pending migrations with tracking table","why":"Called by server index.ts on startup","dependencies":"pg.Pool","status":"ACTIVE"}
+]

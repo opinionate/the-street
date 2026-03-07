@@ -1,0 +1,3 @@
+[
+  {"block":"GET /:uuid/metrics","lines":"8-67","what":"Plot visit metrics with aggregates (visit count, avg dwell, repeat rate)","why":"Plot owner analytics","dependencies":"requireAuth, isAdmin, getPool","status":"ACTIVE"}
+]

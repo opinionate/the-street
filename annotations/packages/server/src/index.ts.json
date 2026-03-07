@@ -1,0 +1,5 @@
+[
+  {"block":"Manual .env loading","lines":"1-20","what":"Force-load .env overriding empty system vars","why":"Server entry point, runs on startup","dependencies":"node:fs, node:path, node:url","status":"ACTIVE"},
+  {"block":"Import declarations","lines":"22-48","what":"Import express, colyseus, routes, services","why":"Wire up REST API and WebSocket server","dependencies":"express, cors, colyseus, all API routes, rooms, services","status":"ACTIVE"},
+  {"block":"main()","lines":"53-276","what":"Server bootstrap: migrations, dev seed, REST API, Colyseus WebSocket, graceful shutdown","why":"Entry point","dependencies":"getPool, runMigrations, archiveOldLogEntries, loadCooldowns, StreetRoom, StagingRoom, all route modules","status":"ACTIVE"}
+]

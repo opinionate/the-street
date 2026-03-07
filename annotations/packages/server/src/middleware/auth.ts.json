@@ -1,0 +1,9 @@
+[
+  {"block":"AuthedRequest","lines":"6-10","what":"Extended Request with userId, clerkId, userRole","why":"Used by all API route handlers","dependencies":"express.Request","status":"ACTIVE"},
+  {"block":"clerkAuth","lines":"13","what":"Clerk middleware instance","why":"Used by requireAuth in production","dependencies":"@clerk/express","status":"ACTIVE"},
+  {"block":"resolveUser","lines":"16-42","what":"Resolve Clerk user to internal DB user","why":"Used by requireAuth in production","dependencies":"@clerk/express, getPool","status":"ACTIVE"},
+  {"block":"devBypass","lines":"45-54","what":"Dev mode auth bypass with super_admin","why":"Used by requireAuth in development","dependencies":"None","status":"ACTIVE"},
+  {"block":"requireAuth","lines":"57-62","what":"Combined auth middleware (dev bypass or Clerk)","why":"Used by all protected API routes","dependencies":"devBypass, clerkAuth, resolveUser","status":"ACTIVE"},
+  {"block":"requireRole","lines":"68-76","what":"Role-based access control middleware","why":"Used by admin/moderation routes","dependencies":"UserRole","status":"ACTIVE"},
+  {"block":"isAdmin","lines":"81-83","what":"Check if request user is super_admin","why":"Used by plots, metrics, daemons, animations for ownership bypass","dependencies":"AuthedRequest","status":"ACTIVE"}
+]

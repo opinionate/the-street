@@ -1,0 +1,9 @@
+[
+  {"block":"SessionCallbacks","lines":"21-38","what":"Callback interface for DaemonManager integration","why":"Decouples session management from broadcast/persistence","dependencies":"InferenceResult, PersonalityManifest, WorldStateContext","status":"ACTIVE"},
+  {"block":"ConversationSessionManager class","lines":"54-450","what":"Session lifecycle: create, speech routing, timeout, end, summarization triggers","why":"Instantiated by DaemonManager, manages all daemon conversation sessions","dependencies":"InferenceController (runInference), getPool","status":"ACTIVE"},
+  {"block":"startSession","lines":"81-115","what":"Create new session with DB persistence","why":"Called when behavior tree enters in_conversation","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"handleSpeech","lines":"121-238","what":"Route speech to inference, record turns, check end conditions","why":"Core conversation loop","dependencies":"runInference, callbacks","status":"ACTIVE"},
+  {"block":"handleBusyInterrupt","lines":"244-274","what":"Log and respond to non-participant speech during active session","why":"Busy response when daemon is already in conversation","dependencies":"callbacks.onBusyResponse","status":"ACTIVE"},
+  {"block":"tick","lines":"290-305","what":"Timeout monitoring for inactive sessions","why":"Called periodically by DaemonManager","dependencies":"None","status":"ACTIVE"},
+  {"block":"endSession","lines":"311-340","what":"End session, persist, trigger summarization if threshold met","why":"Called on timeout, departure, natural end, budget exhaustion","dependencies":"callbacks.onSummarize, callbacks.onSessionEnd, getPool","status":"ACTIVE"}
+]

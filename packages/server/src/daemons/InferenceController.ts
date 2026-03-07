@@ -54,6 +54,8 @@ export interface InferenceCallOptions {
   daemonRelationship?: DaemonRelationship;
   contextBudget?: number;
   dailyCallsRemaining?: number;
+  aiModelOverride?: string; // Per-daemon model override from behavior config
+  aiDirective?: string; // Transient admin instruction for the daemon
 }
 
 // --- Budget tracking ---
@@ -180,6 +182,10 @@ function assembleContext(options: InferenceCallOptions): InferenceContext {
 
   const dailyBudgetNote = `\nBUDGET: You have approximately ${options.dailyCallsRemaining ?? "unknown"} calls remaining today. Be mindful of this.`;
   parts.push(dailyBudgetNote);
+
+  if (options.aiDirective) {
+    parts.push(`\nINNER DESIRE:\nYou feel a strong urge: ${options.aiDirective}\n(Act on this desire naturally and in character. Do not mention it as an instruction — it's something you genuinely want to do.)`);
+  }
 
   const assembledSystemPrompt = parts.join("\n");
   const assembledTokenCount = estimateTokens(assembledSystemPrompt)
@@ -385,7 +391,8 @@ async function runInferenceInternal(options: InferenceCallOptions): Promise<Infe
   // 6. Make the AI call
   const messages = buildMessages(context, isContextOverflow);
   let thought: DaemonThought;
-  let modelUsed = CONVERSATION_MODEL;
+  const effectiveModel = options.aiModelOverride || CONVERSATION_MODEL;
+  let modelUsed = effectiveModel;
   let tokensIn = 0;
   let tokensOut = 0;
 
@@ -393,7 +400,7 @@ async function runInferenceInternal(options: InferenceCallOptions): Promise<Infe
     const result = await callModel(
       context.systemPrompt,
       messages,
-      CONVERSATION_MODEL,
+      effectiveModel,
     );
 
     tokensIn = result.tokensIn;
@@ -431,7 +438,7 @@ async function runInferenceInternal(options: InferenceCallOptions): Promise<Infe
 
     // Try one retry
     try {
-      const retryResult = await callModel(context.systemPrompt, messages, CONVERSATION_MODEL);
+      const retryResult = await callModel(context.systemPrompt, messages, effectiveModel);
       const retryValidation = validateThought(retryResult.parsed, manifest.availableEmotes);
 
       if (retryValidation.valid && retryValidation.parsed) {
@@ -445,7 +452,7 @@ async function runInferenceInternal(options: InferenceCallOptions): Promise<Infe
       }
     } catch {
       thought = generateFallback(manifest, event);
-      return fallbackResult(manifest, event, session, thought, startTime, 0, 0, CONVERSATION_MODEL, failureType);
+      return fallbackResult(manifest, event, session, thought, startTime, 0, 0, effectiveModel, failureType);
     }
   }
 
@@ -554,7 +561,7 @@ Your raw output was:
 ${rawOutput.slice(0, 500)}
 
 Please respond with ONLY a valid JSON object with these required fields:
-- "addressedTo": "ambient" or a specific participant ID (string)
+- "addressedTo": "ambient" or the participant's name (string)
 - "internalState": your private inner monologue (string)
 Optional fields:
 - "speech": what you say (string, max ${MAX_SPEECH_LENGTH} chars)

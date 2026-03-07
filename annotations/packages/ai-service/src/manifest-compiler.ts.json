@@ -1,0 +1,11 @@
+[
+  {"block":"estimateTokens","lines":"11-13","what":"Approximate token count from character count","why":"Used for truncation budget","dependencies":"None","status":"ACTIVE"},
+  {"block":"formatEmotes/formatTraits/formatInterests/formatBackstory","lines":"17-57","what":"Format manifest sections for system prompt with truncation levels","why":"Used by buildPrompt","dependencies":"EmoteAssignment, MutableTrait","status":"ACTIVE"},
+  {"block":"buildPrompt","lines":"59-101","what":"Build system prompt from manifest with OUTPUT FORMAT rules","why":"Core prompt assembly","dependencies":"PersonalityManifest","status":"ACTIVE"},
+  {"block":"manifestStore","lines":"104","what":"In-memory Map<string, PersonalityManifest>","why":"Runtime manifest storage (will be backed by DB)","dependencies":"None","status":"ACTIVE"},
+  {"block":"CompileReason","lines":"106","what":"Reason for recompilation","why":"Used in compile function","dependencies":"None","status":"ACTIVE"},
+  {"block":"CompileResult","lines":"108-111","what":"Compiled manifest + log entry","why":"Return type of compile","dependencies":"PersonalityManifest, ManifestRecompilePayload","status":"ACTIVE"},
+  {"block":"compile","lines":"118-154","what":"Compile manifest with truncation cascade to fit token budget","why":"Called by DaemonEvolutionEngine and DaemonManager","dependencies":"buildPrompt, estimateTokens","status":"ACTIVE"},
+  {"block":"getManifest","lines":"159-161","what":"Retrieve manifest by daemon ID","why":"Called by DaemonManager","dependencies":"manifestStore","status":"ACTIVE"},
+  {"block":"setManifest","lines":"166-168","what":"Store manifest directly","why":"Called when loading from DB","dependencies":"manifestStore","status":"ACTIVE"}
+]

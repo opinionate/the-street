@@ -1,0 +1,4 @@
+[
+  {"block":"AdminPanel class","lines":"16-238","what":"Admin dashboard: user list with role management (user/super_admin), Refresh/Close buttons, extensible via appendSection()","why":"Used by main.ts, toggled with F9, super_admin only","dependencies":"UserRole from shared","status":"ACTIVE"},
+  {"block":"AdminUser interface","lines":"3-10","what":"User data shape for admin panel","why":"Internal to AdminPanel","dependencies":"UserRole from shared","status":"ACTIVE"}
+]

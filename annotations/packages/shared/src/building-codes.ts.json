@@ -1,0 +1,4 @@
+[
+  {"block":"UNIVERSAL_CODE","lines":"3-29","what":"Default building code rules for all neighborhoods","why":"Used in validation and generation endpoints","dependencies":"BuildingCodeRules","status":"ACTIVE"},
+  {"block":"ORIGIN_NEIGHBORHOOD_CODE","lines":"31-37","what":"Origin neighborhood-specific constraints","why":"Used alongside UNIVERSAL_CODE","dependencies":"NeighborhoodCodeRules","status":"ACTIVE"}
+]

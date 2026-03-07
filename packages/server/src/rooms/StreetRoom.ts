@@ -577,6 +577,13 @@ export class StreetRoom extends Room<StreetRoomState> {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
 
+    // Validate objectId is a proper UUID before querying
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(data.objectId)) {
+      console.warn(`[StreetRoom] Invalid objectId for removal: ${data.objectId}`);
+      return;
+    }
+
     const pool = getPool();
 
     // Verify ownership via plot (admins bypass)
@@ -761,7 +768,7 @@ export class StreetRoom extends Room<StreetRoomState> {
     this.plotCache = await Promise.all(
       plots.map(async (plot) => {
         const { rows: objects } = await pool.query(
-          "SELECT object_definition FROM world_objects WHERE plot_uuid = $1",
+          "SELECT id, object_definition FROM world_objects WHERE plot_uuid = $1",
           [plot.uuid],
         );
 
@@ -775,7 +782,7 @@ export class StreetRoom extends Room<StreetRoomState> {
           position: plot.position,
           placement,
           objects: objects.map(
-            (o: { object_definition: WorldObject }) => o.object_definition,
+            (o: { id: string; object_definition: WorldObject }) => ({ ...o.object_definition, id: o.id }),
           ),
         };
       }),

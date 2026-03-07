@@ -1,0 +1,5 @@
+[
+  {"block":"PlotContext (local interface)","lines":"8-12","what":"Plot context for generation prompt","why":"Internal to system prompt builder","dependencies":"WorldObjectSummary, BoundingBox","status":"ACTIVE"},
+  {"block":"FEW_SHOT_EXAMPLES","lines":"14-114","what":"5 example world objects for few-shot prompting","why":"Included in system prompt for AI guidance","dependencies":"None","status":"ACTIVE"},
+  {"block":"buildSystemPrompt","lines":"116-207","what":"Build the full system prompt for world object generation","why":"Called by generate.ts","dependencies":"BuildingCodeRules, NeighborhoodCodeRules","status":"ACTIVE"}
+]

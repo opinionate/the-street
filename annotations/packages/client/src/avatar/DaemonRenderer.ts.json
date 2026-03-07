@@ -1,0 +1,3 @@
+[
+  {"block":"DaemonRenderer class","lines":"~60-1811","what":"Daemon NPC rendering: procedural avatar from DaemonDefinition, custom GLB model loading, FBX/GLB animation, mood indicators, chat bubbles, emote particles, thought bubbles, nameplate sprites","why":"Core daemon visualization, used by main.ts","dependencies":"three, GLTFLoader, FBXLoader, normalizeMixamoBoneName, CHAT_DISPLAY_DURATION","status":"ACTIVE"}
+]

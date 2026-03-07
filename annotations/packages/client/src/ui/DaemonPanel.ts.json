@@ -1,0 +1,3 @@
+[
+  {"block":"DaemonPanel class","lines":"5-590","what":"Daemon manager panel: generate daemon from text description via AI, 3D preview with drag rotation, review generated personality, place daemon on plot or street (admin mode), list existing daemons with roam toggle/recall/delete/activity log, placement mode selector for super_admin","why":"Used by main.ts, toggled with F7","dependencies":"three, DaemonDefinition from shared, AnimationPanel","status":"ACTIVE"}
+]

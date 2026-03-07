@@ -1,0 +1,3 @@
+[
+  {"block":"StreetScene class","lines":"3-87","what":"Three.js scene setup: renderer, camera, lighting (ambient, directional, hemisphere), render loop","why":"Core 3D scene container, used by main.ts","dependencies":"three","status":"ACTIVE"}
+]

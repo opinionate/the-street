@@ -1,0 +1,6 @@
+[
+  {"block":"GET /me","lines":"10-32","what":"Current user profile and role","why":"Used by client AdminPanel","dependencies":"requireAuth, getPool","status":"ACTIVE"},
+  {"block":"GET /users","lines":"35-52","what":"List all users (super_admin)","why":"Used by client AdminPanel","dependencies":"requireAuth, requireRole, getPool","status":"ACTIVE"},
+  {"block":"PUT /users/:id/role","lines":"55-85","what":"Assign user role (super_admin)","why":"Used by client AdminPanel","dependencies":"requireAuth, requireRole, getPool","status":"ACTIVE"},
+  {"block":"POST /cache-assets","lines":"88-128","what":"Download uncached gallery assets to local disk","why":"Admin utility for offline asset serving","dependencies":"requireAuth, requireRole, cacheObjectAssets, getPool","status":"ACTIVE"}
+]

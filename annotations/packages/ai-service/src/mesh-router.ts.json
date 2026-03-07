@@ -1,0 +1,6 @@
+[
+  {"block":"ArchetypeRoute","lines":"3-7","what":"Archetype mesh routing result","why":"Part of mesh routing system — never consumed","dependencies":"None","status":"DEAD"},
+  {"block":"NovelRoute","lines":"9-12","what":"Novel mesh routing result","why":"Part of mesh routing system — never consumed","dependencies":"None","status":"DEAD"},
+  {"block":"MeshRoute","lines":"14","what":"Union of routing results","why":"Part of mesh routing system — never consumed","dependencies":"ArchetypeRoute, NovelRoute","status":"DEAD"},
+  {"block":"routeMesh","lines":"16-39","what":"Routes generation result to archetype or novel mesh pipeline","why":"Never imported by any consumer — mesh routing is not implemented","dependencies":"GenerationResult","status":"DEAD"}
+]

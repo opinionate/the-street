@@ -1,0 +1,6 @@
+[
+  {"block":"GET /","lines":"8-30","what":"List generated objects (gallery view)","why":"Used by client GalleryPanel","dependencies":"getPool, getCachedPath","status":"ACTIVE"},
+  {"block":"GET /:id","lines":"33-55","what":"Full object detail","why":"Used by client for object inspection","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"GET /:id/model","lines":"58-76","what":"Serve cached GLB from local disk","why":"Local asset serving for gallery objects","dependencies":"readCachedAsset","status":"ACTIVE"},
+  {"block":"GET /:id/thumbnail","lines":"79-94","what":"Serve cached thumbnail","why":"Local thumbnail serving","dependencies":"readCachedAsset","status":"ACTIVE"}
+]

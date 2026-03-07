@@ -1,0 +1,5 @@
+[
+  {"block":"ChatUI class","lines":"59-440","what":"Proximity chat UI: always-visible message list with resizable handle, chat input with /emote autocomplete (arrow keys, tab completion), animated emote support, player/daemon/NPC message types with color coding, max 50 messages, auto-scroll with scroll-up detection","why":"Used by main.ts for player chat","dependencies":"None (pure DOM)","status":"ACTIVE"},
+  {"block":"ChatMessageType type","lines":"1","what":"Union type for message types (exported)","why":"Used by ChatUI and main.ts","dependencies":"None","status":"ACTIVE"},
+  {"block":"EMOTE_VERBS, ANIMATED_EMOTES constants","lines":"24-54","what":"Slash command definitions: text-only verbs and animated emotes with GLB animation IDs","why":"Used by ChatUI for /command processing","dependencies":"None","status":"ACTIVE"}
+]

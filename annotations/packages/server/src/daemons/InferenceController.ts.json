@@ -1,0 +1,13 @@
+[
+  {"block":"Model constants","lines":"27-28","what":"CONVERSATION_MODEL (haiku), COMPILATION_MODEL (sonnet)","why":"Used by runInference and exported for external use","dependencies":"None","status":"ACTIVE"},
+  {"block":"Budget tracking","lines":"60-93","what":"Redis-backed daily call count with budget date keys","why":"Enforce per-daemon daily API call limits","dependencies":"getRedis","status":"ACTIVE"},
+  {"block":"Rate limiting","lines":"96-124","what":"Sliding window rate limit via Redis sorted sets","why":"Prevent burst API calls per daemon","dependencies":"getRedis","status":"ACTIVE"},
+  {"block":"getBudgetStatus","lines":"128-143","what":"Get current budget status for a daemon","why":"Used for budget warnings","dependencies":"getDailyCallCount, getRateLimitCount","status":"ACTIVE"},
+  {"block":"assembleContext","lines":"147-201","what":"Build InferenceContext with system prompt, world state, impressions, emotes, budget","why":"Prepare context for AI call","dependencies":"PersonalityManifest, WorldStateContext, VisitorImpression","status":"ACTIVE"},
+  {"block":"validateThought","lines":"205-269","what":"Validate AI output against schema (addressedTo, speech length, emote, movement)","why":"Ensure AI responses are well-formed","dependencies":"EmoteAssignment, MovementIntent","status":"ACTIVE"},
+  {"block":"runInference","lines":"344-353","what":"Main inference entry point with fire-and-forget log persistence","why":"Called by ConversationSessionManager.handleSpeech","dependencies":"runInferenceInternal, appendLogEntry","status":"ACTIVE"},
+  {"block":"runInferenceInternal","lines":"355-506","what":"Full inference pipeline: budget check, rate limit, context assembly, AI call, validation, retry, fallback","why":"Core inference logic","dependencies":"callModel, assembleContext, validateThought, generateFallback","status":"ACTIVE"},
+  {"block":"callModel","lines":"510-541","what":"Call Anthropic API with system prompt and messages","why":"Used by runInferenceInternal and retryWithRepair","dependencies":"getClient (ai-service), stripJsonFences","status":"ACTIVE"},
+  {"block":"retryWithRepair","lines":"545-593","what":"Retry malformed AI output with repair prompt","why":"Self-healing on first validation failure","dependencies":"callModel, validateThought","status":"ACTIVE"},
+  {"block":"Result builders","lines":"597-695","what":"budgetExhaustedResult, rateLimitedResult, fallbackResult","why":"Structured error responses with logging","dependencies":"generateFallback","status":"ACTIVE"}
+]

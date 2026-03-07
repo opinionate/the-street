@@ -40,6 +40,7 @@ export class DaemonCreationPanel {
   onExpand: ((draftId: string, prompt?: string, clearedFields?: string[]) => Promise<{ expandedFields: ExpandedManifestFields }>) | null = null;
   onFinalize: ((draftId: string) => Promise<{ daemonId: string; name: string; compiledTokenCount: number }>) | null = null;
   onAbandon: ((draftId: string) => Promise<void>) | null = null;
+  onOpenPlacement: ((daemonId: string) => void) | null = null;
 
   constructor() {
     this.container = document.createElement("div");
@@ -679,11 +680,20 @@ export class DaemonCreationPanel {
         doneMsg.innerHTML = `
           <div style="color: #44ff88; font-size: 18px; margin-bottom: 12px;">\u2713 Daemon Created</div>
           <div style="color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 8px;">${this.esc(result.name)}</div>
-          <div style="color: rgba(255,255,255,0.4); font-size: 12px;">Compiled token count: ${result.compiledTokenCount}</div>
+          <div style="color: rgba(255,255,255,0.4); font-size: 12px; margin-bottom: 4px;">Compiled token count: ${result.compiledTokenCount}</div>
+          <div style="color: rgba(255,170,0,0.8); font-size: 12px; margin-top: 12px;">The daemon needs to be placed on a plot and activated before it appears in the world.</div>
         `;
 
+        const placeBtn = this.makeButton("Place in World", "#44aaff");
+        placeBtn.style.cssText += "margin-top: 16px; font-size: 14px; padding: 10px 24px;";
+        placeBtn.addEventListener("click", () => {
+          this.onOpenPlacement?.(result.daemonId);
+          this.hide();
+        });
+        doneMsg.appendChild(placeBtn);
+
         const newBtn = this.makeButton("Create Another", "#ff8c00");
-        newBtn.style.cssText += "margin-top: 20px;";
+        newBtn.style.cssText += "margin-top: 12px;";
         newBtn.addEventListener("click", () => this.renderStartScreen());
         doneMsg.appendChild(newBtn);
 

@@ -21,7 +21,9 @@ Given an admin's description of a daemon, produce a JSON object with these field
   "name": "string — infer a fitting name if admin didn't provide one",
   "voiceDescription": "string — how this daemon sounds when speaking (tone, cadence, vocabulary level, accent if any)",
   "backstory": "string — 2-4 sentences explaining who they are, where they came from, and what drives them",
+  "traits": ["string array — 3-5 specific personality traits (not generic like 'nice' — try 'overly enthusiastic about rocks')"],
   "interests": ["string array — 3-6 topics/activities this daemon enjoys or is knowledgeable about"],
+  "quirks": ["string array — 2-3 unique behaviors, catchphrases, or obsessions that make them memorable"],
   "dislikes": ["string array — 2-4 things this daemon avoids or dislikes"],
   "behaviorPreferences": {
     "crowdAffinity": "number -1.0 to 1.0 — negative means prefers solitude, positive means seeks crowds",
@@ -171,9 +173,17 @@ function validateExpandedFields(raw: Record<string, unknown>): ExpandedManifestF
     ? raw.backstory.slice(0, 600)
     : `${name} appeared on The Street one day, drawn by its energy.`;
 
+  const traits = Array.isArray(raw.traits)
+    ? (raw.traits as unknown[]).filter((i): i is string => typeof i === "string").slice(0, 5)
+    : ["curious", "friendly"];
+
   const interests = Array.isArray(raw.interests)
     ? (raw.interests as unknown[]).filter((i): i is string => typeof i === "string").slice(0, 6)
     : ["the street", "meeting people"];
+
+  const quirks = Array.isArray(raw.quirks)
+    ? (raw.quirks as unknown[]).filter((i): i is string => typeof i === "string").slice(0, 3)
+    : [];
 
   const dislikes = Array.isArray(raw.dislikes)
     ? (raw.dislikes as unknown[]).filter((i): i is string => typeof i === "string").slice(0, 4)
@@ -198,7 +208,9 @@ function validateExpandedFields(raw: Record<string, unknown>): ExpandedManifestF
     name,
     voiceDescription,
     backstory,
+    traits,
     interests,
+    quirks,
     dislikes,
     behaviorPreferences: {
       crowdAffinity,

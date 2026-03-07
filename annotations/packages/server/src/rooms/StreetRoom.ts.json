@@ -1,0 +1,14 @@
+[
+  {"block":"PlayerSchema","lines":"29-52","what":"Colyseus schema for synced player state","why":"State synced to all clients","dependencies":"@colyseus/schema","status":"ACTIVE"},
+  {"block":"StreetRoomState","lines":"54-59","what":"Room state containing player map","why":"Colyseus state management","dependencies":"@colyseus/schema","status":"ACTIVE"},
+  {"block":"getActiveDaemonManager","lines":"81-84","what":"Module-level accessor for daemon manager","why":"Used by REST API daemons route to access live daemon state","dependencies":"DaemonManager","status":"ACTIVE"},
+  {"block":"StreetRoom class","lines":"86-902","what":"Main game room: auth, join/leave, message handlers, tick loop, plot tracking","why":"Core multiplayer room","dependencies":"DaemonManager, getPool, checkChatRateLimit, shared geometry/config","status":"ACTIVE"},
+  {"block":"onCreate","lines":"105-170","what":"Initialize state, message handlers, daemon manager, tick intervals, load plots/daemons","why":"Room lifecycle","dependencies":"DaemonManager, loadPlots, loadDaemons","status":"ACTIVE"},
+  {"block":"onAuth","lines":"172-218","what":"Clerk auth or dev bypass","why":"Authenticate WebSocket connections","dependencies":"@clerk/express, getPool","status":"ACTIVE"},
+  {"block":"onJoin","lines":"220-284","what":"Add player to state, send world snapshot, broadcast join","why":"Player connection handling","dependencies":"PlayerSchema, DaemonManager","status":"ACTIVE"},
+  {"block":"onLeave","lines":"286-318","what":"Save position, exit plot, broadcast leave, notify daemons","why":"Player disconnection handling","dependencies":"DaemonManager.onPlayerLeave","status":"ACTIVE"},
+  {"block":"handleMove","lines":"331-384","what":"Position update with validation, anti-cheat, broadcast, plot tracking","why":"Core movement handler","dependencies":"MAX_SPEED bounds check","status":"ACTIVE"},
+  {"block":"handleChat","lines":"386-450","what":"Chat with rate limiting, radius broadcast, daemon overhear","why":"Proximity-based chat","dependencies":"checkChatRateLimit, CHAT_RADIUS, DaemonManager.onPlayerChat","status":"ACTIVE"},
+  {"block":"handleObjectPlace/Remove/UpdateState","lines":"496-639","what":"World object CRUD with ownership validation and daemon notification","why":"Building system","dependencies":"getPool, DaemonManager","status":"ACTIVE"},
+  {"block":"Plot visit tracking","lines":"806-901","what":"Track player entry/exit from plots for metrics","why":"Plot analytics","dependencies":"getPool, findPlotAtPosition","status":"ACTIVE"}
+]

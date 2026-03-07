@@ -1,0 +1,4 @@
+[
+  {"block":"DaemonDirectoryPanel class","lines":"29-768","what":"Daemon listing and detail/edit panel: card view with name/type/mood/position/description, teleport button, expandable activity logs, detail view with editable fields (basic info, personality, behavior, position), idle animation selector from uploaded emotes, embedded AnimationPanel for custom animations, save changes to server","why":"Used by main.ts, toggled with F10","dependencies":"DaemonState, DaemonDefinition, Vector3 from shared, AnimationPanel","status":"ACTIVE"},
+  {"block":"DaemonEntry, DaemonFullDetails interfaces","lines":"4-22","what":"Daemon list entry and full detail shapes","why":"Internal to DaemonDirectoryPanel","dependencies":"DaemonState, DaemonDefinition, Vector3 from shared","status":"ACTIVE"}
+]

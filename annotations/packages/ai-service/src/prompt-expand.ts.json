@@ -1,0 +1,11 @@
+[
+  {"block":"ExpandPromptOptions","lines":"4-9","what":"Options for prompt expansion (admin prompt, existing fields, emote labels)","why":"Used by server daemons API","dependencies":"ExpandedManifestFields","status":"ACTIVE"},
+  {"block":"ExpandPromptResult","lines":"11-14","what":"Expansion result with fields and optional emote descriptions","why":"Return type of expandPrompt","dependencies":"ExpandedManifestFields","status":"ACTIVE"},
+  {"block":"EXPANSION_SYSTEM_PROMPT","lines":"16-51","what":"System prompt for AI daemon description expansion","why":"Used by expandPrompt","dependencies":"None","status":"ACTIVE"},
+  {"block":"EMOTE_SUGGESTION_ADDENDUM","lines":"53-57","what":"Addendum for emote description suggestions","why":"Appended when emote labels provided","dependencies":"None","status":"ACTIVE"},
+  {"block":"buildReexpansionContext","lines":"59-78","what":"Build context for re-expanding with preserved fields","why":"Used by expandPrompt for iterative refinement","dependencies":"ExpandedManifestFields","status":"ACTIVE"},
+  {"block":"expandPrompt","lines":"80-159","what":"AI-expand admin daemon description into structured manifest fields","why":"Called by /api/daemons/expand-prompt","dependencies":"MODEL, getClient, stripJsonFences, sanitizeUserInput, repairTruncatedJson","status":"ACTIVE"},
+  {"block":"validateExpandedFields","lines":"161-211","what":"Validate and sanitize AI expansion output","why":"Called by expandPrompt","dependencies":"ExpandedManifestFields","status":"ACTIVE"},
+  {"block":"repairTruncatedJson","lines":"238-316","what":"Attempt to repair JSON truncated by max_tokens","why":"Called when AI response is cut off","dependencies":"countOpen","status":"ACTIVE"},
+  {"block":"countOpen","lines":"318-338","what":"Count unmatched braces/brackets in JSON string","why":"Used by repairTruncatedJson","dependencies":"None","status":"ACTIVE"}
+]

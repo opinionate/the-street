@@ -1,0 +1,16 @@
+[
+  {"block":"POST /generate","lines":"24-44","what":"AI daemon definition generation from description","why":"Used by client DaemonCreationPanel","dependencies":"requireAuth, rateLimit, generateDaemon (ai-service)","status":"ACTIVE"},
+  {"block":"GET /","lines":"~46-80","what":"List all daemons for user's plots","why":"Used by client DaemonPanel","dependencies":"requireAuth, getPool","status":"ACTIVE"},
+  {"block":"POST /","lines":"~82-140","what":"Create daemon from definition","why":"Used by client DaemonCreationPanel","dependencies":"requireAuth, getPool, MAX_DAEMONS_PER_PLOT","status":"ACTIVE"},
+  {"block":"PUT /:id","lines":"~142-180","what":"Update daemon definition","why":"Used by client DaemonPanel","dependencies":"requireAuth, isAdmin, getPool","status":"ACTIVE"},
+  {"block":"DELETE /:id","lines":"~182-210","what":"Soft-delete daemon (is_active=false)","why":"Used by client DaemonPanel","dependencies":"requireAuth, isAdmin, getPool","status":"ACTIVE"},
+  {"block":"POST /expand-prompt","lines":"~212-260","what":"AI prompt expansion for daemon manifests","why":"Used by client DaemonCreationPanel","dependencies":"requireAuth, rateLimit, expandPrompt (ai-service)","status":"ACTIVE"},
+  {"block":"POST /:id/upload-fbx","lines":"~262-340","what":"Upload FBX file for daemon with magic byte validation","why":"Used by client for daemon character upload","dependencies":"requireAuth, FBX_BINARY_MAGIC, node:fs, getPool","status":"ACTIVE"},
+  {"block":"GET /:id/emotes","lines":"~342-380","what":"List daemon emote uploads","why":"Used by client DaemonPanel","dependencies":"requireAuth, getPool","status":"ACTIVE"},
+  {"block":"POST /:id/compile-manifest","lines":"~382-440","what":"Compile personality manifest from daemon definition + expanded fields","why":"Used by client DaemonCreationPanel finalization","dependencies":"requireAuth, compile (ai-service), getPool","status":"ACTIVE"},
+  {"block":"GET /:id/activity-log","lines":"~442-500","what":"Paginated activity log for daemon","why":"Used by client ActivityLogViewer","dependencies":"requireAuth, queryActivityLog (ActivityLogService)","status":"ACTIVE"},
+  {"block":"GET /:id/token-summary","lines":"~502-540","what":"Token usage summary for daemon","why":"Used by client DaemonPanel","dependencies":"requireAuth, getTokenSummary (ActivityLogService)","status":"ACTIVE"},
+  {"block":"POST /:id/placement","lines":"~542-620","what":"Create/update daemon placement on plot","why":"Used by client DaemonPlacementPanel","dependencies":"requireAuth, getPlotPosition, V1_CONFIG, getPool","status":"ACTIVE"},
+  {"block":"GET /:id/placement","lines":"~622-650","what":"Get daemon placement","why":"Used by client DaemonPlacementPanel","dependencies":"requireAuth, getPool","status":"ACTIVE"},
+  {"block":"POST /:id/activate","lines":"~652-700","what":"Activate daemon placement in live room","why":"Used by client to deploy daemon","dependencies":"requireAuth, getActiveDaemonManager (StreetRoom)","status":"ACTIVE"}
+]

@@ -1,0 +1,11 @@
+[
+  {"block":"generate re-export","lines":"1","what":"Re-exports generate function","why":"Public API for world object generation","dependencies":"generate.ts","status":"ACTIVE"},
+  {"block":"routeMesh re-export","lines":"2","what":"Re-exports routeMesh function","why":"Part of dead mesh routing system","dependencies":"mesh-router.ts","status":"DEAD"},
+  {"block":"MeshRoute/ArchetypeRoute/NovelRoute re-export","lines":"3","what":"Re-exports mesh routing types","why":"Part of dead mesh routing system","dependencies":"mesh-router.ts","status":"DEAD"},
+  {"block":"buildSystemPrompt re-export","lines":"4","what":"Re-exports system prompt builder","why":"Only used internally by generate.ts","dependencies":"system-prompt.ts","status":"SUSPECT"},
+  {"block":"generateDaemon re-export","lines":"5-6","what":"Re-exports daemon generation","why":"Used by server daemons API","dependencies":"daemon-generate.ts","status":"ACTIVE"},
+  {"block":"daemon-converse re-exports","lines":"7-8","what":"Re-exports daemon conversation functions","why":"Used by DaemonManager","dependencies":"daemon-converse.ts","status":"ACTIVE"},
+  {"block":"expandPrompt re-exports","lines":"9-10","what":"Re-exports prompt expansion","why":"Used by server daemons API","dependencies":"prompt-expand.ts","status":"ACTIVE"},
+  {"block":"utils re-exports","lines":"11","what":"Re-exports MODEL, FALLBACK_MODEL, getClient, etc.","why":"Used by InferenceController and VisitorImpressionStore","dependencies":"utils.ts","status":"ACTIVE"},
+  {"block":"manifest-compiler re-exports","lines":"12-13","what":"Re-exports compile, getManifest, setManifest","why":"Used by DaemonEvolutionEngine and DaemonManager","dependencies":"manifest-compiler.ts","status":"ACTIVE"}
+]

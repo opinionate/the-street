@@ -1,0 +1,5 @@
+[
+  {"block":"getVisitorImpression","lines":"19-41","what":"Load visitor impression from DB","why":"Used by DaemonManager for session context","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"evictExcessImpressions","lines":"45-90","what":"LRU eviction when impression count exceeds 200 per daemon","why":"Memory management for long-running daemons","dependencies":"getPool, appendLogEntry","status":"ACTIVE"},
+  {"block":"summarizeAndPersistImpression","lines":"94-222","what":"AI-summarize visitor conversation and upsert impression with valence","why":"Called by SessionManager.onSummarize for visitor conversations","dependencies":"getClient (ai-service), getPool, appendLogEntry","status":"ACTIVE"}
+]

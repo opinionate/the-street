@@ -1,0 +1,11 @@
+[
+  {"block":"callWithFallback","lines":"5-21","what":"Try primary model, fallback to cheaper model, then canned response","why":"Resilience for all daemon conversation calls","dependencies":"MODEL, FALLBACK_MODEL","status":"ACTIVE"},
+  {"block":"RelationshipInfo","lines":"23-28","what":"Relationship data for prompt injection","why":"Used in conversation context","dependencies":"None","status":"ACTIVE"},
+  {"block":"ConversationContext","lines":"30-38","what":"Context for daemon conversation (messages, nearby entities, mood)","why":"Used by generateDaemonResponse","dependencies":"DaemonMood","status":"ACTIVE"},
+  {"block":"DaemonResponse","lines":"40-46","what":"AI response with message, mood, action, emotes","why":"Return type of generateDaemonResponse","dependencies":"DaemonMood","status":"ACTIVE"},
+  {"block":"DaemonConversationLine","lines":"48-55","what":"Single line in daemon-daemon conversation","why":"Return type of generateDaemonConversation","dependencies":"DaemonMood","status":"ACTIVE"},
+  {"block":"buildDaemonSystemPrompt","lines":"57-105","what":"Build system prompt for single daemon conversation","why":"Called by generateDaemonResponse","dependencies":"DaemonDefinition, ConversationContext","status":"ACTIVE"},
+  {"block":"generateDaemonResponse","lines":"108-179","what":"Generate AI response for daemon talking to player","why":"Called by DaemonManager","dependencies":"callWithFallback, buildDaemonSystemPrompt, sanitizeUserInput","status":"ACTIVE"},
+  {"block":"generateDaemonConversation","lines":"183-278","what":"Generate scripted conversation between two daemons","why":"Called by DaemonManager for daemon-daemon interactions","dependencies":"callWithFallback, stripJsonFences","status":"ACTIVE"},
+  {"block":"generateGroupConversation","lines":"281-374","what":"Generate multi-party conversation (3+ daemons)","why":"Called by DaemonManager for group conversations","dependencies":"callWithFallback, stripJsonFences","status":"ACTIVE"}
+]

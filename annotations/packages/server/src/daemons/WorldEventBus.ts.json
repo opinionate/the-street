@@ -1,0 +1,5 @@
+[
+  {"block":"EventPriority enum","lines":"~1-10","what":"Priority levels: ActiveParticipantSpeech, NewSpeech, KnownVisitorReturning, UnknownVisitor, Ambient","why":"Used by PriorityEventQueue and BehaviorTree","dependencies":"None","status":"ACTIVE"},
+  {"block":"WorldEvent type","lines":"~12-30","what":"Event types: visitor/daemon proximity, speech, departure, ambient","why":"Core event model for daemon behavior system","dependencies":"Vector3","status":"ACTIVE"},
+  {"block":"WorldEventBus class","lines":"~32-87","what":"Pub/sub event bus with per-daemon subscriptions and targeted routing","why":"Used by DaemonManager to emit events, consumed by BehaviorTrees","dependencies":"WorldEvent","status":"ACTIVE"}
+]

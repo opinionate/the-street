@@ -1,0 +1,4 @@
+[
+  {"block":"DaemonPlacementPanel class","lines":"24-546","what":"Admin daemon world placement: select unplaced daemon, pick plot, configure spawn point/facing/roam radius/interaction range with 2D canvas preview, place/activate/deactivate flow","why":"Used by main.ts for daemon placement workflow","dependencies":"DaemonPlacement from shared","status":"ACTIVE"},
+  {"block":"PlaceableDaemon, PlotOption interfaces","lines":"3-15","what":"Daemon and plot selection shapes","why":"Internal to DaemonPlacementPanel","dependencies":"None","status":"ACTIVE"}
+]

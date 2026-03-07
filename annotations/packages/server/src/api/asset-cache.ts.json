@@ -1,0 +1,7 @@
+[
+  {"block":"isAllowedAssetUrl","lines":"12-19","what":"SSRF protection: validate URL domain is amazonaws.com","why":"Used by downloadToFile for safe fetching","dependencies":"URL","status":"ACTIVE"},
+  {"block":"getCachedPath","lines":"27-34","what":"Check if asset file exists in local cache","why":"Used by gallery routes for local serving","dependencies":"node:fs","status":"ACTIVE"},
+  {"block":"readCachedAsset","lines":"37-49","what":"Read cached asset file as Buffer","why":"Used by gallery routes","dependencies":"getCachedPath, node:fs","status":"ACTIVE"},
+  {"block":"downloadToFile","lines":"52-70","what":"Download URL to local file with domain validation","why":"Used by cacheObjectAssets","dependencies":"isAllowedAssetUrl, fetch, node:fs","status":"ACTIVE"},
+  {"block":"cacheObjectAssets","lines":"85-104","what":"Download gallery object GLB + thumbnail to local disk","why":"Used by admin cache-assets endpoint","dependencies":"getCachedPath, downloadToFile, ensureDir","status":"ACTIVE"}
+]

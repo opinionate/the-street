@@ -1,0 +1,5 @@
+[
+  {"block":"RateLimitConfig","lines":"5-8","what":"Config for rate limit window and max requests","why":"Used by rateLimit middleware","dependencies":"None","status":"ACTIVE"},
+  {"block":"rateLimit","lines":"10-46","what":"Redis-backed rate limiting middleware for REST API","why":"Used by assets, generation, daemons API routes","dependencies":"getRedis, AuthedRequest","status":"ACTIVE"},
+  {"block":"checkChatRateLimit","lines":"49-58","what":"WebSocket chat rate limiter (1 msg/sec)","why":"Used by StreetRoom.handleChat","dependencies":"getRedis","status":"ACTIVE"}
+]

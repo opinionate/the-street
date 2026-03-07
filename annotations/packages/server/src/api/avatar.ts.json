@@ -1,0 +1,11 @@
+[
+  {"block":"GET /animations/:type","lines":"20-46","what":"Serve shared animation GLBs (idle, walk, run, etc.)","why":"Used by client AvatarManager for locomotion animations","dependencies":"requireAuth, node:fs","status":"ACTIVE"},
+  {"block":"GET /emotes/:name","lines":"60-79","what":"Serve emote animation GLBs (dance, wave, etc.)","why":"Used by client for emote playback","dependencies":"node:fs","status":"ACTIVE"},
+  {"block":"POST /upload-character","lines":"84-134","what":"Upload pre-rigged character GLB with GLB magic validation","why":"Used by client AvatarPanel for custom avatar upload","dependencies":"requireAuth, getPool, node:fs","status":"ACTIVE"},
+  {"block":"GET /upload/:uploadId/model","lines":"137-157","what":"Serve uploaded character model","why":"Used by client to load uploaded avatar","dependencies":"requireAuth, node:fs","status":"ACTIVE"},
+  {"block":"GET /history","lines":"160-179","what":"User's avatar history (last 20)","why":"Used by client AvatarPanel","dependencies":"requireAuth, getPool","status":"ACTIVE"},
+  {"block":"POST /save","lines":"182-233","what":"Save avatar definition to user + history","why":"Used by client AvatarPanel","dependencies":"requireAuth, getPool","status":"ACTIVE"},
+  {"block":"DELETE /history/:id","lines":"236-259","what":"Delete saved avatar from history","why":"Used by client AvatarPanel","dependencies":"requireAuth, getPool","status":"ACTIVE"},
+  {"block":"GET /default-model","lines":"262-279","what":"Serve default mannequin GLB","why":"Used by client as fallback avatar","dependencies":"node:fs","status":"ACTIVE"},
+  {"block":"POST /default-model","lines":"282-325","what":"Upload default mannequin (admin only)","why":"Admin utility","dependencies":"requireAuth, isAdmin, node:fs","status":"ACTIVE"}
+]

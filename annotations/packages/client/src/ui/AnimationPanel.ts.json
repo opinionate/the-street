@@ -1,0 +1,5 @@
+[
+  {"block":"AnimationPanel class","lines":"33-360","what":"Reusable animation management panel for avatars and daemons: core/movement/emote slot display, FBX/GLB upload with client-side conversion via convertFbxToGlb, custom emote naming, per-slot upload/delete, refreshable from API","why":"Embedded in AvatarPanel and DaemonDirectoryPanel via setAnimationPanel()/createAnimationPanel()","dependencies":"convertFbxToGlb from animation-converter","status":"ACTIVE"},
+  {"block":"AnimationPanelOptions interface","lines":"26-31","what":"Config: entityType (avatar|daemon), getEntityId, apiUrl, getAuthToken","why":"Constructor parameter for AnimationPanel","dependencies":"None","status":"ACTIVE"},
+  {"block":"AnimationRecord interface","lines":"19-24","what":"Animation DB record shape","why":"Internal to AnimationPanel","dependencies":"None","status":"ACTIVE"}
+]

@@ -57,7 +57,7 @@ export class AvatarPanel {
       background: rgba(10, 10, 15, 0.95);
       border: 1px solid rgba(0, 255, 255, 0.3);
       border-radius: 12px;
-      z-index: 100;
+      z-index: 200;
       display: none;
       font-family: system-ui, sans-serif;
       color: white;

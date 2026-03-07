@@ -1,0 +1,3 @@
+[
+  {"block":"StreetGeometry class","lines":"4-167","what":"Procedural street ring: reflective asphalt surface, neon edge lines, inner/outer ground planes, street lamps","why":"Used by main.ts to build scene geometry","dependencies":"three, V1_CONFIG","status":"ACTIVE"}
+]

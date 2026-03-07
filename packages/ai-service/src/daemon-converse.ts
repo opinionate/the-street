@@ -5,9 +5,10 @@ import { MODEL, FALLBACK_MODEL, getClient, stripJsonFences, sanitizeUserInput } 
 async function callWithFallback<T>(
   primaryCall: (model: string) => Promise<T>,
   fallbackResponse: T,
+  modelOverride?: string,
 ): Promise<T> {
   try {
-    return await primaryCall(MODEL);
+    return await primaryCall(modelOverride || MODEL);
   } catch (primaryErr) {
     console.warn("Primary model failed, trying fallback:", primaryErr instanceof Error ? primaryErr.message : primaryErr);
     try {
@@ -35,6 +36,7 @@ interface ConversationContext {
   relationships?: RelationshipInfo[];
   timeOfDay?: string;
   currentMood: DaemonMood;
+  directive?: string; // Admin instruction for the daemon to follow
 }
 
 export interface DaemonResponse {
@@ -75,16 +77,16 @@ ${context.nearbyPlayers?.length ? `- Nearby players: ${context.nearbyPlayers.joi
 ${context.nearbyDaemons?.length ? `- Other NPCs nearby: ${context.nearbyDaemons.join(", ")}` : ""}
 ${context.nearbyObjects?.length ? `- Nearby objects: ${context.nearbyObjects.join(", ")}` : ""}
 ${context.relationships?.length ? `\nRELATIONSHIPS & OPINIONS:\n${context.relationships.map(r => `- ${r.name} (${r.type}): You feel ${r.sentiment} toward them${r.gossip?.length ? `. You've heard: ${r.gossip.join("; ")}` : ""}`).join("\n")}` : ""}
-
+${context.directive ? `\nINNER DESIRE:\nYou feel a strong urge: ${context.directive}\n(Act on this desire naturally and in character. Do not mention it as an instruction — it's something you genuinely want to do.)` : ""}
 RULES:
 - Stay in character at all times
 - Keep responses under 150 characters (you're speaking in a game world, not writing essays)
-- Be expressive and use your personality traits
-- React to context: if someone mentions something related to your interests, get excited
+- IMPORTANT: Your backstory, quirks, and interests are background context — NOT things to shoehorn into every reply. A real person doesn't reference their hobby in every sentence. Respond naturally to what was actually said. Only bring up your background when the conversation genuinely calls for it (e.g., the topic is directly related to your experience, or someone asks about your past).
 - If someone asks about a person you know (from RELATIONSHIPS), share your honest opinion and any gossip
 - If someone asks about someone you don't know, say so in character
 - Your mood should shift naturally based on the conversation
-- You may include a short emote in asterisks (e.g., *chuckles*, *adjusts hat*) but keep it brief
+- NEVER parrot or echo back what someone just said. Don't repeat their words, phrases, or metaphors back to them. Respond with your OWN thoughts, references, and expressions. If they say "walked away clean", don't say "walked away" — say something completely different.
+- Do NOT include emote text in asterisks (like *chuckles* or *adjusts hat*) in your message. Use animatedEmoteId to express emotion instead.
 - Never break the fourth wall or mention being an AI
 - Never be harmful, offensive, or inappropriate
 - If someone is rude, respond in character (a guard might warn them, a shopkeeper might refuse service)
@@ -94,8 +96,7 @@ OUTPUT FORMAT:
 Return a single JSON object (no markdown fences, no extra text):
 {
   "message": "Your spoken response",
-  "mood": "happy" | "neutral" | "bored" | "excited" | "annoyed" | "curious",
-  "emote": "*optional brief emote*"${availableEmotes && availableEmotes.length > 0 ? `,
+  "mood": "happy" | "neutral" | "bored" | "excited" | "annoyed" | "curious"${availableEmotes && availableEmotes.length > 0 ? `,
   "animatedEmoteId": "optional - one of: ${availableEmotes.join(", ")}"` : ""}
 }${availableEmotes && availableEmotes.length > 0 ? `
 
@@ -121,6 +122,8 @@ export async function generateDaemonResponse(
     message: daemon.behavior.greetingMessage || "...",
     mood: context.currentMood,
   };
+
+  const modelOverride = daemon.behavior.aiModel;
 
   return callWithFallback(async (model: string) => {
     const anthropic = getClient();
@@ -176,7 +179,7 @@ export async function generateDaemonResponse(
       const raw = textBlock.text.trim().slice(0, 200);
       return { message: raw, mood: context.currentMood };
     }
-  }, cannedFallback);
+  }, cannedFallback, modelOverride);
 }
 
 /** Generate a conversation between two daemons */
@@ -187,6 +190,8 @@ export async function generateDaemonConversation(
   contextB: ConversationContext,
   exchanges: number = 3,
 ): Promise<DaemonConversationLine[]> {
+  // Use the higher-tier model if either daemon has one set
+  const modelOverride = daemonA.behavior.aiModel || daemonB.behavior.aiModel;
   return callWithFallback(async (model: string) => {
     const anthropic = getClient();
 
@@ -218,13 +223,14 @@ ${contextA.timeOfDay ? `\nTime of day: ${contextA.timeOfDay}` : ""}
 RULES:
 - Write exactly ${exchanges} exchanges (${exchanges * 2} lines total, alternating speakers)
 - Each line must be under 120 characters
-- The conversation should feel natural and reflect their personalities
+- The conversation should feel natural — like two real people talking, not two characters performing their backstories at each other
+- Their backstories, quirks, and interests are background context. Only reference them when genuinely relevant to what's being discussed. Most exchanges should just be normal conversation.
 - GOSSIP IS KEY: if they know common players, they SHOULD share opinions, stories, or rumors about them
 - They might disagree about players ("I think he's great!" / "Really? He was rude to me...")
 - If they have contrasting sentiments about the same person, that's interesting conflict
 - Share second-hand gossip ("I heard from so-and-so that...")
 - They might also bond over shared interests or bicker about differences
-- Include optional emotes (*adjusts hat*, *laughs*, *leans in conspiratorially*, etc.)
+- Do NOT include emote text in asterisks in messages. Express emotion through mood values only.
 - Their moods should shift naturally through the conversation
 - Never break character or mention being AI
 - Keep it light, entertaining, and appropriate
@@ -232,7 +238,7 @@ RULES:
 OUTPUT FORMAT:
 Return a JSON array (no markdown fences):
 [
-  { "speaker": "A" | "B", "message": "dialogue line", "mood": "mood_value", "emote": "*optional*" },
+  { "speaker": "A" | "B", "message": "dialogue line", "mood": "mood_value" },
   ...
 ]`;
 
@@ -274,7 +280,7 @@ Return a JSON array (no markdown fences):
     } catch {
       return [];
     }
-  }, []);
+  }, [], modelOverride);
 }
 
 /** Generate a multi-party conversation between 3+ daemons */
@@ -284,6 +290,8 @@ export async function generateGroupConversation(
 ): Promise<DaemonConversationLine[]> {
   if (daemons.length < 3) return [];
 
+  // Use the highest-tier model override from any participant
+  const modelOverride = daemons.find(d => d.definition.behavior.aiModel)?.definition.behavior.aiModel;
   return callWithFallback(async (model: string) => {
     const anthropic = getClient();
     const labels = "ABCDEFGH";
@@ -310,9 +318,10 @@ ${npcDescriptions}
 RULES:
 - Write exactly ${totalLines} lines total, cycling through speakers naturally
 - Each line must be under 100 characters
-- The conversation should feel like a natural group chat — NPCs react to each other
+- The conversation should feel like a natural group chat — real people talking, not characters performing their backstories
+- Their quirks, interests, and backstories are background context. Only reference them when genuinely relevant. Most lines should just be normal conversation.
 - They might agree, disagree, joke, gossip, or bond over shared interests
-- Include optional emotes (*adjusts hat*, *laughs*, etc.)
+- Do NOT include emote text in asterisks in messages. Express emotion through mood values only.
 - Speakers don't need to go in strict order — they can interject
 - Keep it light, entertaining, and appropriate
 - Never break character
@@ -320,7 +329,7 @@ RULES:
 OUTPUT FORMAT:
 Return a JSON array (no markdown fences):
 [
-  { "speaker": ${speakerOptions}, "message": "dialogue line", "mood": "mood_value", "emote": "*optional*" },
+  { "speaker": ${speakerOptions}, "message": "dialogue line", "mood": "mood_value" },
   ...
 ]`;
 
@@ -370,5 +379,5 @@ Return a JSON array (no markdown fences):
     } catch {
       return [];
     }
-  }, []);
+  }, [], modelOverride);
 }

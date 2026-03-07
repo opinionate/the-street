@@ -961,6 +961,11 @@ export class DaemonManager {
 
   /** Broadcast daemon emote, log it, and trigger chain reactions */
   private broadcastDaemonEmote(daemon: DaemonInstance, emote: string, mood: DaemonMood, chainDepth = 0): void {
+    // Suppress scripted emotes when daemon is in a managed AI conversation
+    if (this.sessionManager.hasActiveSession(daemon.state.daemonId)) {
+      return;
+    }
+
     this.broadcast("daemon_emote", {
       type: "daemon_emote" as const,
       daemonId: daemon.state.daemonId,

@@ -69,8 +69,11 @@ export class InputManager {
   }
 
   private onMouseDown(e: MouseEvent): void {
-    // Don't capture mouse when UI panels are blocking
-    if (this.isUIBlocking?.()) return;
+    // Block mouse input only when clicking directly on a UI panel
+    if (this.isUIBlocking?.()) {
+      const target = e.target as HTMLElement;
+      if (target !== this.canvas) return;
+    }
 
     if (e.button === 0) {
       // Left-click: defer pointer lock — distinguish click from drag

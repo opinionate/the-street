@@ -1,0 +1,5 @@
+[
+  {"block":"ActivityLogViewer class","lines":"81-830","what":"Admin daemon activity log viewer: daemon selector, token usage dashboard with window toggles (30d/90d/all), cost estimation, type/visitor/session filters, session grouping with collapsible conversation groups, rich per-type entry renderers (conversation_turn, conversation_summary, manifest_amendment, manifest_recompile, behavior_event, inter_daemon_event, inference_failure, budget_warning), paginated loading","why":"Used by AdminPanel (appendSection) in main.ts for daemon activity monitoring","dependencies":"None (pure DOM)","status":"ACTIVE"},
+  {"block":"LogEntryData, TokenBreakdown, TokenSummaryData interfaces","lines":"8-33","what":"Activity log data types","why":"Internal to ActivityLogViewer","dependencies":"None","status":"ACTIVE"},
+  {"block":"TYPE_COLORS, TYPE_LABELS, COST_PER_TOKEN constants","lines":"35-59","what":"Color/label maps for log entry types, rough Haiku token pricing","why":"Internal to ActivityLogViewer rendering","dependencies":"None","status":"ACTIVE"}
+]

@@ -35,6 +35,10 @@ export interface SessionCallbacks {
   getVisitorImpression: (daemonId: string, visitorId: string) => VisitorImpression | undefined;
   /** Get daemon relationship if available */
   getDaemonRelationship: (daemonId: string, targetDaemonId: string) => DaemonRelationship | undefined;
+  /** Get per-daemon AI model override */
+  getAiModelOverride: (daemonId: string) => string | undefined;
+  /** Get and consume pending directive for a daemon */
+  consumeDirective: (daemonId: string) => string | undefined;
 }
 
 interface ActiveSession {
@@ -67,6 +71,16 @@ export class ConversationSessionManager {
   /** Get the active session for a daemon */
   getActiveSession(daemonId: string): ConversationSession | null {
     return this.activeSessions.get(daemonId)?.session ?? null;
+  }
+
+  /** Find the daemon that a participant is currently in conversation with, if any */
+  getActiveSessionForParticipant(participantId: string): { daemonId: string; session: ConversationSession } | null {
+    for (const [daemonId, active] of this.activeSessions) {
+      if (active.session.participantId === participantId) {
+        return { daemonId, session: active.session };
+      }
+    }
+    return null;
   }
 
   /** Get conversation turns for the active session */
@@ -173,6 +187,8 @@ export class ConversationSessionManager {
         worldState,
         visitorImpression,
         daemonRelationship,
+        aiModelOverride: this.callbacks.getAiModelOverride(daemonId),
+        aiDirective: this.callbacks.consumeDirective(daemonId),
       });
 
       // Apply session update from inference

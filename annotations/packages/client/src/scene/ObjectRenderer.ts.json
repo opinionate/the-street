@@ -1,0 +1,3 @@
+[
+  {"block":"ObjectRenderer class","lines":"10-748","what":"Convert WorldObject definitions to Three.js meshes: archetype procedural geometry, novel GLB loading, PBR material application, progress indicators","why":"Used by main.ts for world object rendering","dependencies":"three, GLTFLoader, WorldObject, PBRMaterial","status":"ACTIVE"}
+]

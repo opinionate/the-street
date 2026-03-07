@@ -1,0 +1,4 @@
+[
+  {"block":"getPool","lines":"5-15","what":"Singleton pg.Pool factory","why":"Used by all server modules for DB access","dependencies":"pg","status":"ACTIVE"},
+  {"block":"closePool","lines":"17-22","what":"Close pg pool on shutdown","why":"Called by server graceful shutdown","dependencies":"pg","status":"ACTIVE"}
+]

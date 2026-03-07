@@ -1,0 +1,3 @@
+[
+  {"block":"AnimationConverterTool class","lines":"19-280","what":"Admin tool for uploading shared movement animations: slot selector for 10 movement slots, FBX/GLB file loading, client-side position track stripping, GLB export via GLTFExporter, upload to /api/animations/convert-shared, checkmark indicators for uploaded slots","why":"Appended to AdminPanel via appendSection() in main.ts","dependencies":"three, GLTFLoader, GLTFExporter, FBXLoader","status":"ACTIVE"}
+]

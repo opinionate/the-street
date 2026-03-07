@@ -1,0 +1,13 @@
+[
+  {"block":"WorldConfig","lines":"3-11","what":"World ring geometry parameters","why":"Shared config for plot/street layout","dependencies":"None","status":"ACTIVE"},
+  {"block":"V1_CONFIG","lines":"13-21","what":"Default world config: 56 plots, 200m radius ring","why":"Used by client StreetGeometry and server plot APIs","dependencies":"WorldConfig","status":"ACTIVE"},
+  {"block":"getPlotPosition","lines":"23-42","what":"Calculate plot placement from index","why":"Used by server API and client rendering","dependencies":"PlotPlacement, WorldConfig","status":"ACTIVE"},
+  {"block":"getAllPlotPositions","lines":"45-51","what":"Get all plot placements for a ring","why":"Used by client StreetGeometry","dependencies":"getPlotPosition","status":"ACTIVE"},
+  {"block":"getStreetPosition","lines":"54-64","what":"Get walkable street position at angle","why":"Used by DaemonManager for patrol waypoints","dependencies":"Vector3, WorldConfig","status":"ACTIVE"},
+  {"block":"getDefaultSpawnPoint","lines":"67-71","what":"Default player spawn point","why":"Used by client for initial position","dependencies":"getStreetPosition","status":"ACTIVE"},
+  {"block":"CHAT_RADIUS","lines":"74","what":"30-unit chat visibility radius","why":"Used by client for proximity chat","dependencies":"None","status":"ACTIVE"},
+  {"block":"CHAT_DISPLAY_DURATION","lines":"77","what":"8-second chat bubble duration","why":"Used by AvatarManager and DaemonRenderer","dependencies":"None","status":"ACTIVE"},
+  {"block":"MAX_CLIENTS","lines":"80","what":"100 max concurrent players","why":"Used by StreetRoom","dependencies":"None","status":"ACTIVE"},
+  {"block":"TICK_RATE","lines":"83","what":"20Hz server tick rate","why":"Used by StreetRoom simulation loop","dependencies":"None","status":"ACTIVE"},
+  {"block":"POSITION_SAVE_INTERVAL","lines":"86","what":"30-second position save interval","why":"Used by StreetRoom for DB persistence","dependencies":"None","status":"ACTIVE"}
+]

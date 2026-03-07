@@ -374,24 +374,3 @@ async function persistManifest(manifest: PersonalityManifest): Promise<void> {
     ],
   );
 }
-
-// --- Visitor milestone trigger ---
-
-/**
- * Check if a visitor has reached 5 interactions with a daemon,
- * triggering the warm impression upgrade and potential trait evolution.
- */
-export async function checkVisitorMilestone(
-  manifest: PersonalityManifest,
-  visitorId: string,
-  interactionCount: number,
-): Promise<void> {
-  if (interactionCount !== 5) return;
-
-  await evaluateTraitTriggers(manifest, {
-    type: "visitor_milestone",
-    description: `Visitor ${visitorId} reached 5 interactions — impression upgraded to warm`,
-    daemonId: manifest.daemonId,
-    metadata: { visitorId, interactionCount },
-  });
-}

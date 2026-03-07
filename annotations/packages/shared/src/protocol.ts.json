@@ -1,0 +1,8 @@
+[
+  {"block":"VALID_EMOTE_IDS","lines":"16","what":"8 shared emote IDs for client/server validation","why":"Single source of truth for emote names","dependencies":"None","status":"ACTIVE"},
+  {"block":"EmoteId","lines":"17","what":"Type derived from VALID_EMOTE_IDS array","why":"Type-safe emote references","dependencies":"VALID_EMOTE_IDS","status":"ACTIVE"},
+  {"block":"ClientMessage","lines":"20-41","what":"Union of all client→server message types","why":"Type-safe Colyseus message handling","dependencies":"Vector3, InteractionType, WorldObject, AvatarDefinition, EmoteId","status":"ACTIVE"},
+  {"block":"ServerMessage","lines":"44-91","what":"Union of all server→client message types","why":"Type-safe Colyseus message handling","dependencies":"PlayerState, PlotSnapshot, WorldObject, DaemonState, DaemonMood, DaemonThought, MovementIntent, AvatarDefinition, UserRole, EmoteId","status":"ACTIVE"},
+  {"block":"MSG","lines":"94-126","what":"String constants for Colyseus message types","why":"Avoids magic strings in message handlers","dependencies":"None","status":"ACTIVE"},
+  {"block":"RATE_LIMITS","lines":"129-134","what":"Rate limit configuration constants","why":"Shared between server middleware and API routes","dependencies":"None","status":"ACTIVE"}
+]

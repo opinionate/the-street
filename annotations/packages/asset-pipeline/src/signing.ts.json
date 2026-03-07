@@ -1,0 +1,4 @@
+[
+  {"block":"signContentHash","lines":"4-12","what":"Sign content hash with Ed25519 private key","why":"Used by server assets API for attribution","dependencies":"node:crypto","status":"ACTIVE"},
+  {"block":"verifySignature","lines":"16-24","what":"Verify signature against content hash and public key","why":"Never imported — verification not implemented","dependencies":"node:crypto","status":"DEAD"}
+]

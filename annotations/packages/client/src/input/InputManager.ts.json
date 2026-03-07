@@ -1,0 +1,4 @@
+[
+  {"block":"InputState","lines":"1-16","what":"Input state flags for movement, camera, chat","why":"Read by main.ts game loop","dependencies":"None","status":"ACTIVE"},
+  {"block":"InputManager class","lines":"18-225","what":"Keyboard/mouse input: WASD movement, pointer lock camera, scroll zoom, tab targeting","why":"Used by main.ts for player input","dependencies":"None","status":"ACTIVE"}
+]

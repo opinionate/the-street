@@ -3,6 +3,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { PlayerState, Vector3 as Vec3, AvatarDefinition, AvatarAppearance } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
+import { normalizeMixamoBoneName } from "./animation-converter.js";
 
 const ACCENT_COLORS = [0x00ffff, 0xff00ff, 0x39ff14, 0xff6600, 0xaa44ff, 0xffff00];
 
@@ -58,6 +59,14 @@ interface CustomModelData {
   baseY: number; // model's resting y position (after centering)
 }
 
+interface WispRefs {
+  core: THREE.Sprite;
+  coreMat: THREE.SpriteMaterial;
+  glow: THREE.Sprite;
+  glowMat: THREE.SpriteMaterial;
+  light: THREE.PointLight;
+}
+
 interface AvatarInstance {
   group: THREE.Group;
   limbs: LimbRefs;
@@ -76,9 +85,11 @@ interface AvatarInstance {
   customModel: CustomModelData | null;
   activeEmote: string | null;
   avatarHistoryId: string | null;
+  displayName: string;
   turning: number;  // -1 left, 0 none, 1 right
   strafing: number; // -1 left, 0 none, 1 right
   jumping: boolean;
+  wisp: WispRefs | null;
 }
 
 export class AvatarManager {
@@ -90,8 +101,10 @@ export class AvatarManager {
   private cachedEmoteClips: Map<string, THREE.AnimationClip> = new Map();
   localPlayerId: string | null = null;
   apiUrl: string = "";
-  /** Cache buster: incremented on reload to bypass browser HTTP cache */
-  private _cacheBuster = 0;
+  /** Cache buster: always set so browser never serves stale animation files */
+  private _cacheBuster = Date.now();
+  /** Cached wisp textures (shared across all avatar instances) */
+  private cachedWispTextures: { core: THREE.Texture; glow: THREE.Texture } | null = null;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -136,7 +149,7 @@ export class AvatarManager {
           }
         } catch (err) {
           if (!this.animWarned && AvatarManager.CORE_TYPES.includes(type)) {
-            console.warn(`[Avatar] ${type} animation not available (404)`);
+            console.warn(`[Avatar] ${type} animation not available`);
           }
         }
       }
@@ -188,7 +201,7 @@ export class AvatarManager {
       cm.mixer.stopAllAction();
       cm.mixer.uncacheRoot(cm.model);
       const newMixer = new THREE.AnimationMixer(cm.model);
-      const newActions = this.createLocoActions(newMixer, clipMap);
+      const newActions = this.createLocoActions(newMixer, clipMap, cm.model);
 
       cm.mixer = newMixer;
       cm.actions = newActions;
@@ -306,7 +319,7 @@ export class AvatarManager {
         if (!clipMap[t]) clipMap[t] = customClips[t] || this.cachedAnimClips[t];
       }
       console.log("[Avatar] Uploaded avatar clip map:", Object.entries(clipMap).filter(([, v]) => v).map(([k, v]) => `${k}:${v!.tracks.length}t`).join(", "));
-      const actions = this.createLocoActions(mixer, clipMap);
+      const actions = this.createLocoActions(mixer, clipMap, model);
 
       this.swapToCustomModel(avatar, model);
       avatar.customModel = { model, mixer, actions, currentAction: "idle", baseY: model.position.y };
@@ -346,13 +359,13 @@ export class AvatarManager {
       const centeredBox = new THREE.Box3().setFromObject(model);
       model.position.y = -centeredBox.min.y;
 
-      // Animation setup — Mixamo bone space, no retargeting
+      // Animation setup — retarget Mixamo bone names to match model skeleton
       const mixer = new THREE.AnimationMixer(model);
       const clipMap: Partial<Record<LocoAction, THREE.AnimationClip>> = {};
       for (const t of AvatarManager.LOCO_TYPES) {
         clipMap[t] = this.cachedAnimClips[t];
       }
-      const actions = this.createLocoActions(mixer, clipMap);
+      const actions = this.createLocoActions(mixer, clipMap, model);
 
       this.swapToCustomModel(avatar, model);
       avatar.customModel = { model, mixer, actions, currentAction: "idle", baseY: model.position.y };
@@ -374,15 +387,101 @@ export class AvatarManager {
   }
 
   /** Replace the current model (procedural or custom) with a new model, preserving sprites. */
+  /** Build a map from normalized Mixamo bone name → actual node name in the model */
+  private buildBoneMap(root: THREE.Object3D): Map<string, string> {
+    const map = new Map<string, string>();
+    root.traverse((obj) => {
+      if (obj.name) {
+        map.set(normalizeMixamoBoneName(obj.name), obj.name);
+      }
+    });
+    return map;
+  }
+
+  /** Retarget an animation clip to match the model's bone names via normalization.
+   *  Drops tracks whose normalized name has no match in the model. */
+  private retargetClipForModel(clip: THREE.AnimationClip, boneMap: Map<string, string>): THREE.AnimationClip {
+    const retargetedTracks: THREE.KeyframeTrack[] = [];
+    let anyRenamed = false;
+    for (const track of clip.tracks) {
+      const dotIdx = track.name.indexOf(".");
+      const trackNode = track.name.substring(0, dotIdx);
+      const trackProp = track.name.substring(dotIdx); // e.g. ".quaternion"
+      const normalized = normalizeMixamoBoneName(trackNode);
+      const modelNode = boneMap.get(normalized);
+      if (!modelNode) continue;
+      if (modelNode === trackNode) {
+        retargetedTracks.push(track);
+      } else {
+        // Clone track with corrected node name
+        const cloned = track.clone();
+        cloned.name = modelNode + trackProp;
+        retargetedTracks.push(cloned);
+        anyRenamed = true;
+      }
+    }
+    if (!anyRenamed && retargetedTracks.length === clip.tracks.length) return clip;
+    return new THREE.AnimationClip(clip.name, clip.duration, retargetedTracks);
+  }
+
+  /** Bones whose Y-axis (yaw) rotation should be pinned to the first frame
+   *  to prevent idle rotation/sway around the vertical axis. */
+  private static readonly PIN_YAW_BONES = [
+    "mixamorigHips", "mixamorigSpine", "mixamorigSpine1", "mixamorigSpine2",
+  ];
+
+  /** Pin the yaw (Y component) of quaternion tracks for torso bones to the first frame value.
+   *  This prevents subtle rotational sway while preserving breathing/leaning motion. */
+  private pinTorsoYaw(clip: THREE.AnimationClip, boneMap: Map<string, string>): THREE.AnimationClip {
+    const newTracks = [...clip.tracks];
+    let modified = false;
+
+    for (const normalizedName of AvatarManager.PIN_YAW_BONES) {
+      const boneName = boneMap.get(normalizedName);
+      if (!boneName) continue;
+      const trackName = `${boneName}.quaternion`;
+      const idx = newTracks.findIndex(t => t.name === trackName);
+      if (idx === -1) continue;
+
+      const track = newTracks[idx];
+      const values = new Float32Array(track.values);
+      // Pin only the Y component (index 1 in each xyzw quartet) to first-frame value
+      const q0y = values[1];
+      for (let i = 1; i < values.length; i += 4) {
+        values[i] = q0y;
+      }
+      // Re-normalize each quaternion after pinning Y
+      for (let i = 0; i < values.length; i += 4) {
+        const len = Math.sqrt(values[i] * values[i] + values[i+1] * values[i+1] + values[i+2] * values[i+2] + values[i+3] * values[i+3]);
+        if (len > 0) { values[i] /= len; values[i+1] /= len; values[i+2] /= len; values[i+3] /= len; }
+      }
+      newTracks[idx] = new THREE.QuaternionKeyframeTrack(
+        track.name, Array.from(track.times), Array.from(values),
+      );
+      modified = true;
+    }
+
+    return modified ? new THREE.AnimationClip(clip.name, clip.duration, newTracks) : clip;
+  }
+
   /** Create AnimationActions for all available locomotion clips */
   private createLocoActions(
     mixer: THREE.AnimationMixer,
     clips: Partial<Record<LocoAction, THREE.AnimationClip>>,
+    model?: THREE.Object3D,
   ): CustomModelData["actions"] {
+    const boneMap = model ? this.buildBoneMap(model) : null;
     const actions: CustomModelData["actions"] = {};
     for (const type of AvatarManager.LOCO_TYPES) {
-      const clip = clips[type];
+      let clip = clips[type];
       if (!clip) continue;
+      if (boneMap) clip = this.retargetClipForModel(clip, boneMap);
+      if (clip.tracks.length === 0) continue;
+      // Pin torso yaw on idle/walk/run to prevent subtle rotation/sway
+      // Skip strafe/turn/jump — they need legitimate torso rotation for leaning
+      if (boneMap && (type === "idle" || type === "walk" || type === "run")) {
+        clip = this.pinTorsoYaw(clip, boneMap);
+      }
       const action = mixer.clipAction(clip);
       if (type === "jump") {
         action.setLoop(THREE.LoopOnce, 1);
@@ -467,8 +566,9 @@ export class AvatarManager {
     if (!this.localPlayerId) return;
     const avatar = this.avatars.get(this.localPlayerId);
     if (!avatar) return;
-    // Extra smoothing on the avatar side
-    avatar.speed += (state.speed - avatar.speed) * 0.15;
+    // Smooth speed transitions — faster decay when stopping, slower ramp-up when starting
+    const smoothing = state.speed < avatar.speed ? 0.35 : 0.2;
+    avatar.speed += (state.speed - avatar.speed) * smoothing;
     avatar.turning = state.turning;
     avatar.strafing = state.strafing;
     avatar.jumping = state.jumping;
@@ -495,308 +595,184 @@ export class AvatarManager {
     }
   }
 
-  private createAvatar(colorIndex: number): { group: THREE.Group; limbs: LimbRefs; materials: MaterialRefs } {
+  private createAvatar(_colorIndex: number): { group: THREE.Group; limbs: LimbRefs; materials: MaterialRefs; wisp: WispRefs } {
     const group = new THREE.Group();
-    const accent = ACCENT_COLORS[colorIndex % ACCENT_COLORS.length];
-
-    // --- Materials ---
-    const coatMat = new THREE.MeshPhysicalMaterial({
-      color: 0x4a6670,
-      roughness: 0.65,
-      metalness: 0.0,
-    });
-    const shirtMat = new THREE.MeshStandardMaterial({
-      color: 0x5a7a8a,
-      roughness: 0.8,
-      metalness: 0.0,
-    });
-    const pantsMat = new THREE.MeshStandardMaterial({
-      color: 0x3d4f5c,
-      roughness: 0.7,
-      metalness: 0.0,
-    });
-    const skinMat = new THREE.MeshPhysicalMaterial({
-      color: 0xd4a574,
-      roughness: 0.55,
-      metalness: 0.0,
-    });
-    const bootMat = new THREE.MeshStandardMaterial({
-      color: 0x3a3a3a,
-      roughness: 0.5,
-      metalness: 0.1,
-    });
-    const glassMat = new THREE.MeshStandardMaterial({
-      color: 0x222222,
-      roughness: 0.1,
-      metalness: 0.8,
-      emissive: accent,
-      emissiveIntensity: 0.5,
-    });
-    const hairMat = new THREE.MeshStandardMaterial({
-      color: 0x5c3a1e,
-      roughness: 0.5,
-      metalness: 0.05,
-    });
 
     const body = new THREE.Group();
+    body.position.y = 1.0; // float at roughly chest height
     group.add(body);
 
-    // ===== TORSO =====
-    // Chest — wider at shoulders, narrower at waist (scaled sphere)
-    const chestGeo = new THREE.SphereGeometry(1, 12, 10);
-    const chest = new THREE.Mesh(chestGeo, coatMat);
-    chest.scale.set(0.22, 0.2, 0.12);
-    chest.position.y = 1.28;
-    chest.castShadow = true;
-    body.add(chest);
+    // --- Wisp textures (cached and shared across all avatars) ---
+    if (!this.cachedWispTextures) {
+      const coreCanvas = document.createElement("canvas");
+      coreCanvas.width = 128;
+      coreCanvas.height = 128;
+      const cCtx = coreCanvas.getContext("2d")!;
+      const coreGrad = cCtx.createRadialGradient(64, 64, 0, 64, 64, 64);
+      coreGrad.addColorStop(0, "rgba(255, 255, 255, 0.5)");
+      coreGrad.addColorStop(0.25, "rgba(240, 245, 255, 0.2)");
+      coreGrad.addColorStop(0.6, "rgba(220, 230, 255, 0.05)");
+      coreGrad.addColorStop(1, "rgba(220, 230, 255, 0)");
+      cCtx.fillStyle = coreGrad;
+      cCtx.fillRect(0, 0, 128, 128);
 
-    // Abdomen — narrower, bridging chest to hips
-    const abdomenGeo = new THREE.SphereGeometry(1, 10, 8);
-    const abdomen = new THREE.Mesh(abdomenGeo, coatMat);
-    abdomen.scale.set(0.17, 0.12, 0.1);
-    abdomen.position.y = 1.03;
-    abdomen.castShadow = true;
-    body.add(abdomen);
+      const glowCanvas = document.createElement("canvas");
+      glowCanvas.width = 128;
+      glowCanvas.height = 128;
+      const gCtx = glowCanvas.getContext("2d")!;
+      const gradient = gCtx.createRadialGradient(64, 64, 0, 64, 64, 64);
+      gradient.addColorStop(0, "rgba(255, 255, 255, 0.6)");
+      gradient.addColorStop(0.3, "rgba(230, 240, 255, 0.25)");
+      gradient.addColorStop(0.7, "rgba(200, 220, 255, 0.05)");
+      gradient.addColorStop(1, "rgba(200, 220, 255, 0)");
+      gCtx.fillStyle = gradient;
+      gCtx.fillRect(0, 0, 128, 128);
 
-    // Hips
-    const hipsGeo = new THREE.SphereGeometry(1, 10, 8);
-    const hips = new THREE.Mesh(hipsGeo, coatMat);
-    hips.scale.set(0.18, 0.08, 0.1);
-    hips.position.y = 0.88;
-    body.add(hips);
+      this.cachedWispTextures = {
+        core: new THREE.CanvasTexture(coreCanvas),
+        glow: new THREE.CanvasTexture(glowCanvas),
+      };
+    }
 
-    // ===== NECK =====
-    const neckGeo = new THREE.CylinderGeometry(0.045, 0.05, 0.1, 8);
-    const neck = new THREE.Mesh(neckGeo, skinMat);
-    neck.position.y = 1.52;
-    body.add(neck);
+    const coreMat = new THREE.SpriteMaterial({
+      map: this.cachedWispTextures.core,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const core = new THREE.Sprite(coreMat);
+    core.scale.set(0.7, 0.7, 1);
+    body.add(core);
 
-    // ===== HEAD =====
-    const headGroup = new THREE.Group();
-    headGroup.position.y = 1.65;
-    body.add(headGroup);
+    const glowMat = new THREE.SpriteMaterial({
+      map: this.cachedWispTextures.glow,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const glow = new THREE.Sprite(glowMat);
+    glow.scale.set(1.4, 1.4, 1);
+    body.add(glow);
 
-    // Skull
-    const skullGeo = new THREE.SphereGeometry(0.115, 12, 10);
-    const skull = new THREE.Mesh(skullGeo, skinMat);
-    skull.scale.set(1, 1.1, 1);
-    skull.castShadow = true;
-    headGroup.add(skull);
+    // Stub light (not added to scene — avoids per-player GPU light cost)
+    const light = new THREE.PointLight(0, 0, 0);
 
-    // Jaw — subtle chin
-    const jawGeo = new THREE.SphereGeometry(0.07, 8, 6);
-    const jaw = new THREE.Mesh(jawGeo, skinMat);
-    jaw.position.set(0, -0.07, -0.04);
-    jaw.scale.set(1, 0.6, 0.8);
-    headGroup.add(jaw);
+    // --- Stub limb refs (procedural animation writes to these harmlessly) ---
+    const stubMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+    stubMesh.visible = false;
+    const stubGroup = () => { const g = new THREE.Group(); g.visible = false; return g; };
 
-    // Hair — short and simple
-    const hairGeo = new THREE.SphereGeometry(0.12, 10, 8);
-    const hair = new THREE.Mesh(hairGeo, hairMat);
-    hair.scale.set(1.05, 1.05, 1.05);
-    hair.position.set(0, 0.025, 0.005);
-    headGroup.add(hair);
-
-    // Sunglasses — narrow wraparound
-    const lensGeo = new THREE.BoxGeometry(0.22, 0.04, 0.03);
-    const lens = new THREE.Mesh(lensGeo, glassMat);
-    lens.position.set(0, 0.01, -0.11);
-    headGroup.add(lens);
-
-    // Glasses glow
-    const glowLight = new THREE.PointLight(accent, 0.4, 2.5, 2);
-    glowLight.position.set(0, 0.01, -0.18);
-    headGroup.add(glowLight);
-
-    // Coat tails — kept minimal (animated by movement system)
-    const tailGeo = new THREE.BoxGeometry(0.12, 0.15, 0.02);
-    const coatTailLeft = new THREE.Mesh(tailGeo, coatMat);
-    coatTailLeft.position.set(-0.06, 0.72, 0.08);
-    coatTailLeft.castShadow = true;
-    body.add(coatTailLeft);
-    const coatTailRight = new THREE.Mesh(tailGeo, coatMat);
-    coatTailRight.position.set(0.06, 0.72, 0.08);
-    coatTailRight.castShadow = true;
-    body.add(coatTailRight);
-
-    // ===== LEFT ARM =====
-    const leftShoulderPivot = new THREE.Group();
-    leftShoulderPivot.position.set(-0.24, 1.38, 0);
-    body.add(leftShoulderPivot);
-
-    // Upper arm
-    const upperArmGeo = new THREE.CapsuleGeometry(0.04, 0.22, 4, 8);
-    const lUpperArm = new THREE.Mesh(upperArmGeo, coatMat);
-    lUpperArm.position.y = -0.15;
-    lUpperArm.castShadow = true;
-    leftShoulderPivot.add(lUpperArm);
-
-    // Elbow pivot
-    const leftElbowPivot = new THREE.Group();
-    leftElbowPivot.position.y = -0.3;
-    leftShoulderPivot.add(leftElbowPivot);
-
-    // Forearm
-    const forearmGeo = new THREE.CapsuleGeometry(0.035, 0.2, 4, 8);
-    const lForearm = new THREE.Mesh(forearmGeo, coatMat);
-    lForearm.position.y = -0.13;
-    lForearm.castShadow = true;
-    leftElbowPivot.add(lForearm);
-
-    // Hand
-    const handGeo = new THREE.SphereGeometry(0.03, 6, 6);
-    const lHand = new THREE.Mesh(handGeo, skinMat);
-    lHand.position.y = -0.27;
-    leftElbowPivot.add(lHand);
-
-    // ===== RIGHT ARM =====
-    const rightShoulderPivot = new THREE.Group();
-    rightShoulderPivot.position.set(0.24, 1.38, 0);
-    body.add(rightShoulderPivot);
-
-    const rUpperArm = new THREE.Mesh(upperArmGeo.clone(), coatMat);
-    rUpperArm.position.y = -0.15;
-    rUpperArm.castShadow = true;
-    rightShoulderPivot.add(rUpperArm);
-
-    const rightElbowPivot = new THREE.Group();
-    rightElbowPivot.position.y = -0.3;
-    rightShoulderPivot.add(rightElbowPivot);
-
-    const rForearm = new THREE.Mesh(forearmGeo.clone(), coatMat);
-    rForearm.position.y = -0.13;
-    rForearm.castShadow = true;
-    rightElbowPivot.add(rForearm);
-
-    const rHand = new THREE.Mesh(handGeo.clone(), skinMat);
-    rHand.position.y = -0.27;
-    rightElbowPivot.add(rHand);
-
-    // ===== LEFT LEG =====
-    const leftHipPivot = new THREE.Group();
-    leftHipPivot.position.set(-0.09, 0.84, 0);
-    body.add(leftHipPivot);
-
-    const thighGeo = new THREE.CapsuleGeometry(0.055, 0.28, 4, 8);
-    const lThigh = new THREE.Mesh(thighGeo, pantsMat);
-    lThigh.position.y = -0.2;
-    lThigh.castShadow = true;
-    leftHipPivot.add(lThigh);
-
-    const leftKneePivot = new THREE.Group();
-    leftKneePivot.position.y = -0.38;
-    leftHipPivot.add(leftKneePivot);
-
-    const shinGeo = new THREE.CapsuleGeometry(0.045, 0.26, 4, 8);
-    const lShin = new THREE.Mesh(shinGeo, pantsMat);
-    lShin.position.y = -0.17;
-    lShin.castShadow = true;
-    leftKneePivot.add(lShin);
-
-    // Boot
-    const bootGeo = new THREE.BoxGeometry(0.09, 0.08, 0.14);
-    const lBoot = new THREE.Mesh(bootGeo, bootMat);
-    lBoot.position.set(0, -0.35, -0.01);
-    lBoot.castShadow = true;
-    leftKneePivot.add(lBoot);
-
-    // ===== RIGHT LEG =====
-    const rightHipPivot = new THREE.Group();
-    rightHipPivot.position.set(0.09, 0.84, 0);
-    body.add(rightHipPivot);
-
-    const rThigh = new THREE.Mesh(thighGeo.clone(), pantsMat);
-    rThigh.position.y = -0.2;
-    rThigh.castShadow = true;
-    rightHipPivot.add(rThigh);
-
-    const rightKneePivot = new THREE.Group();
-    rightKneePivot.position.y = -0.38;
-    rightHipPivot.add(rightKneePivot);
-
-    const rShin = new THREE.Mesh(shinGeo.clone(), pantsMat);
-    rShin.position.y = -0.17;
-    rShin.castShadow = true;
-    rightKneePivot.add(rShin);
-
-    const rBoot = new THREE.Mesh(bootGeo.clone(), bootMat);
-    rBoot.position.set(0, -0.35, -0.01);
-    rBoot.castShadow = true;
-    rightKneePivot.add(rBoot);
+    const stubCoat = new THREE.MeshPhysicalMaterial();
+    const stubSkin = new THREE.MeshPhysicalMaterial();
+    const stubStd = new THREE.MeshStandardMaterial();
+    const stubLight = new THREE.PointLight(0, 0, 0);
 
     return {
       group,
       limbs: {
         body,
-        chest,
-        neck,
-        head: headGroup,
-        leftShoulderPivot,
-        leftElbowPivot,
-        rightShoulderPivot,
-        rightElbowPivot,
-        leftHipPivot,
-        leftKneePivot,
-        rightHipPivot,
-        rightKneePivot,
-        leftBoot: lBoot,
-        rightBoot: rBoot,
-        coatTailLeft,
-        coatTailRight,
+        chest: stubMesh,
+        neck: stubMesh,
+        head: stubGroup(),
+        leftShoulderPivot: stubGroup(),
+        leftElbowPivot: stubGroup(),
+        rightShoulderPivot: stubGroup(),
+        rightElbowPivot: stubGroup(),
+        leftHipPivot: stubGroup(),
+        leftKneePivot: stubGroup(),
+        rightHipPivot: stubGroup(),
+        rightKneePivot: stubGroup(),
+        leftBoot: stubMesh,
+        rightBoot: stubMesh,
+        coatTailLeft: stubMesh,
+        coatTailRight: stubMesh,
       },
       materials: {
-        coat: coatMat,
-        skin: skinMat,
-        hair: hairMat,
-        glasses: glassMat,
-        glassesGlow: glowLight,
-        pants: pantsMat,
-        boots: bootMat,
+        coat: stubCoat,
+        skin: stubSkin,
+        hair: stubStd,
+        glasses: stubStd,
+        glassesGlow: stubLight,
+        pants: stubStd,
+        boots: stubStd,
       },
+      wisp: { core, coreMat, glow, glowMat, light },
     };
   }
 
   private createNameLabel(name: string): THREE.Sprite {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
-    canvas.width = 256;
-    canvas.height = 48;
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+    // Dynamic width based on name length
+    const fontSize = 22;
+    const font = `bold ${fontSize}px 'Courier New', monospace`;
+    ctx.font = font;
+    const textWidth = ctx.measureText(name).width;
+    const hPad = 24;
+    const canvasWidth = Math.ceil(textWidth + hPad * 2);
+    const canvasHeight = 40;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+
+    // Background — dark translucent with cyan accent
+    ctx.fillStyle = "rgba(5, 5, 15, 0.7)";
     ctx.beginPath();
-    ctx.roundRect(0, 0, 256, 48, 8);
+    ctx.roundRect(1, 1, canvasWidth - 2, canvasHeight - 2, 3);
     ctx.fill();
 
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 22px system-ui, sans-serif";
+    // Accent border
+    ctx.strokeStyle = "rgba(0, 200, 255, 0.5)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(1, 1, canvasWidth - 2, canvasHeight - 2, 3);
+    ctx.stroke();
+
+    // Glow line at bottom
+    ctx.strokeStyle = "rgba(0, 200, 255, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(6, canvasHeight - 3);
+    ctx.lineTo(canvasWidth - 6, canvasHeight - 3);
+    ctx.stroke();
+
+    // Name text with glow
+    ctx.font = font;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(name, 128, 24, 240);
+    ctx.shadowColor = "rgba(0, 200, 255, 0.5)";
+    ctx.shadowBlur = 6;
+    ctx.fillStyle = "#d0f0ff";
+    ctx.fillText(name, canvasWidth / 2, canvasHeight / 2);
 
     const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
     const mat = new THREE.SpriteMaterial({
       map: texture,
       transparent: true,
       depthTest: false,
     });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(1.5, 0.28, 1);
+    const aspect = canvasWidth / canvasHeight;
+    const spriteHeight = 0.22;
+    sprite.scale.set(spriteHeight * aspect, spriteHeight, 1);
     return sprite;
   }
 
   addPlayer(state: PlayerState): void {
     if (this.avatars.has(state.userId)) return;
 
-    const { group, limbs, materials } = this.createAvatar(state.avatarDefinition.avatarIndex);
+    const { group, limbs, materials, wisp } = this.createAvatar(state.avatarDefinition.avatarIndex);
     group.name = `avatar_${state.userId}`;
     group.position.set(state.position.x, state.position.y, state.position.z);
     group.rotation.y = state.rotation;
 
-    // Name label above head (skip for local player)
+    // Name label above head (skip for local player, hidden until targeted)
     if (state.userId !== this.localPlayerId) {
       const nameSprite = this.createNameLabel(state.displayName);
-      nameSprite.position.set(0, 1.95, 0);
+      nameSprite.position.set(0, 2.1, 0);
       nameSprite.name = "nameLabel";
+      nameSprite.visible = false;
       group.add(nameSprite);
     }
 
@@ -816,6 +792,7 @@ export class AvatarManager {
       prevSpeed: 0,
       landingSquash: 0,
       stoppingPhaseTarget: null,
+      displayName: state.displayName,
       chatBubbles: [],
       customModel: null,
       activeEmote: null,
@@ -823,6 +800,7 @@ export class AvatarManager {
       turning: 0,
       strafing: 0,
       jumping: false,
+      wisp: wisp ?? null,
     });
 
     // Apply custom appearance if present
@@ -925,9 +903,7 @@ export class AvatarManager {
   /** Get a player's display name */
   getPlayerName(userId: string): string | null {
     const avatar = this.avatars.get(userId);
-    if (!avatar) return null;
-    // Find the name label sprite and extract text (stored in group name)
-    return avatar.group.name.replace("avatar_", "") || null;
+    return avatar?.displayName ?? null;
   }
 
   /** Remove the name label from the local player (called after localPlayerId is set) */
@@ -943,6 +919,22 @@ export class AvatarManager {
         label.material.dispose();
       }
     }
+  }
+
+  /** Show name label for a specific player */
+  showNameLabel(userId: string): void {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+    const label = avatar.group.getObjectByName("nameLabel");
+    if (label) label.visible = true;
+  }
+
+  /** Hide name label for a specific player */
+  hideNameLabel(userId: string): void {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+    const label = avatar.group.getObjectByName("nameLabel");
+    if (label) label.visible = false;
   }
 
   /** Load and play an emote animation. Returns false if no custom model. */
@@ -997,15 +989,37 @@ export class AvatarManager {
       cm.actions.emote = undefined;
     }
 
+    // Retarget clip bone names to match the model's skeleton
+    const boneMap = this.buildBoneMap(cm.model);
+    clip = this.retargetClipForModel(clip, boneMap);
+    if (clip.tracks.length === 0) return false;
+
     // Crossfade from current action to emote
     const prevAction = cm.actions[cm.currentAction] || cm.actions.idle;
     const emoteAction = cm.mixer.clipAction(clip);
-    emoteAction.setLoop(THREE.LoopRepeat, Infinity);
+    // Dance loops forever; all other emotes play once and stop
+    if (emoteId === "dance") {
+      emoteAction.setLoop(THREE.LoopRepeat, Infinity);
+    } else {
+      emoteAction.setLoop(THREE.LoopOnce, 1);
+      emoteAction.clampWhenFinished = true;
+    }
     emoteAction.reset();
     if (prevAction) {
       prevAction.crossFadeTo(emoteAction, 0.3, true);
     }
     emoteAction.play();
+
+    // Auto-stop when a non-looping emote finishes
+    if (emoteId !== "dance") {
+      const onFinished = (e: { action: THREE.AnimationAction }) => {
+        if (e.action === emoteAction) {
+          cm.mixer.removeEventListener("finished", onFinished);
+          this.stopEmote(userId);
+        }
+      };
+      cm.mixer.addEventListener("finished", onFinished);
+    }
 
     cm.actions.emote = emoteAction;
     avatar.activeEmote = emoteId;
@@ -1200,6 +1214,47 @@ export class AvatarManager {
       }
       // Local player: speed is set externally via setLocalMovementState()
 
+      // --- Wisp animation (skip all procedural limb code) ---
+      if (avatar.wisp && !avatar.customModel) {
+        const w = avatar.wisp;
+        avatar.breathPhase += dt * 2.0;
+        const t = avatar.breathPhase;
+
+        // Gentle vertical bob (move the whole body group)
+        avatar.limbs.body.position.y = 1.0 + Math.sin(t * 0.8) * 0.06;
+
+        // Pulse the core sprite opacity
+        w.coreMat.opacity = 0.8 + Math.sin(t * 1.2) * 0.15;
+        w.glowMat.opacity = 0.7 + Math.sin(t * 0.9) * 0.15;
+
+        // Pulse the light intensity
+        w.light.intensity = 1.5 + Math.sin(t * 1.3) * 0.5;
+
+        // Slight scale breathing on the glow
+        const glowScale = 1.4 + Math.sin(t * 1.0) * 0.15;
+        w.glow.scale.set(glowScale, glowScale, 1);
+
+        // Chat bubble cleanup
+        const now = Date.now();
+        for (let i = avatar.chatBubbles.length - 1; i >= 0; i--) {
+          const bubble = avatar.chatBubbles[i];
+          const age = now - bubble.createdAt;
+          if (age >= bubble.duration) {
+            bubble.sprite.parent?.remove(bubble.sprite);
+            bubble.sprite.material.map?.dispose();
+            bubble.sprite.material.dispose();
+            avatar.chatBubbles.splice(i, 1);
+          } else {
+            const fadeStart = bubble.duration * 0.8;
+            if (age > fadeStart) {
+              const fadeProgress = (age - fadeStart) / (bubble.duration - fadeStart);
+              bubble.sprite.material.opacity = 1 - fadeProgress;
+            }
+          }
+        }
+        continue;
+      }
+
       // --- Custom rigged model animation ---
       if (avatar.customModel) {
         const cm = avatar.customModel;
@@ -1272,17 +1327,7 @@ export class AvatarManager {
           cm.currentAction = targetAction;
         }
 
-        // Idle: subtle procedural breathing sway
-        if (targetAction === "idle") {
-          avatar.breathPhase += dt * 1.5;
-          const breath = Math.sin(avatar.breathPhase);
-          cm.model.position.y = cm.baseY + breath * 0.003;
-          cm.model.rotation.z = Math.sin(avatar.breathPhase * 0.4) * 0.005;
-        } else {
-          cm.model.position.y = cm.baseY;
-          cm.model.rotation.z = 0;
-        }
-
+        cm.model.position.y = cm.baseY;
         cm.mixer.update(dt);
 
         // Chat bubble cleanup still runs (below), but skip procedural limb animation

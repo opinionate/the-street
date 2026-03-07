@@ -1,0 +1,4 @@
+[
+  {"block":"getRedis","lines":"5-15","what":"Singleton ioredis client factory","why":"Used by rate-limit, InferenceController budget tracking","dependencies":"ioredis","status":"ACTIVE"},
+  {"block":"closeRedis","lines":"17-22","what":"Close Redis on shutdown","why":"Called by server graceful shutdown","dependencies":"ioredis","status":"ACTIVE"}
+]

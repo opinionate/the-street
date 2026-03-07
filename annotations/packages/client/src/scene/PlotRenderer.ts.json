@@ -1,0 +1,3 @@
+[
+  {"block":"PlotRenderer class","lines":"9-115","what":"Render plot boundaries: wireframe boxes, floor pads, placeholder objects","why":"Used by main.ts to visualize plot grid","dependencies":"three, getAllPlotPositions, V1_CONFIG","status":"ACTIVE"}
+]

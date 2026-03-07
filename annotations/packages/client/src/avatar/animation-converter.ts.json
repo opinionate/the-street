@@ -1,0 +1,5 @@
+[
+  {"block":"normalizeMixamoBoneName","lines":"16-18","what":"Strip numeric prefix from Mixamo bone names","why":"Used by AvatarManager and DaemonRenderer for bone retargeting","dependencies":"None","status":"ACTIVE"},
+  {"block":"extractAveragePoses","lines":"23-50","what":"Average quaternion keyframes to get mean pose per bone","why":"Only used within this file's convertAnimation function","dependencies":"three","status":"SUSPECT"},
+  {"block":"convertAnimation","lines":"~52-383","what":"Convert FBX/GLB animation to clean GLB with bone normalization","why":"Used by AnimationConverterTool UI","dependencies":"three, GLTFLoader, GLTFExporter, FBXLoader, normalizeMixamoBoneName","status":"ACTIVE"}
+]

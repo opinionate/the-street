@@ -1,0 +1,3 @@
+[
+  {"block":"LoginUI class","lines":"7-83","what":"Full-screen login overlay: dark theme, Clerk SignIn component mount point, auth state listener, auto-hide on authentication","why":"Used by main.ts for login flow","dependencies":"AuthManager","status":"ACTIVE"}
+]

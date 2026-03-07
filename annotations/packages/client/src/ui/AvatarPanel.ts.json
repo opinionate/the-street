@@ -1,0 +1,4 @@
+[
+  {"block":"AvatarPanel class","lines":"13-741","what":"Avatar customization panel: 3D preview with drag-to-rotate, Upload Mixamo Character button, save/load avatar history, gallery strip with thumbnails, delete/view-prompt per history item, offscreen thumbnail capture, animation panel embedding","why":"Used by main.ts, toggled with F3","dependencies":"three, AvatarDefinition/AvatarAppearance from shared, AnimationPanel","status":"ACTIVE"},
+  {"block":"AvatarHistoryItem interface","lines":"5-11","what":"Avatar history entry shape (exported)","why":"Used by AvatarPanel and main.ts for avatar history","dependencies":"AvatarDefinition from shared","status":"ACTIVE"}
+]

@@ -2,10 +2,9 @@ import * as THREE from "three";
 import type { AvatarManager } from "../avatar/AvatarManager.js";
 import type { DaemonRenderer } from "../avatar/DaemonRenderer.js";
 
-const CONE_ANGLE = Math.PI / 3; // 60 degrees
-const CONE_RANGE = 30;
+const TARGET_RANGE = 50;
 
-interface TargetEntity {
+export interface TargetEntity {
   id: string;
   type: "daemon" | "player";
   position: THREE.Vector3;
@@ -24,8 +23,8 @@ export class TargetingSystem {
   // Highlight ring
   private highlightRing: THREE.Mesh | null = null;
 
-  // Info card HTML
-  private infoCard: HTMLDivElement;
+  /** Called when target changes (null = deselected) */
+  onTargetChange: ((target: TargetEntity | null) => void) | null = null;
 
   constructor(
     scene: THREE.Scene,
@@ -44,34 +43,32 @@ export class TargetingSystem {
       transparent: true,
       opacity: 0.5,
       side: THREE.DoubleSide,
-      depthTest: false,
     });
     this.highlightRing = new THREE.Mesh(ringGeo, ringMat);
     this.highlightRing.visible = false;
-    this.highlightRing.renderOrder = 999;
     this.scene.add(this.highlightRing);
+  }
 
-    // Create info card
-    this.infoCard = document.createElement("div");
-    this.infoCard.id = "target-info-card";
-    this.infoCard.style.cssText = `
-      position: fixed;
-      top: 50%;
-      right: 20px;
-      transform: translateY(-50%);
-      width: 240px;
-      background: rgba(10, 10, 15, 0.9);
-      border: 1px solid rgba(0, 255, 255, 0.3);
-      border-radius: 8px;
-      padding: 16px;
-      color: white;
-      font-family: system-ui, sans-serif;
-      font-size: 13px;
-      z-index: 200;
-      display: none;
-      pointer-events: none;
-    `;
-    document.body.appendChild(this.infoCard);
+  /** Get the current target */
+  getTarget(): TargetEntity | null {
+    return this.currentTarget;
+  }
+
+  /** Select a specific entity by id and type (used by click targeting) */
+  selectById(id: string, type: "daemon" | "player"): void {
+    // Get position
+    let pos: THREE.Vector3 | null = null;
+    if (type === "daemon") {
+      pos = this.daemonRenderer.getDaemonPosition(id);
+    } else {
+      pos = this.avatarManager.getPlayerPosition(id);
+    }
+    if (!pos) return;
+
+    const playerPos = this.avatarManager.getLocalPlayerPosition();
+    const distance = playerPos ? pos.distanceTo(playerPos) : 0;
+
+    this.selectTarget({ id, type, position: pos, distance });
   }
 
   /** Cycle to next target in forward cone */
@@ -98,12 +95,20 @@ export class TargetingSystem {
     this.selectTarget(this.sortedTargets[this.targetIndex]);
   }
 
+  /** Whether a target is currently selected */
+  get hasTarget(): boolean {
+    return this.currentTarget !== null;
+  }
+
   /** Deselect current target */
   deselect(): void {
+    if (this.currentTarget) {
+      this.hideTargetLabel(this.currentTarget);
+    }
     this.currentTarget = null;
     this.targetIndex = -1;
     if (this.highlightRing) this.highlightRing.visible = false;
-    this.infoCard.style.display = "none";
+    this.onTargetChange?.(null);
   }
 
   /** Update per frame (move highlight ring to track target) */
@@ -131,48 +136,35 @@ export class TargetingSystem {
 
   private refreshTargets(): void {
     const playerPos = this.avatarManager.getLocalPlayerPosition();
-    const playerRot = this.avatarManager.getLocalPlayerRotation();
     if (!playerPos) return;
-
-    const forward = new THREE.Vector3(
-      -Math.sin(playerRot),
-      0,
-      -Math.cos(playerRot),
-    );
 
     this.sortedTargets = [];
 
-    // Collect daemons
+    // Collect daemons within radius
     for (const id of this.daemonRenderer.getAllDaemonIds()) {
       const pos = this.daemonRenderer.getDaemonPosition(id);
       if (!pos) continue;
       const toTarget = new THREE.Vector3().subVectors(pos, playerPos);
       toTarget.y = 0;
       const dist = toTarget.length();
-      if (dist > CONE_RANGE || dist < 0.5) continue;
-
-      const angle = forward.angleTo(toTarget.normalize());
-      if (angle > CONE_ANGLE / 2) continue;
+      if (dist > TARGET_RANGE || dist < 0.5) continue;
 
       this.sortedTargets.push({ id, type: "daemon", position: pos, distance: dist });
     }
 
-    // Collect other players
+    // Collect other players within radius
     for (const id of this.avatarManager.getOtherPlayerIds()) {
       const pos = this.avatarManager.getPlayerPosition(id);
       if (!pos) continue;
       const toTarget = new THREE.Vector3().subVectors(pos, playerPos);
       toTarget.y = 0;
       const dist = toTarget.length();
-      if (dist > CONE_RANGE || dist < 0.5) continue;
-
-      const angle = forward.angleTo(toTarget.normalize());
-      if (angle > CONE_ANGLE / 2) continue;
+      if (dist > TARGET_RANGE || dist < 0.5) continue;
 
       this.sortedTargets.push({ id, type: "player", position: pos, distance: dist });
     }
 
-    // Sort by distance
+    // Sort by distance (nearest first)
     this.sortedTargets.sort((a, b) => a.distance - b.distance);
 
     // If current target no longer in list, reset index
@@ -189,6 +181,11 @@ export class TargetingSystem {
   }
 
   private selectTarget(target: TargetEntity): void {
+    // Hide previous target's label
+    if (this.currentTarget) {
+      this.hideTargetLabel(this.currentTarget);
+    }
+
     this.currentTarget = target;
 
     // Show highlight ring
@@ -197,38 +194,27 @@ export class TargetingSystem {
       this.highlightRing.position.set(target.position.x, 0.05, target.position.z);
     }
 
-    // Update info card
-    this.updateInfoCard(target);
+    // Show name label on new target
+    this.showTargetLabel(target);
+
+    // Notify listener
+    this.onTargetChange?.(target);
   }
 
-  private updateInfoCard(target: TargetEntity): void {
+  private showTargetLabel(target: TargetEntity): void {
     if (target.type === "daemon") {
-      const info = this.daemonRenderer.getDaemonInfo(target.id);
-      if (!info) {
-        this.infoCard.style.display = "none";
-        return;
-      }
-      this.infoCard.innerHTML = `
-        <div style="font-size:16px;font-weight:bold;margin-bottom:8px;color:#88ddaa">${this.escapeHtml(info.name)}</div>
-        <div style="margin-bottom:4px"><span style="color:#888">Role:</span> ${this.escapeHtml(info.role)}</div>
-        <div style="margin-bottom:4px"><span style="color:#888">Mood:</span> ${this.escapeHtml(info.mood)}</div>
-        <div style="margin-bottom:4px"><span style="color:#888">Action:</span> ${this.escapeHtml(info.action)}</div>
-        <div style="margin-top:8px;color:#666;font-size:11px">Distance: ${target.distance.toFixed(1)}m</div>
-      `;
+      this.daemonRenderer.showNameLabel(target.id);
     } else {
-      const name = target.id;
-      this.infoCard.innerHTML = `
-        <div style="font-size:16px;font-weight:bold;margin-bottom:8px;color:#aaddff">${this.escapeHtml(name)}</div>
-        <div style="margin-bottom:4px"><span style="color:#888">Player</span></div>
-        <div style="margin-top:8px;color:#666;font-size:11px">Distance: ${target.distance.toFixed(1)}m</div>
-      `;
+      this.avatarManager.showNameLabel(target.id);
     }
-    this.infoCard.style.display = "block";
   }
 
-  private escapeHtml(text: string): string {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
+  private hideTargetLabel(target: TargetEntity): void {
+    if (target.type === "daemon") {
+      this.daemonRenderer.hideNameLabel(target.id);
+    } else {
+      this.avatarManager.hideNameLabel(target.id);
+    }
   }
+
 }

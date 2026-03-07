@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
+import { normalizeMixamoBoneName } from "./animation-converter.js";
 import type { DaemonState, DaemonMood, DaemonAction, Vector3 as Vec3 } from "@the-street/shared";
 import { CHAT_DISPLAY_DURATION } from "@the-street/shared";
 
@@ -27,13 +29,6 @@ interface ChatBubble {
   duration: number;
 }
 
-interface EmoteParticle {
-  mesh: THREE.Sprite;
-  velocity: THREE.Vector3;
-  life: number;
-  maxLife: number;
-}
-
 interface EmoteLabel {
   sprite: THREE.Sprite;
   createdAt: number;
@@ -53,8 +48,17 @@ interface DaemonCustomModel {
   baseY: number;
 }
 
+interface DaemonWispRefs {
+  core: THREE.Sprite;
+  coreMat: THREE.SpriteMaterial;
+  glow: THREE.Sprite;
+  glowMat: THREE.SpriteMaterial;
+  light: THREE.PointLight;
+}
+
 interface DaemonInstance {
   group: THREE.Group;
+  bodyGroup: THREE.Group;
   name: string;
   targetPosition: THREE.Vector3;
   targetRotation: number;
@@ -66,9 +70,8 @@ interface DaemonInstance {
   mood: DaemonMood;
   behaviorType: string;
   chatBubbles: ChatBubble[];
-  emoteParticles: EmoteParticle[];
   emoteLabels: EmoteLabel[];
-  moodIndicator: THREE.Sprite | null;
+  moodIndicator?: null; // removed — kept for structural compat
   accentLight: THREE.PointLight;
   ringMesh: THREE.Mesh;
   // Body parts for animation
@@ -78,17 +81,11 @@ interface DaemonInstance {
   bodyMesh: THREE.Mesh;
   leftLeg: THREE.Mesh;
   rightLeg: THREE.Mesh;
+  // Wisp (default appearance when no custom model)
+  wisp: DaemonWispRefs | null;
   // Animation state
   gestureTimer: number;
   gesturePhase: number;
-  // Thinking dots animation
-  thinkingDots: THREE.Group | null;
-  thinkingPhase: number;
-  // Status indicators
-  trailTimer: number;
-  trailParticles: Array<{ mesh: THREE.Sprite; life: number }>;
-  sleepZs: THREE.Group | null;
-  sleepPhase: number;
   lastAction: DaemonAction;
   customModel: DaemonCustomModel | null;
 }
@@ -98,14 +95,57 @@ export class DaemonRenderer {
   private daemonNames = new Map<string, string>();
   private scene: THREE.Scene;
   private gltfLoader = new GLTFLoader();
-  private cachedAnimClips: { walk?: THREE.AnimationClip; run?: THREE.AnimationClip } = {};
+  /** Cached wisp textures keyed by accent color hex to avoid per-daemon canvas allocation */
+  private wispTextureCache = new Map<number, { core: THREE.Texture; glow: THREE.Texture }>();
+  private fbxLoader = new FBXLoader();
+  private cachedAnimClips: { idle?: THREE.AnimationClip; walk?: THREE.AnimationClip; run?: THREE.AnimationClip } = {};
   private animClipsLoading: Promise<void> | null = null;
-  private moodTextureCache = new Map<number, THREE.Texture>();
   private static _tempVec3 = new THREE.Vector3();
   apiUrl = "";
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
+  }
+
+  /** Build a map from normalized Mixamo bone name → actual node name in the model */
+  private buildBoneMap(root: THREE.Object3D): Map<string, string> {
+    const map = new Map<string, string>();
+    root.traverse((obj) => {
+      if (obj.name) {
+        map.set(normalizeMixamoBoneName(obj.name), obj.name);
+      }
+    });
+    return map;
+  }
+
+  /** Retarget an animation clip to match the model's bone names via normalization.
+   *  Strips path prefixes (e.g. "AnimationRoot/mixamorigHips" → "mixamorigHips").
+   *  Drops tracks whose normalized name has no match in the model. */
+  private retargetClipToModel(clip: THREE.AnimationClip, boneMap: Map<string, string>): THREE.AnimationClip {
+    const retargetedTracks: THREE.KeyframeTrack[] = [];
+    for (const track of clip.tracks) {
+      const dotIdx = track.name.indexOf(".");
+      const fullPath = track.name.substring(0, dotIdx);
+      const trackProp = track.name.substring(dotIdx); // e.g. ".quaternion"
+
+      // Strip path prefix: "AnimationRoot/mixamorigHips" → "mixamorigHips"
+      const slashIdx = fullPath.lastIndexOf("/");
+      const boneName = slashIdx !== -1 ? fullPath.substring(slashIdx + 1) : fullPath;
+
+      const normalized = normalizeMixamoBoneName(boneName);
+      const modelNode = boneMap.get(normalized);
+      if (!modelNode) continue; // drop unmatched tracks
+
+      if (modelNode === boneName) {
+        retargetedTracks.push(track);
+      } else {
+        const cloned = track.clone();
+        cloned.name = modelNode + trackProp;
+        retargetedTracks.push(cloned);
+      }
+    }
+
+    return new THREE.AnimationClip(clip.name, clip.duration, retargetedTracks);
   }
 
   spawnDaemon(daemon: DaemonState): void {
@@ -120,22 +160,18 @@ export class DaemonRenderer {
     );
     group.rotation.y = daemon.currentRotation;
 
-    const behaviorType = daemon.definition.behavior.type;
+    const behaviorType = daemon.definition.behavior?.type || "roamer";
     const accent = NPC_ACCENT_COLORS[behaviorType] || 0x44ff88;
 
     const parts = this.createNPCBody(accent);
     group.add(parts.body);
 
-    // Name label with behavior tag
-    const roleTag = behaviorType.charAt(0).toUpperCase() + behaviorType.slice(1);
-    const nameSprite = this.createNameLabel(`[${roleTag}] ${daemon.definition.name}`);
+    // Name label (hidden until targeted)
+    const nameSprite = this.createNameLabel(daemon.definition.name, accent);
     nameSprite.position.set(0, 2.1, 0);
+    nameSprite.name = "nameLabel";
+    nameSprite.visible = false;
     group.add(nameSprite);
-
-    // Mood indicator
-    const moodIndicator = this.createMoodIndicator(daemon.mood || "neutral");
-    moodIndicator.position.set(0.3, 2.1, 0);
-    group.add(moodIndicator);
 
     this.scene.add(group);
 
@@ -143,6 +179,7 @@ export class DaemonRenderer {
 
     this.daemons.set(daemon.daemonId, {
       group,
+      bodyGroup: parts.body,
       name: daemon.definition.name,
       targetPosition: new THREE.Vector3(
         daemon.currentPosition.x,
@@ -156,11 +193,10 @@ export class DaemonRenderer {
       speed: 0,
       action: daemon.currentAction as DaemonAction,
       mood: daemon.mood || "neutral",
-      behaviorType: daemon.definition.behavior.type,
+      behaviorType: daemon.definition.behavior?.type || "roamer",
       chatBubbles: [],
-      emoteParticles: [],
       emoteLabels: [],
-      moodIndicator,
+      moodIndicator: null,
       accentLight: parts.accentLight,
       ringMesh: parts.ringMesh,
       leftArm: parts.leftArm,
@@ -171,16 +207,155 @@ export class DaemonRenderer {
       rightLeg: parts.rightLeg,
       gestureTimer: 0,
       gesturePhase: 0,
-      thinkingDots: null,
-      thinkingPhase: 0,
-      trailTimer: 0,
-      trailParticles: [],
-      sleepZs: null,
-      sleepPhase: 0,
       lastAction: "idle",
       customModel: null,
+      wisp: parts.wisp ?? null,
     });
 
+    // Load custom character model if available
+    if (daemon.characterUploadId && this.apiUrl) {
+      this.loadCustomModel(daemon.daemonId, daemon.characterUploadId);
+    }
+  }
+
+  /** Replace or load a custom character model for a daemon (public for live updates) */
+  reloadCustomModel(daemonId: string, uploadId: string): void {
+    const instance = this.daemons.get(daemonId);
+    if (!instance) return;
+
+    // Tear down existing custom model if any
+    if (instance.customModel) {
+      instance.customModel.mixer.stopAllAction();
+      instance.customModel.mixer.uncacheRoot(instance.customModel.model);
+      instance.group.remove(instance.customModel.model);
+      instance.customModel = null;
+      instance.bodyGroup.visible = true;
+    }
+
+    this.loadCustomModel(daemonId, uploadId);
+  }
+
+  private async loadCustomModel(daemonId: string, uploadId: string): Promise<void> {
+    const instance = this.daemons.get(daemonId);
+    if (!instance) return;
+
+    try {
+      // Load model and shared animations in parallel
+      const modelUrl = `${this.apiUrl}/api/daemons/assets/${uploadId}/model`;
+      const [fbx] = await Promise.all([
+        this.fbxLoader.loadAsync(modelUrl),
+        this.ensureAnimClips(),
+      ]);
+
+      // Scale to reasonable size (FBX models are often in cm)
+      const box = new THREE.Box3().setFromObject(fbx);
+      const height = box.max.y - box.min.y;
+      if (height > 0) {
+        const targetHeight = 1.7; // ~1.7m human height
+        const scale = targetHeight / height;
+        fbx.scale.setScalar(scale);
+      }
+
+      // Center horizontally, feet on ground, face forward
+      fbx.rotation.y = Math.PI; // Mixamo FBX models face +Z, game forward is -Z
+      const scaledBox = new THREE.Box3().setFromObject(fbx);
+      fbx.position.y = -scaledBox.min.y;
+      fbx.position.x = -(scaledBox.min.x + scaledBox.max.x) / 2;
+      fbx.position.z = -(scaledBox.min.z + scaledBox.max.z) / 2;
+
+      // Build bone map for retargeting
+      const boneMap = this.buildBoneMap(fbx);
+
+      // Set up animation mixer and actions from shared clips
+      const mixer = new THREE.AnimationMixer(fbx);
+      const actions: DaemonCustomModel["actions"] = {};
+
+      // Load custom idle animation (GLB uploaded via AnimationPanel)
+      try {
+        const idleUrl = `${this.apiUrl}/api/animations/daemon/${daemonId}/idle?_v=${Date.now()}`;
+        const idleRes = await fetch(idleUrl);
+        if (idleRes.ok) {
+          const gltf = await new Promise<any>((resolve, reject) => {
+            this.gltfLoader.load(idleUrl, resolve, undefined, reject);
+          });
+          if (gltf.animations.length > 0) {
+            const retargeted = this.retargetClipToModel(gltf.animations[0], boneMap);
+            actions.idle = mixer.clipAction(retargeted);
+            console.log(`[Daemon] Loaded custom idle for ${daemonId}`);
+          }
+        }
+      } catch {
+        // No custom idle — will use shared
+      }
+
+      // Apply shared animation clips (idle, walk, run)
+      for (const type of ["idle", "walk", "run"] as const) {
+        if (actions[type]) continue; // already loaded (e.g. custom idle)
+        const clip = this.cachedAnimClips[type];
+        if (!clip) continue;
+        const retargeted = this.retargetClipToModel(clip, boneMap);
+        if (retargeted.tracks.length === 0) continue;
+        actions[type] = mixer.clipAction(retargeted);
+      }
+
+      // Start idle
+      if (actions.idle) {
+        actions.idle.play();
+      }
+
+      // Hide entire procedural body (includes eyes, accent light, etc.)
+      instance.bodyGroup.visible = false;
+
+      instance.group.add(fbx);
+      instance.customModel = {
+        model: fbx,
+        mixer,
+        actions,
+        currentAction: "idle",
+        baseY: 0,
+      };
+
+      console.log(`[Daemon] Loaded custom model for ${daemonId} (idle=${!!actions.idle} walk=${!!actions.walk} run=${!!actions.run})`);
+    } catch (err) {
+      console.warn(`[Daemon] Failed to load custom model for ${daemonId}:`, err);
+    }
+  }
+
+  /** Hot-swap the idle animation for a daemon that already has a custom model loaded. */
+  async reloadIdleAnimation(daemonId: string): Promise<void> {
+    const instance = this.daemons.get(daemonId);
+    if (!instance?.customModel) return;
+
+    const { mixer, actions, model } = instance.customModel;
+
+    let newClip: THREE.AnimationClip | null = null;
+
+    // Try custom idle animation (GLB uploaded via AnimationPanel)
+    try {
+      const idleUrl = `${this.apiUrl}/api/animations/daemon/${daemonId}/idle?_v=${Date.now()}`;
+      const gltf = await new Promise<any>((resolve, reject) => {
+        this.gltfLoader.load(idleUrl, resolve, undefined, reject);
+      });
+      if (gltf.animations.length > 0) {
+        const boneMap = this.buildBoneMap(model);
+        newClip = this.retargetClipToModel(gltf.animations[0], boneMap);
+      }
+    } catch {
+      // No custom idle
+    }
+
+    if (!newClip) return;
+
+    // Stop and uncache old idle
+    if (actions.idle) {
+      actions.idle.stop();
+      mixer.uncacheAction(actions.idle.getClip());
+    }
+
+    // Play new idle
+    actions.idle = mixer.clipAction(newClip);
+    actions.idle.play();
+    console.log(`[Daemon] Hot-swapped idle animation for ${daemonId}`);
   }
 
   despawnDaemon(daemonId: string): void {
@@ -192,49 +367,6 @@ export class DaemonRenderer {
       daemon.customModel.mixer.stopAllAction();
       daemon.customModel.mixer.uncacheRoot(daemon.customModel.model);
     }
-
-    // Dispose trail particles (added to this.scene, not the daemon group)
-    for (const p of daemon.trailParticles) {
-      this.scene.remove(p.mesh);
-      (p.mesh.material as THREE.SpriteMaterial).dispose();
-    }
-    daemon.trailParticles.length = 0;
-
-    // Dispose thinking dots sprites
-    if (daemon.thinkingDots) {
-      daemon.thinkingDots.traverse((child) => {
-        if (child instanceof THREE.Sprite) {
-          (child.material as THREE.SpriteMaterial).dispose();
-        }
-      });
-      daemon.group.remove(daemon.thinkingDots);
-      daemon.thinkingDots = null;
-    }
-
-    // Dispose sleep Z sprites
-    if (daemon.sleepZs) {
-      daemon.sleepZs.traverse((child) => {
-        if (child instanceof THREE.Sprite) {
-          const mat = child.material as THREE.SpriteMaterial;
-          mat.map?.dispose();
-          mat.dispose();
-        }
-      });
-      daemon.group.remove(daemon.sleepZs);
-      daemon.sleepZs = null;
-    }
-
-    // Dispose emote particles
-    // Note: mood particles use textures from moodTextureCache — those must NOT be disposed
-    // here since they're shared across daemons. Set mat.map = null before disposing the
-    // material so the material doesn't take the cached texture down with it.
-    for (const p of daemon.emoteParticles) {
-      p.mesh.parent?.remove(p.mesh);
-      const mat = p.mesh.material as THREE.SpriteMaterial;
-      mat.map = null;
-      mat.dispose();
-    }
-    daemon.emoteParticles.length = 0;
 
     // Dispose emote labels
     for (const label of daemon.emoteLabels) {
@@ -285,24 +417,39 @@ export class DaemonRenderer {
     });
   }
 
-  /** Load shared walk/run animation clips (cached after first load) */
+  /** Load shared Mixamo animation clips for daemon models (cached after first load).
+   *  Loads idle (shared), walk-mixamo, run. Strips position tracks. */
   private async ensureAnimClips(): Promise<void> {
-    if (this.cachedAnimClips.walk) return;
+    if (this.cachedAnimClips.idle) return;
     if (this.animClipsLoading) { await this.animClipsLoading; return; }
     this.animClipsLoading = (async () => {
-      for (const type of ["walk", "run"] as const) {
-        try {
-          const url = `${this.apiUrl}/api/avatar/animations/${type}`;
-          const gltf = await this.gltfLoader.loadAsync(url);
-          if (gltf.animations.length > 0) {
-            this.cachedAnimClips[type] = gltf.animations[0];
+      // idle has no -mixamo variant; walk/run prefer -mixamo, fall back to plain
+      const toLoad: Array<{ key: "idle" | "walk" | "run"; urls: string[] }> = [
+        { key: "idle", urls: [`${this.apiUrl}/api/avatar/animations/idle`] },
+        { key: "walk", urls: [`${this.apiUrl}/api/avatar/animations/walk-mixamo`, `${this.apiUrl}/api/avatar/animations/walk`] },
+        { key: "run",  urls: [`${this.apiUrl}/api/avatar/animations/run`] },
+      ];
+      for (const { key, urls } of toLoad) {
+        for (const url of urls) {
+          try {
+            const gltf = await this.gltfLoader.loadAsync(url);
+            if (gltf.animations?.length > 0) {
+              const srcClip = gltf.animations[0];
+              // Strip position tracks to prevent sinking/floating
+              const filtered = srcClip.tracks.filter(
+                (t: THREE.KeyframeTrack) => !t.name.endsWith(".position"),
+              );
+              this.cachedAnimClips[key] = new THREE.AnimationClip(
+                srcClip.name, srcClip.duration, filtered,
+              );
+              break; // loaded successfully, skip fallback URLs
+            }
+          } catch {
+            // Try next URL or skip
           }
-        } catch (err) {
-          console.warn(`[Daemon] Failed to load ${type} animation clip:`, err);
         }
       }
-      // If we didn't get any clips, reset so next call retries
-      if (!this.cachedAnimClips.walk && !this.cachedAnimClips.run) {
+      if (!this.cachedAnimClips.idle && !this.cachedAnimClips.walk) {
         this.animClipsLoading = null;
       }
     })();
@@ -376,7 +523,8 @@ export class DaemonRenderer {
     sprite.scale.set(3, spriteHeight, 1);
 
     const stackOffset = daemon.chatBubbles.length * (spriteHeight + 0.1);
-    sprite.position.set(0, 2.4 + stackOffset, 0);
+    const bubbleBaseY = daemon.wisp && !daemon.customModel ? 1.8 : 2.4;
+    sprite.position.set(0, bubbleBaseY + stackOffset, 0);
     daemon.group.add(sprite);
 
     const bubble: ChatBubble = {
@@ -456,7 +604,8 @@ export class DaemonRenderer {
     });
     const sprite = new THREE.Sprite(mat);
     sprite.scale.set(1.8, 0.27, 1);
-    sprite.position.set(0, 2.5, 0);
+    const emoteBaseY = daemon.wisp && !daemon.customModel ? 1.9 : 2.5;
+    sprite.position.set(0, emoteBaseY, 0);
     daemon.group.add(sprite);
 
     // Thought bubbles float up gently and fade out over 4 seconds
@@ -479,14 +628,8 @@ export class DaemonRenderer {
     if (!daemon) return;
 
     daemon.mood = mood;
-    this.updateMoodIndicator(daemon);
-    this.updateMoodVisuals(daemon, 0);
 
-    // Spawn emote particles
     const color = MOOD_COLORS[mood] || 0x888888;
-    for (let i = 0; i < 5; i++) {
-      this.spawnEmoteParticle(daemon, color);
-    }
 
     // Show emote text as floating label
     if (emote) {
@@ -496,10 +639,10 @@ export class DaemonRenderer {
     // Pulse the accent light
     daemon.accentLight.intensity = 1.5;
 
-    // Update ring color to match mood
-    const ringMat = daemon.ringMesh.material as THREE.MeshStandardMaterial;
-    ringMat.color.setHex(color);
-    ringMat.emissive.setHex(color);
+    // Update ring color to match mood (skip if stub/basic material)
+    const ringMat = daemon.ringMesh.material;
+    if ("color" in ringMat) (ringMat as THREE.MeshStandardMaterial).color.setHex(color);
+    if ("emissive" in ringMat) (ringMat as THREE.MeshStandardMaterial).emissive.setHex(color);
 
     // Trigger gesture based on mood
     daemon.gestureTimer = 1.5;
@@ -532,6 +675,10 @@ export class DaemonRenderer {
     }
     if (!clip) return;
 
+    // Retarget GLB bone names to match the FBX model
+    const boneMap = this.buildBoneMap(cm.model);
+    clip = this.retargetClipToModel(clip, boneMap);
+
     // Stop any existing emote
     if (cm.actions.emote) {
       cm.actions.emote.fadeOut(0.3);
@@ -563,102 +710,6 @@ export class DaemonRenderer {
       }
       cm.currentAction = "idle";
     }, duration + 100);
-  }
-
-  /** Update mood-driven visual properties: accent light color, body tint, animation speed, particles */
-  private updateMoodVisuals(daemon: DaemonInstance, dt: number): void {
-    const moodColor = MOOD_COLORS[daemon.mood] || 0x888888;
-
-    // Accent light shifts color to match mood
-    daemon.accentLight.color.setHex(moodColor);
-
-    // Subtle body emissive tint — faint mood coloring with pulse for strong moods
-    const bodyMat = daemon.bodyMesh.material as THREE.MeshStandardMaterial;
-    bodyMat.emissive.setHex(moodColor);
-
-    const basePulse = Math.sin(daemon.breathPhase * 2) * 0.015;
-    if (daemon.mood === "excited") {
-      bodyMat.emissiveIntensity = 0.08 + basePulse * 2;
-      // Emit sparkle particles occasionally
-      if (Math.random() < dt * 2) {
-        this.emitMoodParticle(daemon, 0xffff44);
-      }
-    } else if (daemon.mood === "happy") {
-      bodyMat.emissiveIntensity = 0.04 + basePulse;
-    } else if (daemon.mood === "annoyed") {
-      bodyMat.emissiveIntensity = 0.06 + Math.abs(basePulse) * 2;
-      // Occasional red spark
-      if (Math.random() < dt * 0.8) {
-        this.emitMoodParticle(daemon, 0xff4444);
-      }
-    } else if (daemon.mood === "curious") {
-      bodyMat.emissiveIntensity = 0.03 + basePulse * 0.5;
-    } else if (daemon.mood === "bored") {
-      bodyMat.emissiveIntensity = 0.01;
-      // Droopy head for bored daemons
-      daemon.head.rotation.x = Math.sin(daemon.breathPhase * 0.3) * 0.05 + 0.1;
-    } else {
-      bodyMat.emissiveIntensity = 0.01;
-    }
-
-    // Reset head tilt when not bored
-    if (daemon.mood !== "bored") {
-      daemon.head.rotation.x *= 0.9; // Smoothly return to neutral
-    }
-
-    // Accent light intensity pulses with strong moods
-    if (daemon.mood === "excited" || daemon.mood === "happy") {
-      daemon.accentLight.intensity = Math.max(daemon.accentLight.intensity,
-        0.4 + Math.sin(daemon.breathPhase * 3) * 0.15);
-    }
-  }
-
-  /** Get or create a cached texture for mood particles of the given color */
-  private getMoodTexture(color: number): THREE.Texture {
-    let tex = this.moodTextureCache.get(color);
-    if (!tex) {
-      const canvas = document.createElement("canvas");
-      canvas.width = 16;
-      canvas.height = 16;
-      const ctx = canvas.getContext("2d")!;
-      ctx.beginPath();
-      ctx.arc(8, 8, 6, 0, Math.PI * 2);
-      ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
-      ctx.fill();
-      tex = new THREE.CanvasTexture(canvas);
-      this.moodTextureCache.set(color, tex);
-    }
-    return tex;
-  }
-
-  /** Emit a small colored particle near the daemon for mood effects */
-  private emitMoodParticle(daemon: DaemonInstance, color: number): void {
-    const tex = this.getMoodTexture(color);
-    const mat = new THREE.SpriteMaterial({
-      map: tex,
-      transparent: true,
-      opacity: 0.7,
-      blending: THREE.AdditiveBlending,
-    });
-    const sprite = new THREE.Sprite(mat);
-    sprite.scale.setScalar(0.08);
-
-    // Position near the body with some randomness
-    const offsetX = (Math.random() - 0.5) * 0.4;
-    const offsetZ = (Math.random() - 0.5) * 0.4;
-    sprite.position.set(offsetX, 1.0 + Math.random() * 0.8, offsetZ);
-    daemon.group.add(sprite);
-
-    daemon.emoteParticles.push({
-      mesh: sprite,
-      velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 0.3,
-        0.5 + Math.random() * 0.3,
-        (Math.random() - 0.5) * 0.3,
-      ),
-      life: 0.8 + Math.random() * 0.4,
-      maxLife: 1.2,
-    });
   }
 
   /** Get animation speed multiplier based on mood */
@@ -744,7 +795,23 @@ export class DaemonRenderer {
         // (still process chat bubbles, emotes, mood below)
       }
 
-      if (!daemon.customModel) {
+      if (daemon.wisp && !daemon.customModel) {
+        // Wisp animation (matches avatar wisp style)
+        const w = daemon.wisp;
+        daemon.breathPhase += dt * 2.0;
+        const t = daemon.breathPhase;
+        // Gentle float
+        w.core.position.y = 1.0 + Math.sin(t * 0.8) * 0.06;
+        w.glow.position.y = w.core.position.y;
+        w.light.position.y = w.core.position.y;
+        // Pulsing opacity
+        w.coreMat.opacity = 0.8 + Math.sin(t * 1.2) * 0.15;
+        w.glowMat.opacity = 0.7 + Math.sin(t * 0.9) * 0.15;
+        w.light.intensity = 1.5 + Math.sin(t * 1.3) * 0.5;
+        // Breathing glow scale
+        const glowScale = 1.4 + Math.sin(t * 1.0) * 0.15;
+        w.glow.scale.set(glowScale, glowScale, 1);
+      } else if (!daemon.customModel) {
         // Breathing (always active — subtle body scale pulse)
         daemon.breathPhase += dt * 1.5;
         const breathScale = 1 + Math.sin(daemon.breathPhase) * 0.008;
@@ -764,37 +831,13 @@ export class DaemonRenderer {
         }
       }
 
-      // Status indicators
-      this.updateStatusIndicators(daemon, dt);
-
-      // Continuous mood visual effects (particles, pulses)
-      this.updateMoodVisuals(daemon, dt);
-
       // Track action transitions
       daemon.lastAction = daemon.action;
 
-      // Accent light decay
-      if (daemon.accentLight.intensity > 0.3) {
+      // Accent light decay (skip for wisps — wisp animation controls the light)
+      if (!daemon.wisp && daemon.accentLight.intensity > 0.3) {
         daemon.accentLight.intensity -= dt * 2;
         if (daemon.accentLight.intensity < 0.3) daemon.accentLight.intensity = 0.3;
-      }
-
-      // Emote particles
-      for (let i = daemon.emoteParticles.length - 1; i >= 0; i--) {
-        const p = daemon.emoteParticles[i];
-        p.life -= dt;
-        DaemonRenderer._tempVec3.copy(p.velocity).multiplyScalar(dt);
-        p.mesh.position.add(DaemonRenderer._tempVec3);
-        p.velocity.y -= dt * 0.5; // gravity
-        const alpha = p.life / p.maxLife;
-        (p.mesh.material as THREE.SpriteMaterial).opacity = alpha;
-        p.mesh.scale.setScalar(0.1 + (1 - alpha) * 0.1);
-
-        if (p.life <= 0) {
-          p.mesh.parent?.remove(p.mesh);
-          (p.mesh.material as THREE.SpriteMaterial).dispose();
-          daemon.emoteParticles.splice(i, 1);
-        }
       }
 
       // Emote labels
@@ -809,7 +852,8 @@ export class DaemonRenderer {
         } else {
           // Float upward and fade
           const progress = age / label.duration;
-          label.sprite.position.y = 2.6 + progress * 0.4;
+          const labelBaseY = daemon.wisp && !daemon.customModel ? 2.0 : 2.6;
+          label.sprite.position.y = labelBaseY + progress * 0.4;
           label.sprite.material.opacity = 1 - progress * progress;
         }
       }
@@ -893,6 +937,22 @@ export class DaemonRenderer {
     };
   }
 
+  /** Show name label for a specific daemon */
+  showNameLabel(daemonId: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+    const label = daemon.group.getObjectByName("nameLabel");
+    if (label) label.visible = true;
+  }
+
+  /** Hide name label for a specific daemon */
+  hideNameLabel(daemonId: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+    const label = daemon.group.getObjectByName("nameLabel");
+    if (label) label.visible = false;
+  }
+
   /** Get daemon IDs near a world position */
   getDaemonsNear(pos: THREE.Vector3, radius: number): string[] {
     const results: string[] = [];
@@ -902,6 +962,22 @@ export class DaemonRenderer {
       }
     }
     return results;
+  }
+
+  getAllDaemonStates(): DaemonState[] {
+    const states: DaemonState[] = [];
+    for (const [id, daemon] of this.daemons) {
+      states.push({
+        daemonId: id,
+        definition: { name: daemon.name, description: "", behavior: { type: daemon.behaviorType } } as DaemonState["definition"],
+        currentPosition: { x: daemon.group.position.x, y: daemon.group.position.y, z: daemon.group.position.z },
+        currentRotation: daemon.currentRotation,
+        currentAction: daemon.action,
+        mood: daemon.mood,
+        characterUploadId: daemon.customModel ? id : undefined,
+      });
+    }
+    return states;
   }
 
   // ─── Action Animations ────────────────────────────────────────
@@ -1003,14 +1079,6 @@ export class DaemonRenderer {
     daemon.head.rotation.z = 0.1 + Math.sin(daemon.animPhase) * 0.03;
     daemon.head.rotation.x = -0.05;
 
-    // Thinking dots
-    if (!daemon.thinkingDots) {
-      daemon.thinkingDots = this.createThinkingDots();
-      daemon.thinkingDots.position.set(0, 2.3, 0);
-      daemon.group.add(daemon.thinkingDots);
-    }
-    daemon.thinkingPhase += dt * 3;
-    this.updateThinkingDots(daemon.thinkingDots, daemon.thinkingPhase);
   }
 
   private animateTalking(daemon: DaemonInstance, dt: number): void {
@@ -1096,16 +1164,6 @@ export class DaemonRenderer {
     daemon.leftLeg.rotation.x *= 1 - Math.min(dt * 3, 1);
     daemon.rightLeg.rotation.x *= 1 - Math.min(dt * 3, 1);
 
-    // Clean up thinking dots if present
-    if (daemon.thinkingDots) {
-      daemon.thinkingDots.traverse((child) => {
-        if (child instanceof THREE.Sprite) {
-          (child.material as THREE.SpriteMaterial).dispose();
-        }
-      });
-      daemon.group.remove(daemon.thinkingDots);
-      daemon.thinkingDots = null;
-    }
   }
 
   // ─── Gesture Overlay (during chat/emote events) ────────────────
@@ -1165,123 +1223,6 @@ export class DaemonRenderer {
     daemon.bodyMesh.rotation.z *= 1 - lerp;
   }
 
-  // ─── Status Indicators ─────────────────────────────────────────
-
-  private updateStatusIndicators(daemon: DaemonInstance, dt: number): void {
-    // Walking trail particles
-    if (daemon.action === "walking") {
-      daemon.trailTimer -= dt;
-      if (daemon.trailTimer <= 0) {
-        daemon.trailTimer = 0.3; // Spawn every 0.3s
-        this.spawnTrailParticle(daemon);
-      }
-    }
-
-    // Update trail particles
-    for (let i = daemon.trailParticles.length - 1; i >= 0; i--) {
-      const p = daemon.trailParticles[i];
-      p.life -= dt;
-      const alpha = p.life / 1.5;
-      (p.mesh.material as THREE.SpriteMaterial).opacity = alpha * 0.4;
-      p.mesh.scale.setScalar(0.04 + (1 - alpha) * 0.02);
-      if (p.life <= 0) {
-        this.scene.remove(p.mesh);
-        (p.mesh.material as THREE.SpriteMaterial).dispose();
-        daemon.trailParticles.splice(i, 1);
-      }
-    }
-
-    // Sleep Z's when bored
-    if (daemon.mood === "bored" && daemon.action === "idle") {
-      if (!daemon.sleepZs) {
-        daemon.sleepZs = this.createSleepZs();
-        daemon.sleepZs.position.set(0.2, 1.8, 0);
-        daemon.group.add(daemon.sleepZs);
-      }
-      daemon.sleepPhase += dt * 1.5;
-      this.updateSleepZs(daemon.sleepZs, daemon.sleepPhase);
-    } else if (daemon.sleepZs) {
-      daemon.sleepZs.traverse((child) => {
-        if (child instanceof THREE.Sprite) {
-          const mat = child.material as THREE.SpriteMaterial;
-          mat.map?.dispose();
-          mat.dispose();
-        }
-      });
-      daemon.group.remove(daemon.sleepZs);
-      daemon.sleepZs = null;
-    }
-
-    // Ring rotation when walking (subtle spin effect)
-    if (daemon.action === "walking") {
-      daemon.ringMesh.rotation.z += dt * 2;
-    }
-  }
-
-  private spawnTrailParticle(daemon: DaemonInstance): void {
-    const accentColor = (daemon.ringMesh.material as THREE.MeshStandardMaterial).color.getHex();
-    const mat = new THREE.SpriteMaterial({
-      color: accentColor,
-      transparent: true,
-      opacity: 0.3,
-      depthTest: false,
-    });
-    const sprite = new THREE.Sprite(mat);
-    sprite.scale.setScalar(0.04);
-    // Place at daemon's world position (feet level)
-    sprite.position.copy(daemon.group.position);
-    sprite.position.y = 0.05;
-    this.scene.add(sprite); // Add to scene, not group, so it stays in place
-
-    daemon.trailParticles.push({ mesh: sprite, life: 1.5 });
-
-    // Limit trail length
-    while (daemon.trailParticles.length > 15) {
-      const old = daemon.trailParticles.shift()!;
-      this.scene.remove(old.mesh);
-      (old.mesh.material as THREE.SpriteMaterial).dispose();
-    }
-  }
-
-  private createSleepZs(): THREE.Group {
-    const group = new THREE.Group();
-    for (let i = 0; i < 3; i++) {
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d")!;
-      canvas.width = 24;
-      canvas.height = 24;
-
-      ctx.fillStyle = "#6666aa";
-      ctx.font = `bold ${14 - i * 2}px system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("z", 12, 12);
-
-      const texture = new THREE.CanvasTexture(canvas);
-      const mat = new THREE.SpriteMaterial({
-        map: texture,
-        transparent: true,
-        depthTest: false,
-      });
-      const sprite = new THREE.Sprite(mat);
-      sprite.scale.set(0.12 - i * 0.02, 0.12 - i * 0.02, 1);
-      sprite.position.set(i * 0.1, i * 0.15, 0);
-      group.add(sprite);
-    }
-    return group;
-  }
-
-  private updateSleepZs(zGroup: THREE.Group, phase: number): void {
-    zGroup.children.forEach((z, i) => {
-      const offset = i * 1.2;
-      const cyclePhase = (phase + offset) % 3;
-      // Float up and fade
-      (z as THREE.Sprite).position.y = i * 0.15 + Math.sin(cyclePhase * 0.7) * 0.1;
-      const alpha = 0.3 + Math.sin(cyclePhase) * 0.2;
-      ((z as THREE.Sprite).material as THREE.SpriteMaterial).opacity = alpha;
-    });
-  }
-
   // ─── Emote Label ──────────────────────────────────────────────
 
   private showEmoteLabel(daemon: DaemonInstance, emote: string, color: number): void {
@@ -1334,115 +1275,6 @@ export class DaemonRenderer {
     }
   }
 
-  // ─── Particles ────────────────────────────────────────────────
-
-  private spawnEmoteParticle(daemon: DaemonInstance, color: number): void {
-    const mat = new THREE.SpriteMaterial({
-      color,
-      transparent: true,
-      depthTest: false,
-    });
-    const sprite = new THREE.Sprite(mat);
-    sprite.scale.setScalar(0.1);
-    sprite.position.set(
-      (Math.random() - 0.5) * 0.4,
-      1.8 + Math.random() * 0.3,
-      (Math.random() - 0.5) * 0.4,
-    );
-    daemon.group.add(sprite);
-
-    daemon.emoteParticles.push({
-      mesh: sprite,
-      velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 0.8,
-        0.5 + Math.random() * 0.5,
-        (Math.random() - 0.5) * 0.8,
-      ),
-      life: 1.5 + Math.random() * 0.5,
-      maxLife: 2,
-    });
-  }
-
-  // ─── Thinking Dots ────────────────────────────────────────────
-
-  private createThinkingDots(): THREE.Group {
-    const group = new THREE.Group();
-    for (let i = 0; i < 3; i++) {
-      const mat = new THREE.SpriteMaterial({
-        color: 0xaaaaaa,
-        transparent: true,
-        depthTest: false,
-      });
-      const dot = new THREE.Sprite(mat);
-      dot.scale.setScalar(0.06);
-      dot.position.x = (i - 1) * 0.12;
-      group.add(dot);
-    }
-    return group;
-  }
-
-  private updateThinkingDots(dots: THREE.Group, phase: number): void {
-    dots.children.forEach((dot, i) => {
-      const offset = i * 0.8;
-      (dot as THREE.Sprite).position.y = Math.sin(phase + offset) * 0.05;
-      const alpha = 0.4 + Math.sin(phase + offset) * 0.3;
-      ((dot as THREE.Sprite).material as THREE.SpriteMaterial).opacity = alpha;
-    });
-  }
-
-  // ─── Mood Indicator ───────────────────────────────────────────
-
-  private updateMoodIndicator(daemon: DaemonInstance): void {
-    if (!daemon.moodIndicator) return;
-
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d")!;
-    canvas.width = 32;
-    canvas.height = 32;
-
-    const color = MOOD_COLORS[daemon.mood] || 0x888888;
-    const r = (color >> 16) & 0xff;
-    const g = (color >> 8) & 0xff;
-    const b = color & 0xff;
-
-    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-    ctx.beginPath();
-    ctx.arc(16, 16, 10, 0, Math.PI * 2);
-    ctx.fill();
-
-    const oldTex = daemon.moodIndicator.material.map;
-    if (oldTex) oldTex.dispose();
-
-    daemon.moodIndicator.material.map = new THREE.CanvasTexture(canvas);
-    daemon.moodIndicator.material.needsUpdate = true;
-  }
-
-  private createMoodIndicator(mood: DaemonMood): THREE.Sprite {
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d")!;
-    canvas.width = 32;
-    canvas.height = 32;
-
-    const color = MOOD_COLORS[mood] || 0x888888;
-    const r = (color >> 16) & 0xff;
-    const g = (color >> 8) & 0xff;
-    const b = color & 0xff;
-
-    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-    ctx.beginPath();
-    ctx.arc(16, 16, 10, 0, Math.PI * 2);
-    ctx.fill();
-
-    const texture = new THREE.CanvasTexture(canvas);
-    const mat = new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      depthTest: false,
-    });
-    const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(0.15, 0.15, 1);
-    return sprite;
-  }
 
   // ─── NPC Body Construction ────────────────────────────────────
 
@@ -1456,133 +1288,152 @@ export class DaemonRenderer {
     bodyMesh: THREE.Mesh;
     leftLeg: THREE.Mesh;
     rightLeg: THREE.Mesh;
+    wisp: DaemonWispRefs;
   } {
     const body = new THREE.Group();
 
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color: 0x556677,
-      roughness: 0.5,
-      metalness: 0.3,
-      emissive: accentColor,
-      emissiveIntensity: 0.15,
+    // --- Wisp textures (cached per accent color) ---
+    let cached = this.wispTextureCache.get(accentColor);
+    if (!cached) {
+      const c = new THREE.Color(accentColor);
+      const r = Math.round(c.r * 255);
+      const g = Math.round(c.g * 255);
+      const b = Math.round(c.b * 255);
+
+      const coreCanvas = document.createElement("canvas");
+      coreCanvas.width = 128;
+      coreCanvas.height = 128;
+      const cCtx = coreCanvas.getContext("2d")!;
+      const coreGrad = cCtx.createRadialGradient(64, 64, 0, 64, 64, 64);
+      coreGrad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.5)`);
+      coreGrad.addColorStop(0.25, `rgba(${r}, ${g}, ${b}, 0.2)`);
+      coreGrad.addColorStop(0.6, `rgba(${r}, ${g}, ${b}, 0.05)`);
+      coreGrad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+      cCtx.fillStyle = coreGrad;
+      cCtx.fillRect(0, 0, 128, 128);
+      const coreTex = new THREE.CanvasTexture(coreCanvas);
+
+      const glowCanvas = document.createElement("canvas");
+      glowCanvas.width = 128;
+      glowCanvas.height = 128;
+      const gCtx = glowCanvas.getContext("2d")!;
+      const gradient = gCtx.createRadialGradient(64, 64, 0, 64, 64, 64);
+      gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.6)`);
+      gradient.addColorStop(0.3, `rgba(${r}, ${g}, ${b}, 0.25)`);
+      gradient.addColorStop(0.7, `rgba(${r}, ${g}, ${b}, 0.05)`);
+      gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+      gCtx.fillStyle = gradient;
+      gCtx.fillRect(0, 0, 128, 128);
+      const glowTex = new THREE.CanvasTexture(glowCanvas);
+
+      cached = { core: coreTex, glow: glowTex };
+      this.wispTextureCache.set(accentColor, cached);
+    }
+
+    const coreMat = new THREE.SpriteMaterial({
+      map: cached.core,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
     });
-    const accentMat = new THREE.MeshStandardMaterial({
-      color: accentColor,
-      roughness: 0.5,
-      metalness: 0.2,
-      emissive: accentColor,
-      emissiveIntensity: 0.3,
+    const core = new THREE.Sprite(coreMat);
+    core.scale.set(0.7, 0.7, 1);
+    core.position.y = 1.0;
+    body.add(core);
+
+    const glowMat = new THREE.SpriteMaterial({
+      map: cached.glow,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
     });
+    const glow = new THREE.Sprite(glowMat);
+    glow.scale.set(1.4, 1.4, 1);
+    glow.position.y = 1.0;
+    body.add(glow);
 
-    // Torso (capsule)
-    const bodyGeo = new THREE.CapsuleGeometry(0.2, 0.8, 8, 12);
-    const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
-    bodyMesh.position.y = 1.0;
-    bodyMesh.castShadow = true;
-    body.add(bodyMesh);
+    // Stub light (not added to scene — avoids per-daemon GPU light cost)
+    const light = new THREE.PointLight(accentColor, 0, 0, 0);
 
-    // Head
-    const headGeo = new THREE.SphereGeometry(0.14, 10, 8);
-    const head = new THREE.Mesh(headGeo, bodyMat);
-    head.position.y = 1.6;
-    head.castShadow = true;
-    body.add(head);
+    // --- Stub mesh refs so procedural animation code writes harmlessly ---
+    const stubMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+    stubMesh.visible = false;
 
-    // Eyes (small accent-colored dots)
-    const eyeGeo = new THREE.SphereGeometry(0.02, 6, 4);
-    const eyeMat = new THREE.MeshStandardMaterial({
-      color: accentColor,
-      emissive: accentColor,
-      emissiveIntensity: 0.5,
-    });
-    const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
-    leftEye.position.set(-0.05, 1.62, 0.12);
-    body.add(leftEye);
-    const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
-    rightEye.position.set(0.05, 1.62, 0.12);
-    body.add(rightEye);
-
-    // Accent ring (role indicator)
-    const ringGeo = new THREE.TorusGeometry(0.18, 0.02, 8, 16);
-    const ring = new THREE.Mesh(ringGeo, accentMat);
-    ring.position.y = 1.75;
-    ring.rotation.x = Math.PI / 2;
-    body.add(ring);
-
-    // Accent glow
-    const glowLight = new THREE.PointLight(accentColor, 1.0, 4, 2);
-    glowLight.position.set(0, 1.2, 0);
-    body.add(glowLight);
-
-    // Arms (capsules, attached at shoulder height)
-    const armGeo = new THREE.CapsuleGeometry(0.035, 0.4, 6, 8);
-
-    const leftArm = new THREE.Mesh(armGeo, bodyMat);
-    leftArm.position.set(-0.25, 1.2, 0);
-    leftArm.rotation.z = 0.05; // Slight outward rest
-    body.add(leftArm);
-
-    const rightArm = new THREE.Mesh(armGeo, bodyMat);
-    rightArm.position.set(0.25, 1.2, 0);
-    rightArm.rotation.z = -0.05;
-    body.add(rightArm);
-
-    // Hands (small spheres at arm tips)
-    const handGeo = new THREE.SphereGeometry(0.04, 6, 4);
-    const leftHand = new THREE.Mesh(handGeo, accentMat);
-    leftHand.position.y = -0.24;
-    leftArm.add(leftHand);
-
-    const rightHand = new THREE.Mesh(handGeo, accentMat);
-    rightHand.position.y = -0.24;
-    rightArm.add(rightHand);
-
-    // Legs
-    const legGeo = new THREE.CylinderGeometry(0.05, 0.06, 0.5, 6);
-    const leftLeg = new THREE.Mesh(legGeo, bodyMat);
-    leftLeg.position.set(-0.08, 0.3, 0);
-    body.add(leftLeg);
-    const rightLeg = new THREE.Mesh(legGeo, bodyMat);
-    rightLeg.position.set(0.08, 0.3, 0);
-    body.add(rightLeg);
-
-    // Feet (small accent-colored cylinders)
-    const footGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.03, 6);
-    const leftFoot = new THREE.Mesh(footGeo, accentMat);
-    leftFoot.position.y = -0.26;
-    leftLeg.add(leftFoot);
-    const rightFoot = new THREE.Mesh(footGeo, accentMat);
-    rightFoot.position.y = -0.26;
-    rightLeg.add(rightFoot);
-
-    return { body, accentLight: glowLight, ringMesh: ring, leftArm, rightArm, head, bodyMesh, leftLeg, rightLeg };
+    return {
+      body,
+      accentLight: light,
+      ringMesh: stubMesh,
+      leftArm: stubMesh,
+      rightArm: stubMesh,
+      head: stubMesh,
+      bodyMesh: stubMesh,
+      leftLeg: stubMesh,
+      rightLeg: stubMesh,
+      wisp: { core, coreMat, glow, glowMat, light },
+    };
   }
 
-  private createNameLabel(name: string): THREE.Sprite {
+  private createNameLabel(name: string, accentColor = 0x44ff88): THREE.Sprite {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
-    canvas.width = 320;
-    canvas.height = 48;
 
-    ctx.fillStyle = "rgba(0, 30, 0, 0.6)";
+    // Dynamic width based on name length
+    const fontSize = 22;
+    const font = `bold ${fontSize}px 'Courier New', monospace`;
+    ctx.font = font;
+    const textWidth = ctx.measureText(name).width;
+    const hPad = 24;
+    const canvasWidth = Math.ceil(textWidth + hPad * 2);
+    const canvasHeight = 40;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+
+    const r = ((accentColor >> 16) & 0xff);
+    const g = ((accentColor >> 8) & 0xff);
+    const b = (accentColor & 0xff);
+
+    // Background — dark translucent with accent border
+    ctx.fillStyle = `rgba(5, 5, 15, 0.75)`;
     ctx.beginPath();
-    ctx.roundRect(0, 0, 320, 48, 8);
+    ctx.roundRect(1, 1, canvasWidth - 2, canvasHeight - 2, 3);
     ctx.fill();
 
-    ctx.fillStyle = "#44ff88";
-    ctx.font = "bold 20px system-ui, sans-serif";
+    // Accent border (thin)
+    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.7)`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(1, 1, canvasWidth - 2, canvasHeight - 2, 3);
+    ctx.stroke();
+
+    // Accent glow line at bottom
+    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.5)`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(6, canvasHeight - 3);
+    ctx.lineTo(canvasWidth - 6, canvasHeight - 3);
+    ctx.stroke();
+
+    // Name text with subtle glow
+    ctx.font = font;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(name, 160, 24, 300);
+    ctx.shadowColor = `rgba(${r}, ${g}, ${b}, 0.6)`;
+    ctx.shadowBlur = 6;
+    ctx.fillStyle = `rgb(${Math.min(r + 80, 255)}, ${Math.min(g + 80, 255)}, ${Math.min(b + 80, 255)})`;
+    ctx.fillText(name, canvasWidth / 2, canvasHeight / 2);
 
     const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
     const mat = new THREE.SpriteMaterial({
       map: texture,
       transparent: true,
       depthTest: false,
     });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(1.8, 0.27, 1);
+    // Scale proportional to canvas aspect ratio
+    const aspect = canvasWidth / canvasHeight;
+    const spriteHeight = 0.22;
+    sprite.scale.set(spriteHeight * aspect, spriteHeight, 1);
     return sprite;
   }
 }

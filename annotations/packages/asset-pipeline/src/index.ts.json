@@ -1,0 +1,7 @@
+[
+  {"block":"uploadAsset re-export","lines":"1","what":"Re-exports S3 upload function","why":"Used by server assets API via dynamic import","dependencies":"upload.ts","status":"ACTIVE"},
+  {"block":"getAssetUrl re-export","lines":"1","what":"Re-exports CDN URL builder","why":"Never imported by consumers","dependencies":"upload.ts","status":"DEAD"},
+  {"block":"computeContentHash re-export","lines":"3","what":"Re-exports SHA-256 hash function","why":"Used by server assets API via dynamic import","dependencies":"hash.ts","status":"ACTIVE"},
+  {"block":"signContentHash re-export","lines":"4","what":"Re-exports content signing","why":"Used by server assets API via dynamic import","dependencies":"signing.ts","status":"ACTIVE"},
+  {"block":"verifySignature re-export","lines":"4","what":"Re-exports signature verification","why":"Never imported by consumers","dependencies":"signing.ts","status":"DEAD"}
+]

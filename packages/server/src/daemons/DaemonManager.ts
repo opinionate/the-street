@@ -114,6 +114,10 @@ interface DaemonInstance {
   // Control
   isMuted: boolean;
   isRecalled: boolean;
+  // Admin directive — persistent desires that influence all AI calls until cleared
+  pendingDirective: string | null;
+  directiveTargetId: string | null; // daemon ID to seek out for conversation
+  activeDesires: string[]; // persistent instructions injected into all AI calls
   // Behavior tree
   behaviorTree: DaemonBehaviorTree;
 }
@@ -341,11 +345,12 @@ export class DaemonManager {
           });
         }
 
-        // Legacy daemon_chat for backwards compatibility
+        // Log AI speech as activity (without re-broadcasting as daemon_chat)
         if (thought.speech) {
-          const targetUserId = session.participantType === "visitor" ? session.participantId : undefined;
-          const targetDaemonId = session.participantType === "daemon" ? session.participantId : undefined;
-          this.broadcastDaemonChat(daemon, thought.speech, targetUserId, targetDaemonId);
+          const targetName = session.participantType === "daemon"
+            ? this.daemons.get(session.participantId)?.state.definition.name
+            : undefined;
+          this.logActivity(daemon, "conversation", thought.speech.slice(0, 100), targetName);
         }
 
         if (thought.emote) {
@@ -365,20 +370,26 @@ export class DaemonManager {
         }
 
         // Inter-daemon routing: if addressed to another daemon, emit speech event to them
+        // Add a delay so responses don't flood in instantly — feels more natural
         if (session.participantType === "daemon" && thought.speech && !thought.endConversation) {
           const targetDaemon = this.daemons.get(session.participantId);
           if (targetDaemon && !targetDaemon.isMuted) {
             // Check turn cap before routing back
             if (session.turnCount < INTER_DAEMON_TURN_CAP) {
-              this.eventBus.emit({
-                type: "daemon_speech",
-                priority: EventPriority.ActiveParticipantSpeech,
-                sourceId: daemonId,
-                sourceName: daemon.state.definition.name,
-                targetDaemonId: session.participantId,
-                speech: thought.speech,
-                timestamp: Date.now(),
-              });
+              const participantId = session.participantId;
+              const sourceName = daemon.state.definition.name;
+              const speech = thought.speech;
+              setTimeout(() => {
+                this.eventBus.emit({
+                  type: "daemon_speech",
+                  priority: EventPriority.ActiveParticipantSpeech,
+                  sourceId: daemonId,
+                  sourceName,
+                  targetDaemonId: participantId,
+                  speech,
+                  timestamp: Date.now(),
+                });
+              }, 3000);
             } else {
               console.log(`[DaemonManager] Inter-daemon turn cap reached (${INTER_DAEMON_TURN_CAP}) for daemon=${daemonId} session=${session.sessionId}`);
               // End both sessions
@@ -400,7 +411,7 @@ export class DaemonManager {
           `*${name} nods at ${speakerName}* One moment, please.`,
           `Hang on, ${speakerName} — talking to someone right now.`,
         ];
-        this.broadcastDaemonChat(daemon, busyMessages[Math.floor(Math.random() * busyMessages.length)]);
+        this.broadcastDaemonChat(daemon, busyMessages[Math.floor(Math.random() * busyMessages.length)], undefined, undefined, true);
       },
 
       onSessionEnd: (daemonId, sessionId, reason) => {
@@ -556,6 +567,26 @@ export class DaemonManager {
           relationalValence: this.sentimentToValence(rel.sentiment),
         } satisfies DaemonRelationship;
       },
+
+      getAiModelOverride: (daemonId) => {
+        return this.daemons.get(daemonId)?.behavior.aiModel;
+      },
+
+      consumeDirective: (daemonId) => {
+        const daemon = this.daemons.get(daemonId);
+        if (!daemon) return undefined;
+        // Consume one-shot directive
+        if (daemon.pendingDirective) {
+          const directive = daemon.pendingDirective;
+          daemon.pendingDirective = null;
+          return directive;
+        }
+        // Return all active desires joined
+        if (daemon.activeDesires.length > 0) {
+          return daemon.activeDesires.join(". ");
+        }
+        return undefined;
+      },
     };
   }
 
@@ -569,18 +600,20 @@ export class DaemonManager {
     if (plotUuids.length > 0) {
       const placeholders = plotUuids.map((_, i) => `$${i + 1}`).join(",");
       const result = await pool.query(
-        `SELECT id, plot_uuid, name, description, daemon_definition, appearance, behavior,
-                position_x, position_y, position_z, rotation
-         FROM daemons WHERE (plot_uuid IN (${placeholders}) OR plot_uuid IS NULL) AND is_active = true`,
+        `SELECT d.id, d.plot_uuid, d.name, d.description, d.daemon_definition, d.appearance, d.behavior,
+                d.position_x, d.position_y, d.position_z, d.rotation,
+                (SELECT dau.id FROM daemon_asset_uploads dau WHERE dau.daemon_id = d.id AND dau.upload_type = 'character' ORDER BY dau.created_at DESC LIMIT 1) as character_upload_id
+         FROM daemons d WHERE (d.plot_uuid IN (${placeholders}) OR d.plot_uuid IS NULL) AND d.is_active = true`,
         plotUuids,
       );
       rows = result.rows;
     } else {
       // No plots — still load global street daemons
       const result = await pool.query(
-        `SELECT id, plot_uuid, name, description, daemon_definition, appearance, behavior,
-                position_x, position_y, position_z, rotation
-         FROM daemons WHERE plot_uuid IS NULL AND is_active = true`,
+        `SELECT d.id, d.plot_uuid, d.name, d.description, d.daemon_definition, d.appearance, d.behavior,
+                d.position_x, d.position_y, d.position_z, d.rotation,
+                (SELECT dau.id FROM daemon_asset_uploads dau WHERE dau.daemon_id = d.id AND dau.upload_type = 'character' ORDER BY dau.created_at DESC LIMIT 1) as character_upload_id
+         FROM daemons d WHERE d.plot_uuid IS NULL AND d.is_active = true`,
       );
       rows = result.rows;
     }
@@ -588,6 +621,11 @@ export class DaemonManager {
     for (const row of rows) {
       const definition: DaemonDefinition = row.daemon_definition;
       const behavior: DaemonBehavior = row.behavior;
+
+      // Ensure position exists on definition (backwards compat)
+      if (!definition.position) {
+        definition.position = { x: row.position_x, y: row.position_y, z: row.position_z };
+      }
 
       // Ensure personality exists (backwards compat with pre-personality daemons)
       if (!definition.personality) {
@@ -607,6 +645,8 @@ export class DaemonManager {
         currentRotation: row.rotation,
         currentAction: "idle",
         mood: "neutral",
+        characterUploadId: row.character_upload_id || undefined,
+        idleAnimationLabel: behavior.idleAnimationLabel || undefined,
       };
 
       this.daemons.set(row.id, this.createInstance(state, behavior));
@@ -716,6 +756,9 @@ export class DaemonManager {
       lastChatToPlayer: new Map(),
       isMuted: false,
       isRecalled: false,
+      pendingDirective: null,
+      directiveTargetId: null,
+      activeDesires: [],
       behaviorTree: bt,
     };
   }
@@ -873,12 +916,23 @@ export class DaemonManager {
     return Date.now() - lastChat < GLOBAL_PLAYER_CHAT_COOLDOWN_MS;
   }
 
+  /**
+   * Broadcast scripted daemon chat. Suppressed when the daemon is in a
+   * managed AI conversation (which uses daemon_speech_stream instead).
+   * Pass `force` to bypass the suppression (e.g. busy responses).
+   */
   private broadcastDaemonChat(
     daemon: DaemonInstance,
     content: string,
     targetUserId?: string,
     targetDaemonId?: string,
+    force = false,
   ): void {
+    // Suppress scripted chat when daemon is in a managed AI conversation
+    if (!force && this.sessionManager.hasActiveSession(daemon.state.daemonId)) {
+      return;
+    }
+
     // Track global per-player cooldown
     if (targetUserId) {
       daemon.lastChatToPlayer.set(targetUserId, Date.now());
@@ -907,6 +961,11 @@ export class DaemonManager {
 
   /** Broadcast daemon emote, log it, and trigger chain reactions */
   private broadcastDaemonEmote(daemon: DaemonInstance, emote: string, mood: DaemonMood, chainDepth = 0): void {
+    // Suppress scripted emotes when daemon is in a managed AI conversation
+    if (this.sessionManager.hasActiveSession(daemon.state.daemonId)) {
+      return;
+    }
+
     this.broadcast("daemon_emote", {
       type: "daemon_emote" as const,
       daemonId: daemon.state.daemonId,
@@ -1199,6 +1258,147 @@ export class DaemonManager {
     daemon.isMuted = muted;
   }
 
+  /** Add a persistent desire to a daemon — influences all AI calls until removed */
+  setDirective(id: string, directive: string): void {
+    const daemon = this.daemons.get(id);
+    if (!daemon) return;
+    daemon.pendingDirective = directive;
+    daemon.activeDesires.push(directive);
+    console.log(`[DaemonManager] Desire implanted for ${daemon.state.definition.name}: "${directive}"`);
+
+    // Immediately trigger action
+    this.executeDirective(id, daemon, directive);
+  }
+
+  /** Remove a specific desire by index */
+  removeDesire(id: string, index: number): void {
+    const daemon = this.daemons.get(id);
+    if (!daemon || index < 0 || index >= daemon.activeDesires.length) return;
+    const removed = daemon.activeDesires.splice(index, 1)[0];
+    if (daemon.activeDesires.length === 0) {
+      daemon.directiveTargetId = null;
+    }
+    console.log(`[DaemonManager] Desire removed for ${daemon.state.definition.name}: "${removed}"`);
+  }
+
+  /** Get active desires for a daemon */
+  getDesires(id: string): string[] {
+    return this.daemons.get(id)?.activeDesires ?? [];
+  }
+
+  private executeDirective(daemonId: string, daemon: DaemonInstance, directive: string): void {
+    // Check if the directive mentions another daemon by name — if so, seek them out
+    const targetDaemon = this.findDaemonByNameInText(directive);
+    if (targetDaemon && targetDaemon.state.daemonId !== daemonId) {
+      const targetId = targetDaemon.state.daemonId;
+      daemon.directiveTargetId = targetId;
+      daemon.conversationCooldown = 0; // Allow immediate conversation
+      daemon.state.currentAction = "idle"; // Free them up to seek
+      console.log(`[DaemonManager] Directive target: ${daemon.state.definition.name} → ${targetDaemon.state.definition.name}`);
+      return; // speakToTarget will fire when daemon arrives near target
+    }
+
+    // Run an immediate AI call so the daemon acts on the desire
+    this.queueAiConversation(async () => {
+      try {
+        const { generateDaemonResponse } = await import("@the-street/ai-service");
+
+        const context = {
+          recentMessages: [] as { role: "player" | "daemon"; content: string }[],
+          nearbyDaemons: this.getNearbyDaemonNames(daemon, 15),
+          relationships: this.getRelationshipContext(daemon),
+          currentMood: daemon.state.mood,
+          timeOfDay: this.getTimeOfDay(),
+          directive,
+        };
+        // Consume one-shot; activeDesire persists
+        daemon.pendingDirective = null;
+
+        const response = await generateDaemonResponse(
+          daemon.state.definition,
+          daemon.state.definition.name,
+          undefined,
+          context,
+        );
+
+        daemon.state.mood = response.mood;
+        daemon.moodDecayTimer = 0;
+
+        const fullMessage = response.emote
+          ? `${response.emote} ${response.message}`
+          : response.message;
+
+        this.broadcastDaemonChat(daemon, fullMessage);
+      } catch (err) {
+        console.error(`[DaemonManager] Directive execution failed for daemon=${daemonId}:`, err);
+      }
+    });
+  }
+
+  /** Find a daemon whose name appears in the given text (case-insensitive) */
+  private findDaemonByNameInText(text: string): DaemonInstance | null {
+    const lower = text.toLowerCase();
+    for (const [, daemon] of this.daemons) {
+      const name = daemon.state.definition.name.toLowerCase();
+      // Match first name (e.g. "Vinny" from "Vinny Marzullo") or full name
+      const firstName = name.split(/\s+/)[0];
+      if (lower.includes(firstName) || lower.includes(name)) {
+        return daemon;
+      }
+    }
+    return null;
+  }
+
+  /** Directive-driven: generate speech and emit it to the target daemon so they respond naturally */
+  private speakToTarget(daemon: DaemonInstance, target: DaemonInstance, targetId: string): void {
+    const daemonId = daemon.state.daemonId;
+    this.queueAiConversation(async () => {
+      try {
+        const { generateDaemonResponse } = await import("@the-street/ai-service");
+
+        const context = {
+          recentMessages: [] as { role: "player" | "daemon"; content: string }[],
+          nearbyDaemons: [target.state.definition.name],
+          relationships: this.getRelationshipContext(daemon),
+          currentMood: daemon.state.mood,
+          timeOfDay: this.getTimeOfDay(),
+          directive: daemon.activeDesires.length > 0 ? daemon.activeDesires.join(". ") : undefined,
+        };
+        daemon.pendingDirective = null;
+
+        const response = await generateDaemonResponse(
+          daemon.state.definition,
+          target.state.definition.name,
+          `[You are now standing next to ${target.state.definition.name}. Say something to them.]`,
+          context,
+        );
+
+        daemon.state.mood = response.mood;
+        daemon.moodDecayTimer = 0;
+
+        const speech = response.emote
+          ? `${response.emote} ${response.message}`
+          : response.message;
+
+        // Broadcast as daemon chat
+        this.broadcastDaemonChat(daemon, speech, undefined, targetId);
+
+        // Emit speech event to the target so their behavior tree picks it up
+        this.eventBus.emit({
+          type: "daemon_speech",
+          priority: EventPriority.NewSpeech,
+          sourceId: daemonId,
+          sourceName: daemon.state.definition.name,
+          targetDaemonId: targetId,
+          speech,
+          timestamp: Date.now(),
+        });
+      } catch (err) {
+        console.error(`[DaemonManager] speakToTarget failed for daemon=${daemonId}:`, err);
+      }
+    });
+  }
+
   /** Called when a player leaves the world — daemons who know them react */
   onPlayerLeave(playerId: string, playerName: string, position: Vector3): void {
     // End any active sessions where this player is the participant
@@ -1302,6 +1502,7 @@ export class DaemonManager {
   /** Daemons occasionally wonder about players they haven't seen in a while */
   private tickMissingPlayers(daemon: DaemonInstance, dt: number): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (Math.random() > 0.003) return; // Very rare per tick — ~every 5 min per daemon
 
@@ -1348,7 +1549,7 @@ export class DaemonManager {
       if (daemon.state.currentAction !== "idle") continue;
 
       const dist = this.distance(daemon.state.currentPosition, position);
-      if (dist > daemon.behavior.interactionRadius * 1.5) continue;
+      if (dist > (daemon.behavior.overhearRadius ?? daemon.behavior.interactionRadius * 1.5)) continue;
 
       // React with a brief emote based on event type
       let emote: string;
@@ -1387,7 +1588,17 @@ export class DaemonManager {
 
   /** Called when a player sends a chat message — daemons may overhear and react */
   onPlayerChat(playerId: string, playerName: string, content: string, position: Vector3): void {
-    // Emit speech event to the event bus for behavior tree processing
+    const now = Date.now();
+    const contentLower = content.toLowerCase();
+
+    // Check if this player is already in an active conversation with a daemon.
+    // If so, only the daemon they're talking to (or one whose name is mentioned) should react.
+    const activeConvo = this.sessionManager.getActiveSessionForParticipant(playerId);
+    const playerInConversationWith = activeConvo?.daemonId ?? null;
+
+    // Emit speech event to the event bus for behavior tree processing.
+    // If the player is already in conversation, target only that daemon to prevent
+    // other nearby daemons from picking up the speech and starting their own conversations.
     this.eventBus.emit({
       type: "visitor_speech",
       priority: EventPriority.NewSpeech,
@@ -1395,20 +1606,42 @@ export class DaemonManager {
       sourceName: playerName,
       position,
       speech: content,
+      targetDaemonId: playerInConversationWith ?? undefined,
       timestamp: Date.now(),
     });
 
-    const now = Date.now();
-    const contentLower = content.toLowerCase();
+    // Pre-scan: if a specific daemon's name is mentioned, only that daemon should react.
+    // This prevents other daemons from jumping in via overhear when the player is addressing someone directly.
+    let addressedDaemonId: string | null = null;
+    for (const [id, daemon] of this.daemons) {
+      if (contentLower.includes(daemon.state.definition.name.toLowerCase())) {
+        addressedDaemonId = id;
+        break;
+      }
+    }
 
     for (const [_id, daemon] of this.daemons) {
       if (daemon.isMuted) continue;
-      if (daemon.state.currentAction !== "idle") continue;
       if (now - daemon.lastOverhearReaction < OVERHEAR_COOLDOWN_MS) continue;
 
       // Check distance
       const dist = this.distance(daemon.state.currentPosition, position);
-      if (dist > daemon.behavior.interactionRadius * 1.5) continue;
+      if (dist > (daemon.behavior.overhearRadius ?? daemon.behavior.interactionRadius * 1.5)) continue;
+
+      // Check if content mentions this daemon's name — always respond
+      const namesMentioned = contentLower.includes(daemon.state.definition.name.toLowerCase());
+
+      // If the message addresses a specific daemon by name, skip all others
+      if (addressedDaemonId && daemon.state.daemonId !== addressedDaemonId) continue;
+
+      // Skip busy daemons unless their name was mentioned
+      if (daemon.state.currentAction !== "idle" && !namesMentioned) continue;
+
+      // If the player is in conversation with another daemon, skip this daemon
+      // unless its name was explicitly mentioned
+      if (playerInConversationWith && playerInConversationWith !== daemon.state.daemonId && !namesMentioned) {
+        continue;
+      }
 
       // Context-aware reaction chance: higher if content matches interests/traits/role
       let reactionChance = OVERHEAR_CHANCE;
@@ -1425,9 +1658,16 @@ export class DaemonManager {
         }
       }
 
-      // Check if content mentions daemon's name — trigger direct interaction
-      if (contentLower.includes(daemon.state.definition.name.toLowerCase())) {
+      // Name mention — trigger direct interaction
+      if (namesMentioned) {
         daemon.lastOverhearReaction = now;
+        // If daemon is in a daemon-to-daemon conversation, end it first so they can respond to the player
+        if (daemon.state.currentAction === "talking" && daemon.state.targetDaemonId) {
+          this.sessionManager.endSession(daemon.state.daemonId, "ended_natural").catch(() => {});
+          daemon.behaviorTree.forceIdle();
+          daemon.state.currentAction = "idle";
+          daemon.state.targetDaemonId = undefined;
+        }
         this.handleInteract(daemon.state.daemonId, playerId, "", content, playerName);
         break; // Only one daemon reacts per chat message
       }
@@ -1475,7 +1715,9 @@ export class DaemonManager {
             relationships: this.getRelationshipContext(daemon),
             currentMood: daemon.state.mood,
             timeOfDay: this.getTimeOfDay(),
+            directive: daemon.pendingDirective || (daemon.activeDesires.length > 0 ? daemon.activeDesires.join(". ") : undefined),
           };
+          if (daemon.pendingDirective) daemon.pendingDirective = null;
 
           const overheardPrefix = topicMatch
             ? `[Overheard ${playerName} talking about ${topicMatch}]: "${content}"`
@@ -1677,13 +1919,47 @@ export class DaemonManager {
         case "socialite": this.tickSocialite(daemon, dt, players); break;
       }
 
-      // Free roaming (continuous movement)
-      if (daemon.behavior.roamingEnabled && !daemon.isRecalled) {
-        this.tickRoaming(daemon, dt);
+      // Approach target player when engaged in conversation
+      const engagedWithPlayer = daemon.state.targetPlayerId && daemon.state.currentAction === "talking";
+      if (engagedWithPlayer) {
+        const targetPlayer = players.find(p => p.userId === daemon.state.targetPlayerId);
+        if (targetPlayer) {
+          const dist = this.distance(daemon.state.currentPosition, targetPlayer.position);
+          if (dist > 1.5) {
+            // Walk toward the player
+            this.moveToward(daemon, targetPlayer.position, ROAM_SPEED * 1.5, dt);
+            daemon.state.currentAction = "talking"; // Keep talking state despite moveToward setting "walking"
+          } else {
+            // Close enough — face the player
+            const dx = targetPlayer.position.x - daemon.state.currentPosition.x;
+            const dz = targetPlayer.position.z - daemon.state.currentPosition.z;
+            if (Math.abs(dx) > 0.01 || Math.abs(dz) > 0.01) {
+              daemon.state.currentRotation = Math.atan2(-dx, -dz);
+              this.broadcast("daemon_move", {
+                type: "daemon_move" as const,
+                daemonId: daemon.state.daemonId,
+                position: daemon.state.currentPosition,
+                rotation: daemon.state.currentRotation,
+                action: "idle",
+              });
+            }
+          }
+        }
+      }
+
+      // Skip roaming/seeking when engaged with a player
+      if (!engagedWithPlayer) {
+        // All daemons can seek other daemons to chat with (gated on canConverseWithDaemons)
+        this.tickDaemonSeeking(daemon, dt);
+
+        // Free roaming (continuous movement)
+        if (daemon.behavior.roamingEnabled && !daemon.isRecalled) {
+          this.tickRoaming(daemon, dt);
+        }
       }
 
       // Return home if recalled
-      if (daemon.isReturningHome) {
+      if (daemon.isReturningHome && !engagedWithPlayer) {
         this.tickReturnHome(daemon, dt);
       }
     }
@@ -1834,6 +2110,26 @@ export class DaemonManager {
       }
     }
 
+    // Immediately face the player and start approaching
+    daemon.state.currentAction = "talking";
+    daemon.state.targetPlayerId = playerId;
+    // Face toward the player's last known position
+    const playerTracker = this.playerMovement.get(playerId);
+    if (playerTracker) {
+      const dx = playerTracker.lastPos.x - daemon.state.currentPosition.x;
+      const dz = playerTracker.lastPos.z - daemon.state.currentPosition.z;
+      if (Math.abs(dx) > 0.01 || Math.abs(dz) > 0.01) {
+        daemon.state.currentRotation = Math.atan2(-dx, -dz);
+        this.broadcast("daemon_move", {
+          type: "daemon_move" as const,
+          daemonId: daemon.state.daemonId,
+          position: daemon.state.currentPosition,
+          rotation: daemon.state.currentRotation,
+          action: "walking",
+        });
+      }
+    }
+
     // Get or create conversation memory
     let memory = daemon.conversationMemory.get(playerId);
     if (!memory) {
@@ -1876,7 +2172,9 @@ export class DaemonManager {
           relationships: this.getRelationshipContext(daemon),
           currentMood: daemon.state.mood,
           timeOfDay: this.getTimeOfDay(),
+          directive: daemon.pendingDirective || (daemon.activeDesires.length > 0 ? daemon.activeDesires.join(". ") : undefined),
         };
+        if (daemon.pendingDirective) daemon.pendingDirective = null;
 
         // Query available animated emotes for this daemon
         let availableEmotes: string[] | undefined;
@@ -2031,7 +2329,7 @@ export class DaemonManager {
       // Track time near each daemon
       for (const [daemonId, daemon] of this.daemons) {
         const dist = this.distance(player.position, daemon.state.currentPosition);
-        if (dist < daemon.behavior.interactionRadius * 1.5) {
+        if (dist < (daemon.behavior.overhearRadius ?? daemon.behavior.interactionRadius * 1.5)) {
           const prev = tracker.nearDaemonTime.get(daemonId) || 0;
           tracker.nearDaemonTime.set(daemonId, prev + dt);
         } else {
@@ -2051,6 +2349,7 @@ export class DaemonManager {
   /** Daemons react to player movement patterns — sprinting, lurking, lingering */
   private tickMovementReactions(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (Math.random() > 0.02) return; // Low chance per tick
 
@@ -2461,6 +2760,7 @@ export class DaemonManager {
   /** Periodic routine actions during each time period */
   private tickDailyRoutine(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
 
     daemon.routineTimer -= dt;
@@ -2622,6 +2922,7 @@ export class DaemonManager {
 
   private tickProactiveEngagement(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (players.length === 0) return;
 
@@ -2633,7 +2934,7 @@ export class DaemonManager {
 
     // Find the closest player within interaction radius who hasn't been remarked at recently
     const now = Date.now();
-    const radius = daemon.behavior.interactionRadius * 1.5;
+    const radius = (daemon.behavior.overhearRadius ?? daemon.behavior.interactionRadius * 1.5);
     let closestPlayer: PlayerInfo | null = null;
     let closestDist = Infinity;
 
@@ -2783,6 +3084,7 @@ export class DaemonManager {
   /** Daemons gossip about players to nearby players/daemons, creating social consequences */
   private tickReputationAnnouncements(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (players.length < 2) return; // need at least 2 players for gossip to matter
 
@@ -2875,6 +3177,7 @@ export class DaemonManager {
   /** Daemons share secrets/gossip with trusted players, rewarding relationship building */
   private tickSecretSharing(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
     if (Math.random() > 0.004) return; // Very rare per tick
 
@@ -2964,6 +3267,8 @@ export class DaemonManager {
 
   private tickThoughts(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    // AI-powered daemons don't broadcast scripted thoughts
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
 
     daemon.thoughtTimer -= dt;
@@ -3188,6 +3493,8 @@ export class DaemonManager {
 
   private tickSpontaneousGestures(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    // AI-powered daemons don't use scripted gestures
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (daemon.state.currentAction !== "idle") return;
 
     daemon.spontaneousGestureTimer -= dt;
@@ -3479,6 +3786,8 @@ export class DaemonManager {
 
   private tickGreeter(daemon: DaemonInstance, _dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    // AI-powered daemons handle greetings via the behavior tree + inference pipeline
+    if (this.manifests.has(daemon.state.daemonId)) return;
     const radius = daemon.behavior.interactionRadius;
     const now = Date.now();
     const COOLDOWN_MS = 120_000; // 2 min between greetings per player
@@ -3720,10 +4029,34 @@ export class DaemonManager {
 
   private tickSocialite(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     this.tickGreeter(daemon, dt, players);
+  }
+
+  /** Shared logic: seek out other daemons to chat with (used by roamer, socialite, etc.) */
+  private tickDaemonSeeking(daemon: DaemonInstance, dt: number): void {
+    if (daemon.behavior.canConverseWithDaemons === false) return;
 
     // If bored and no active conversations, lower conversation cooldown faster
     if (daemon.state.mood === "bored" && daemon.conversationCooldown > 0) {
       daemon.conversationCooldown -= dt * 2;
+    }
+
+    // Directive target takes priority — walk toward them and speak directly
+    if (daemon.directiveTargetId) {
+      const target = this.daemons.get(daemon.directiveTargetId);
+      if (!target || target.isMuted || target.isRecalled) {
+        daemon.directiveTargetId = null;
+      } else {
+        const dist = this.distance(daemon.state.currentPosition, target.state.currentPosition);
+        if (dist > 5) {
+          this.moveToward(daemon, target.state.currentPosition, ROAM_SPEED * 1.5, dt);
+        } else {
+          // Close enough — generate speech and emit it to the target daemon
+          const targetId = daemon.directiveTargetId;
+          daemon.directiveTargetId = null;
+          this.speakToTarget(daemon, target, targetId);
+        }
+        return; // Don't do normal seeking while on a directive
+      }
     }
 
     // Actively seek out other daemons to chat with
@@ -4722,7 +5055,7 @@ export class DaemonManager {
   }
 
   private pickRoamTarget(daemon: DaemonInstance): Vector3 {
-    const home = daemon.behavior.homePosition || daemon.state.definition.position;
+    const home = daemon.behavior.homePosition || daemon.state.definition.position || daemon.state.currentPosition;
     const maxRadius = daemon.behavior.roamRadius || 100;
 
     // 40% chance: stay within turf (especially guards and shopkeepers)
@@ -4896,6 +5229,7 @@ export class DaemonManager {
   private initiateInterDaemonConversation(
     idA: string, daemonA: DaemonInstance,
     idB: string, daemonB: DaemonInstance,
+    openingPrompt?: string,
   ): void {
     const now = Date.now();
 
@@ -4932,7 +5266,7 @@ export class DaemonManager {
       sourceId: idB,
       sourceName: daemonB.state.definition.name,
       targetDaemonId: idA,
-      speech: `[${daemonB.state.definition.name} is nearby and catches ${daemonA.state.definition.name}'s attention]`,
+      speech: openingPrompt || `[${daemonB.state.definition.name} is nearby and catches ${daemonA.state.definition.name}'s attention]`,
       timestamp: now,
     });
 
@@ -5228,6 +5562,8 @@ export class DaemonManager {
 
   private tickIdleChatter(daemon: DaemonInstance, dt: number, players: PlayerInfo[]): void {
     if (daemon.isMuted) return;
+    // AI-powered daemons don't use scripted idle chatter
+    if (this.manifests.has(daemon.state.daemonId)) return;
     if (!daemon.behavior.idleMessages || daemon.behavior.idleMessages.length === 0) return;
     if (daemon.state.currentAction !== "idle") return;
 
@@ -5984,6 +6320,17 @@ export class DaemonManager {
         }
       }
     }
+  }
+
+  updateCharacterModel(daemonId: string, uploadId: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+    daemon.state.characterUploadId = uploadId;
+    this.broadcast("daemon_model_update", {
+      type: "daemon_model_update" as const,
+      daemonId,
+      characterUploadId: uploadId,
+    });
   }
 
   updateDaemonDefinition(daemonId: string, definition: any): void {

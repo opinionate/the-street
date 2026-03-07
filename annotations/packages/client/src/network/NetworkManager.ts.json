@@ -1,0 +1,4 @@
+[
+  {"block":"NetworkCallbacks","lines":"14-47","what":"Callback interface for all server message types","why":"Defines main.ts message handling contract","dependencies":"@the-street/shared types","status":"ACTIVE"},
+  {"block":"NetworkManager class","lines":"49-218","what":"Colyseus client: connect, message handlers, send methods for move/chat/emote/objects/daemons/avatar","why":"Sole network layer between client and server","dependencies":"colyseus.js, NetworkCallbacks","status":"ACTIVE"}
+]

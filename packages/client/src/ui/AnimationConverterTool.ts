@@ -9,7 +9,7 @@ import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 
 const MOVEMENT_SLOTS = [
-  "walk", "run",
+  "idle", "walk", "run",
   "turnLeft", "turnRight",
   "strafeLeftWalk", "strafeRightWalk",
   "strafeLeftRun", "strafeRightRun",
@@ -26,6 +26,9 @@ export class AnimationConverterTool {
   private slotSelect: HTMLSelectElement;
   private fileInput: HTMLInputElement;
   private uploadBtn: HTMLButtonElement;
+
+  /** Set of slot names that already have a custom upload */
+  private uploadedSlots: Set<string> = new Set();
 
   /** Called after shared animations are uploaded so the caller can reload clips */
   onSharedAnimsUploaded: (() => void) | null = null;
@@ -48,7 +51,7 @@ export class AnimationConverterTool {
 
     const desc = document.createElement("div");
     desc.style.cssText = "font-size: 11px; color: rgba(255, 255, 255, 0.3); margin-bottom: 10px;";
-    desc.textContent = "Upload a Mixamo FBX file for a movement slot.";
+    desc.textContent = "Upload a Mixamo FBX file for a movement slot. Slots marked with \u2713 already have a custom animation.";
     this.container.appendChild(desc);
 
     // Slot selector
@@ -56,13 +59,17 @@ export class AnimationConverterTool {
     selectRow.style.cssText = "display: flex; gap: 8px; margin-bottom: 8px; align-items: center;";
 
     this.slotSelect = document.createElement("select");
-    this.slotSelect.style.cssText = "flex: 1; padding: 6px 8px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; color: white; font-size: 12px; outline: none;";
-    for (const slot of MOVEMENT_SLOTS) {
-      const opt = document.createElement("option");
-      opt.value = slot;
-      opt.textContent = slot;
-      this.slotSelect.appendChild(opt);
-    }
+    this.slotSelect.style.cssText = `
+      flex: 1; padding: 6px 8px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 4px;
+      color: white;
+      font-size: 12px;
+      font-family: system-ui, sans-serif;
+      outline: none;
+    `;
+    this.rebuildSlotOptions();
     selectRow.appendChild(this.slotSelect);
 
     this.fileInput = document.createElement("input");
@@ -99,6 +106,47 @@ export class AnimationConverterTool {
       color: rgba(255, 255, 255, 0.5);
     `;
     this.container.appendChild(this.logEl);
+
+    // Load existing uploads to mark which slots are filled
+    this.loadExistingUploads();
+  }
+
+  private rebuildSlotOptions(): void {
+    const prev = this.slotSelect.value;
+    this.slotSelect.innerHTML = "";
+    for (const slot of MOVEMENT_SLOTS) {
+      const opt = document.createElement("option");
+      opt.value = slot;
+      // Browser dropdown menus render options on a white background,
+      // so use dark text colors for readability in the dropdown list
+      opt.style.cssText = "font-family: system-ui, sans-serif; background: #1a1a2e;";
+      if (this.uploadedSlots.has(slot)) {
+        opt.textContent = `\u2713  ${slot}`;
+        opt.style.color = "#22aa55";
+      } else {
+        opt.textContent = `\u2500  ${slot}`;
+        opt.style.color = "#999999";
+      }
+      this.slotSelect.appendChild(opt);
+    }
+    if (prev) this.slotSelect.value = prev;
+  }
+
+  private async loadExistingUploads(): Promise<void> {
+    try {
+      const res = await fetch(`${this.apiUrl}/api/animations/shared`, {
+        headers: this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {},
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      this.uploadedSlots.clear();
+      for (const anim of data.animations ?? []) {
+        this.uploadedSlots.add(anim.slot);
+      }
+      this.rebuildSlotOptions();
+    } catch {
+      // ignore — will just show no checkmarks
+    }
   }
 
   get element(): HTMLDivElement {
@@ -166,6 +214,8 @@ export class AnimationConverterTool {
       await this.exportAndUpload(exporter, cleanClip, slot);
 
       this.log(`${slot} uploaded successfully!`, "#44ff44");
+      this.uploadedSlots.add(slot);
+      this.rebuildSlotOptions();
       this.onSharedAnimsUploaded?.();
     } catch (err) {
       this.log(`ERROR: ${err instanceof Error ? err.message : err}`, "#ff4444");

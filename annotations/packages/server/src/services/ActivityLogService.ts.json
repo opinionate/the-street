@@ -1,0 +1,6 @@
+[
+  {"block":"appendLogEntry","lines":"6-26","what":"Insert log entry to daemon_activity_log","why":"Used by InferenceController, SessionManager, EvolutionEngine, stores","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"queryActivityLog","lines":"47-115","what":"Paginated log query with filters (type, visitor, time, session)","why":"Used by daemons API GET /:id/activity-log","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"getTokenSummary","lines":"132-180","what":"Aggregate token usage by type for a daemon","why":"Used by daemons API GET /:id/token-summary","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"archiveOldLogEntries","lines":"188-217","what":"Move entries older than 180 days to archive table","why":"Called on server startup for log retention","dependencies":"getPool","status":"ACTIVE"}
+]

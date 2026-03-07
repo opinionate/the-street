@@ -283,6 +283,11 @@ export class ObjectRenderer {
     }
   }
 
+  /** Get all object groups for raycasting */
+  getObjectGroups(): Map<string, THREE.Group> {
+    return this.objectMeshes;
+  }
+
   /** Call each frame to animate novel placeholders */
   update(time: number): void {
     for (const group of this.novelPlaceholders) {
@@ -543,10 +548,7 @@ export class ObjectRenderer {
     fixture.position.y = size.y * 0.85;
     group.add(fixture);
 
-    // Actual point light
-    const light = new THREE.PointLight(new THREE.Color(emissiveColor), 1, 15);
-    light.position.y = size.y * 0.85;
-    group.add(light);
+    // PointLight removed for performance — emissive material provides visual glow
   }
 
   private buildDoor(
@@ -722,27 +724,51 @@ export class ObjectRenderer {
   private createLabel(text: string): THREE.Sprite {
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d")!;
-    canvas.width = 256;
-    canvas.height = 64;
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-    ctx.roundRect(0, 0, 256, 64, 8);
+    // Dynamic width based on text length
+    const fontSize = 22;
+    const font = `bold ${fontSize}px 'Courier New', monospace`;
+    ctx.font = font;
+    const textWidth = ctx.measureText(text).width;
+    const hPad = 24;
+    const canvasWidth = Math.ceil(textWidth + hPad * 2);
+    const canvasHeight = 40;
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+
+    // Background
+    ctx.fillStyle = "rgba(5, 5, 15, 0.7)";
+    ctx.beginPath();
+    ctx.roundRect(1, 1, canvasWidth - 2, canvasHeight - 2, 3);
     ctx.fill();
 
-    ctx.fillStyle = "white";
-    ctx.font = "bold 24px system-ui, sans-serif";
+    // Accent border
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(1, 1, canvasWidth - 2, canvasHeight - 2, 3);
+    ctx.stroke();
+
+    // Text
+    ctx.font = font;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(text, 128, 32, 240);
+    ctx.shadowColor = "rgba(255, 255, 255, 0.3)";
+    ctx.shadowBlur = 4;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.fillText(text, canvasWidth / 2, canvasHeight / 2);
 
     const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
     const mat = new THREE.SpriteMaterial({
       map: texture,
       transparent: true,
       depthTest: false,
     });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(2, 0.5, 1);
+    const aspect = canvasWidth / canvasHeight;
+    const spriteHeight = 0.25;
+    sprite.scale.set(spriteHeight * aspect, spriteHeight, 1);
     return sprite;
   }
 }

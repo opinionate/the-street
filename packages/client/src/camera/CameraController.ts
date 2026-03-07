@@ -12,6 +12,7 @@ export class CameraController {
   private static MAX_PITCH = 1.2; // look down limit
   private static MIN_DISTANCE = 2;
   private static MAX_DISTANCE = 40;
+  private _lastDt = 1 / 60;
 
   constructor(camera: THREE.PerspectiveCamera) {
     this.camera = camera;
@@ -27,13 +28,23 @@ export class CameraController {
     );
   }
 
-  /** Set camera yaw directly (used to follow character rotation) */
+  /** Smoothly follow a target yaw (used to follow character rotation) */
   setYaw(yaw: number): void {
+    // Shortest-path interpolation
+    let diff = yaw - this.yaw;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    this.yaw += diff * Math.min(this._lastDt * this.damping, 1);
+  }
+
+  /** Snap camera yaw instantly (no interpolation) */
+  snapYaw(yaw: number): void {
     this.yaw = yaw;
   }
 
   /** Update camera to follow target position */
   update(targetPos: THREE.Vector3, dt: number): void {
+    this._lastDt = dt;
     this.target.copy(targetPos);
 
     // Compute camera offset from pitch + yaw

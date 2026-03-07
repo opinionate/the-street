@@ -1,0 +1,7 @@
+[
+  {"block":"StagingObjectSchema","lines":"8-17","what":"Colyseus schema for staging objects","why":"State synced to single client","dependencies":"@colyseus/schema","status":"ACTIVE"},
+  {"block":"StagingRoomState","lines":"19-24","what":"Room state with object map","why":"Colyseus state management","dependencies":"@colyseus/schema","status":"ACTIVE"},
+  {"block":"StagingRoom class","lines":"26-153","what":"Single-player staging room for object placement before publishing","why":"Used by staging workflow","dependencies":"getPool, WorldObject","status":"ACTIVE"},
+  {"block":"handlePlace","lines":"79-122","what":"Place object in staging with DB persistence","why":"Called on object_place message","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"handleRemove","lines":"124-133","what":"Remove staging object","why":"Called on object_remove message","dependencies":"getPool","status":"ACTIVE"}
+]

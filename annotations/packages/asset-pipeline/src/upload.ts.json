@@ -1,0 +1,7 @@
+[
+  {"block":"S3 client setup","lines":"4-6","what":"Singleton S3Client","why":"Used by uploadAsset","dependencies":"@aws-sdk/client-s3","status":"ACTIVE"},
+  {"block":"UploadResult","lines":"11-17","what":"Upload result with hash, key, URL, dedup status","why":"Return type of uploadAsset","dependencies":"None","status":"ACTIVE"},
+  {"block":"assetExists","lines":"20-32","what":"Check if asset already in S3 via HeadObject","why":"Dedup check in uploadAsset","dependencies":"S3Client","status":"ACTIVE"},
+  {"block":"uploadAsset","lines":"35-68","what":"Upload GLB to S3 with content-addressed key and dedup","why":"Called by server /api/assets/upload","dependencies":"computeContentHash, assetExists, S3Client","status":"ACTIVE"},
+  {"block":"getAssetUrl","lines":"71-73","what":"Build CDN URL from content hash","why":"Never imported by consumers","dependencies":"CDN_BASE","status":"DEAD"}
+]

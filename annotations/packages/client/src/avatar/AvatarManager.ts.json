@@ -1,0 +1,4 @@
+[
+  {"block":"AvatarManager class","lines":"~60-1598","what":"Player avatar system: procedural mannequin (LimbRefs), custom GLB model loading, Mixamo animation loading with bone retargeting, locomotion state machine (idle/walk/run/strafe/turn/jump), emotes, chat bubbles, nameplate sprites","why":"Core avatar rendering and animation, used by main.ts","dependencies":"three, GLTFLoader, SkeletonUtils, normalizeMixamoBoneName, CHAT_DISPLAY_DURATION","status":"ACTIVE"},
+  {"block":"extractAveragePoses (imported)","lines":"N/A","what":"Imported from animation-converter.ts but only used within that file","why":"Utility for animation bone averaging","dependencies":"three","status":"SUSPECT"}
+]

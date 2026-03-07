@@ -1,0 +1,3 @@
+[
+  {"block":"DaemonChatUI class","lines":"5-142","what":"Floating daemon interaction input: shows daemon name with [NPC] badge, text input for messages, Enter to send (empty string sends interaction without message), ESC to close","why":"Used by main.ts for daemon conversations","dependencies":"None (pure DOM)","status":"ACTIVE"}
+]

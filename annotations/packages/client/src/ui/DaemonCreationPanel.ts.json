@@ -1,0 +1,4 @@
+[
+  {"block":"DaemonCreationPanel class","lines":"26-910","what":"Daemon creation wizard: 6-step draft flow (character FBX upload, emote FBX uploads with label auto-derivation, admin prompt, AI expansion with editable fields, budget params, finalize checklist). Multi-file emote staging, slider/checkbox/select form controls, abandon draft support","why":"Used by main.ts for daemon creation workflow","dependencies":"ExpandedManifestFields, DaemonAssetUpload from shared","status":"ACTIVE"},
+  {"block":"DraftState interface","lines":"3-14","what":"Draft state shape with uploads, expansion status, budget params","why":"Internal to DaemonCreationPanel","dependencies":"ExpandedManifestFields, DaemonAssetUpload from shared","status":"ACTIVE"}
+]

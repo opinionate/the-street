@@ -6,7 +6,7 @@ import type { PersonalityManifest, LogEntryType } from "@the-street/shared";
 import { getPool } from "../database/pool.js";
 import { getActiveDaemonManager } from "../rooms/StreetRoom.js";
 import { queryActivityLog, getTokenSummary } from "../services/ActivityLogService.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, createReadStream } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -133,6 +133,41 @@ router.post(
       console.error("POST /api/daemons/create error:", err);
       const message = err instanceof Error ? err.message : "Daemon creation failed";
       res.status(500).json({ error: message });
+    }
+  },
+);
+
+// GET /api/daemons/all — List all daemons including inactive (admin only)
+router.get(
+  "/all",
+  ...requireAuth(),
+  requireRole("super_admin"),
+  async (_req, res) => {
+    try {
+      const pool = getPool();
+      const { rows } = await pool.query(
+        `SELECT id, name, description, plot_uuid, daemon_definition, behavior,
+                position_x, position_y, position_z, rotation, is_active, created_at
+         FROM daemons ORDER BY is_active DESC, created_at DESC`,
+      );
+
+      res.json({
+        daemons: rows.map((r: Record<string, unknown>) => ({
+          id: r.id,
+          name: r.name,
+          description: r.description,
+          definition: r.daemon_definition,
+          behavior: r.behavior,
+          plotUuid: r.plot_uuid,
+          position: { x: r.position_x, y: r.position_y, z: r.position_z },
+          rotation: r.rotation,
+          isActive: r.is_active,
+          createdAt: r.created_at,
+        })),
+      });
+    } catch (err) {
+      console.error("GET /api/daemons/all error:", err);
+      res.status(500).json({ error: "Failed to list daemons" });
     }
   },
 );
@@ -426,9 +461,10 @@ router.post(
       const originalFilename = (req.headers["x-original-filename"] as string) || "character.fbx";
 
       // Create asset upload record
+      // TODO: implement FBX-to-glTF conversion pipeline; for now mark as ready
       const { rows: uploadRows } = await pool.query(
         `INSERT INTO daemon_asset_uploads (upload_type, fbx_filename, conversion_status)
-         VALUES ('character', $1, 'pending')
+         VALUES ('character', $1, 'ready')
          RETURNING id`,
         [originalFilename],
       );
@@ -514,9 +550,10 @@ router.post(
       const originalFilename = (req.headers["x-original-filename"] as string) || "emote.fbx";
 
       // Create asset upload record
+      // TODO: implement FBX-to-glTF conversion pipeline; for now mark as ready
       const { rows: uploadRows } = await pool.query(
         `INSERT INTO daemon_asset_uploads (upload_type, fbx_filename, label, conversion_status)
-         VALUES ('emote', $1, $2, 'pending')
+         VALUES ('emote', $1, $2, 'ready')
          RETURNING id`,
         [originalFilename, label],
       );
@@ -737,10 +774,11 @@ router.post(
             roamingEnabled: expandedFields.behaviorPreferences?.initiatesConversation ?? true,
           },
           personality: {
-            traits: [],
+            traits: expandedFields.traits || [],
             backstory: expandedFields.backstory,
             speechStyle: expandedFields.voiceDescription,
             interests: expandedFields.interests || [],
+            quirks: expandedFields.quirks || [],
           },
         };
 
@@ -960,6 +998,80 @@ router.get(
   },
 );
 
+// ==================== World Placement API ====================
+
+// GET /api/daemons/placeable — List finalized daemons without active placements (admin only)
+router.get(
+  "/placeable",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const authedReq = req as AuthedRequest;
+      if (!isAdmin(authedReq)) {
+        res.status(403).json({ error: "Admin only" });
+        return;
+      }
+
+      const pool = getPool();
+      const { rows } = await pool.query(
+        `SELECT d.id, d.name, d.description, d.is_active,
+                dp.id as placement_id, dp.active as placement_active
+         FROM daemons d
+         LEFT JOIN daemon_placements dp ON dp.daemon_id = d.id
+         WHERE dp.id IS NULL
+         ORDER BY d.created_at DESC`,
+      );
+
+      res.json({ daemons: rows });
+    } catch (err) {
+      console.error("GET /api/daemons/placeable error:", err);
+      res.status(500).json({ error: "Failed to list placeable daemons" });
+    }
+  },
+);
+
+// GET /api/daemons/:id — Get a single daemon's full details
+router.get(
+  "/:id",
+  ...requireAuth(),
+  async (req, res) => {
+    try {
+      const pool = getPool();
+      const { rows } = await pool.query(
+        `SELECT d.id, d.name, d.description, d.daemon_definition, d.appearance, d.behavior,
+                d.position_x, d.position_y, d.position_z, d.rotation, d.is_active,
+                d.plot_uuid, d.owner_id, d.created_at,
+                (SELECT dau.id FROM daemon_asset_uploads dau
+                 WHERE dau.daemon_id = d.id AND dau.upload_type = 'character' LIMIT 1) as character_upload_id
+         FROM daemons d WHERE d.id = $1`,
+        [req.params.id],
+      );
+      if (rows.length === 0) {
+        res.status(404).json({ error: "Daemon not found" });
+        return;
+      }
+      const r = rows[0];
+      res.json({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        definition: r.daemon_definition,
+        behavior: r.behavior,
+        position: { x: r.position_x, y: r.position_y, z: r.position_z },
+        rotation: r.rotation,
+        isActive: r.is_active,
+        plotUuid: r.plot_uuid,
+        ownerId: r.owner_id,
+        characterUploadId: r.character_upload_id,
+        createdAt: r.created_at,
+      });
+    } catch (err) {
+      console.error("GET /api/daemons/:id error:", err);
+      res.status(500).json({ error: "Failed to get daemon" });
+    }
+  },
+);
+
 // PUT /api/daemons/:id — Update daemon definition
 router.put(
   "/:id",
@@ -1109,38 +1221,6 @@ router.get(
   },
 );
 
-// ==================== World Placement API ====================
-
-// GET /api/daemons/placeable — List finalized daemons without active placements (admin only)
-router.get(
-  "/placeable",
-  ...requireAuth(),
-  async (req, res) => {
-    try {
-      const authedReq = req as AuthedRequest;
-      if (!isAdmin(authedReq)) {
-        res.status(403).json({ error: "Admin only" });
-        return;
-      }
-
-      const pool = getPool();
-      const { rows } = await pool.query(
-        `SELECT d.id, d.name, d.description, d.is_active,
-                dp.id as placement_id, dp.active as placement_active
-         FROM daemons d
-         LEFT JOIN daemon_placements dp ON dp.daemon_id = d.id
-         WHERE dp.id IS NULL
-         ORDER BY d.created_at DESC`,
-      );
-
-      res.json({ daemons: rows });
-    } catch (err) {
-      console.error("GET /api/daemons/placeable error:", err);
-      res.status(500).json({ error: "Failed to list placeable daemons" });
-    }
-  },
-);
-
 // GET /api/daemons/:id/placement — Get placement for a daemon
 router.get(
   "/:id/placement",
@@ -1209,11 +1289,6 @@ router.post(
       const roam = roamRadius ?? 5;
       const interaction = interactionRange ?? 10;
 
-      if (roam > interaction) {
-        res.status(400).json({ error: "roamRadius must be <= interactionRange" });
-        return;
-      }
-
       const pool = getPool();
 
       // Verify daemon exists
@@ -1236,21 +1311,21 @@ router.post(
         return;
       }
 
-      // Check spawn point is within plot bounds
+      // spawnPoint is plot-relative (0,0 = plot center)
+      // Validate within plot bounds, then convert to world coordinates for storage
       const plotPlacement = getPlotPosition(plotRows[0].position, V1_CONFIG);
       const halfW = plotPlacement.bounds.width / 2;
       const halfD = plotPlacement.bounds.depth / 2;
-      const cos = Math.cos(plotPlacement.rotation);
-      const sin = Math.sin(plotPlacement.rotation);
-      // Transform spawn point to plot-local coordinates
-      const dx = spawnPoint.x - plotPlacement.position.x;
-      const dz = spawnPoint.z - plotPlacement.position.z;
-      const localX = dx * cos + dz * sin;
-      const localZ = -dx * sin + dz * cos;
-      if (Math.abs(localX) > halfW || Math.abs(localZ) > halfD) {
+      if (Math.abs(spawnPoint.x) > halfW || Math.abs(spawnPoint.z) > halfD) {
         res.status(400).json({ error: "spawnPoint is outside plot bounds" });
         return;
       }
+
+      // Convert plot-relative to world coordinates
+      const cos = Math.cos(plotPlacement.rotation);
+      const sin = Math.sin(plotPlacement.rotation);
+      const worldX = plotPlacement.position.x + spawnPoint.x * cos - spawnPoint.z * sin;
+      const worldZ = plotPlacement.position.z + spawnPoint.x * sin + spawnPoint.z * cos;
 
       // Check for existing placement
       const { rows: existing } = await pool.query(
@@ -1270,7 +1345,7 @@ router.post(
          RETURNING *`,
         [
           daemonId, plotUUID,
-          spawnPoint.x, spawnPoint.y ?? 0, spawnPoint.z,
+          worldX, spawnPoint.y ?? 0, worldZ,
           facingDirection ?? 0, roam, interaction,
         ],
       );
@@ -1330,12 +1405,11 @@ router.put(
       const newRoam = roamRadius ?? current.roam_radius;
       const newInteraction = interactionRange ?? current.interaction_range;
 
-      if (newRoam > newInteraction) {
-        res.status(400).json({ error: "roamRadius must be <= interactionRange" });
-        return;
-      }
+      // If spawnPoint provided (plot-relative), validate and convert to world coords
+      let finalSpawnX = newSpawnX;
+      let finalSpawnY = newSpawnY;
+      let finalSpawnZ = newSpawnZ;
 
-      // Validate spawn point within plot bounds if plot or spawn changed
       if (plotUUID || spawnPoint) {
         const { rows: plotRows } = await pool.query(
           "SELECT uuid, position FROM plots WHERE uuid = $1",
@@ -1347,17 +1421,22 @@ router.put(
         }
 
         const plotPlacement = getPlotPosition(plotRows[0].position, V1_CONFIG);
-        const halfW = plotPlacement.bounds.width / 2;
-        const halfD = plotPlacement.bounds.depth / 2;
-        const cos = Math.cos(plotPlacement.rotation);
-        const sin = Math.sin(plotPlacement.rotation);
-        const dx = newSpawnX - plotPlacement.position.x;
-        const dz = newSpawnZ - plotPlacement.position.z;
-        const localX = dx * cos + dz * sin;
-        const localZ = -dx * sin + dz * cos;
-        if (Math.abs(localX) > halfW || Math.abs(localZ) > halfD) {
-          res.status(400).json({ error: "spawnPoint is outside plot bounds" });
-          return;
+
+        if (spawnPoint) {
+          // spawnPoint is plot-relative — validate bounds
+          const halfW = plotPlacement.bounds.width / 2;
+          const halfD = plotPlacement.bounds.depth / 2;
+          if (Math.abs(spawnPoint.x) > halfW || Math.abs(spawnPoint.z) > halfD) {
+            res.status(400).json({ error: "spawnPoint is outside plot bounds" });
+            return;
+          }
+
+          // Convert to world coordinates
+          const cos = Math.cos(plotPlacement.rotation);
+          const sin = Math.sin(plotPlacement.rotation);
+          finalSpawnX = plotPlacement.position.x + spawnPoint.x * cos - spawnPoint.z * sin;
+          finalSpawnY = spawnPoint.y ?? 0;
+          finalSpawnZ = plotPlacement.position.z + spawnPoint.x * sin + spawnPoint.z * cos;
         }
       }
 
@@ -1368,7 +1447,7 @@ router.put(
              updated_at = now()
          WHERE daemon_id = $8
          RETURNING *`,
-        [newPlotUUID, newSpawnX, newSpawnY, newSpawnZ, newFacing, newRoam, newInteraction, daemonId],
+        [newPlotUUID, finalSpawnX, finalSpawnY, finalSpawnZ, newFacing, newRoam, newInteraction, daemonId],
       );
 
       const row = updated[0];
@@ -1458,7 +1537,12 @@ router.post(
         );
         if (daemonRows.length > 0) {
           const d = daemonRows[0];
-          dm.addDaemon(d.id, d.daemon_definition, d.behavior);
+          const def = {
+            ...d.daemon_definition,
+            position: { x: d.position_x, y: d.position_y, z: d.position_z },
+            rotation: d.rotation,
+          };
+          dm.addDaemon(d.id, def, d.behavior);
         }
       }
 
@@ -1520,6 +1604,209 @@ router.post(
       console.error("POST /api/daemons/:id/deactivate error:", err);
       res.status(500).json({ error: "Failed to deactivate daemon" });
     }
+  },
+);
+
+// GET /api/daemons/:id/emotes — List emote uploads for a daemon
+router.get(
+  "/:id/emotes",
+  async (req, res) => {
+    try {
+      const pool = getPool();
+      const result = await pool.query(
+        `SELECT id, label FROM daemon_asset_uploads
+         WHERE daemon_id = $1 AND upload_type = 'emote' AND conversion_status = 'ready'
+         ORDER BY label`,
+        [req.params.id],
+      );
+      res.json(result.rows);
+    } catch (err) {
+      console.error("Failed to fetch emotes:", err);
+      res.status(500).json({ error: "Failed to fetch emotes" });
+    }
+  },
+);
+
+// PATCH /api/daemons/:id/idle-animation — Set idle animation label
+router.patch(
+  "/:id/idle-animation",
+  async (req, res) => {
+    try {
+      const pool = getPool();
+      const { label } = req.body;
+      await pool.query(
+        `UPDATE daemons SET behavior = behavior || $1::jsonb WHERE id = $2`,
+        [JSON.stringify({ idleAnimationLabel: label || null }), req.params.id],
+      );
+      res.json({ ok: true });
+    } catch (err) {
+      console.error("Failed to update idle animation:", err);
+      res.status(500).json({ error: "Failed to update idle animation" });
+    }
+  },
+);
+
+// POST /api/daemons/:id/directive — Send an admin directive to a daemon
+router.post(
+  "/:id/directive",
+  ...requireAuth(),
+  requireRole("super_admin"),
+  async (req, res) => {
+    try {
+      const { directive } = req.body;
+      if (!directive || typeof directive !== "string") {
+        res.status(400).json({ error: "directive is required" });
+        return;
+      }
+
+      const manager = getActiveDaemonManager();
+      if (!manager) {
+        res.status(503).json({ error: "Daemon manager not active" });
+        return;
+      }
+
+      manager.setDirective(req.params.id, directive.slice(0, 500));
+      res.json({ ok: true });
+    } catch (err) {
+      console.error("Failed to set directive:", err);
+      res.status(500).json({ error: "Failed to set directive" });
+    }
+  },
+);
+
+// GET /api/daemons/:id/desires — List active desires
+router.get(
+  "/:id/desires",
+  ...requireAuth(),
+  requireRole("super_admin"),
+  async (req, res) => {
+    const manager = getActiveDaemonManager();
+    if (!manager) {
+      res.status(503).json({ error: "Daemon manager not active" });
+      return;
+    }
+    res.json({ desires: manager.getDesires(req.params.id) });
+  },
+);
+
+// DELETE /api/daemons/:id/directive — Remove a specific desire by index
+router.delete(
+  "/:id/directive",
+  ...requireAuth(),
+  requireRole("super_admin"),
+  async (req, res) => {
+    try {
+      const index = parseInt(req.body?.index, 10);
+      if (isNaN(index) || index < 0) {
+        res.status(400).json({ error: "Valid index is required" });
+        return;
+      }
+
+      const manager = getActiveDaemonManager();
+      if (!manager) {
+        res.status(503).json({ error: "Daemon manager not active" });
+        return;
+      }
+
+      manager.removeDesire(req.params.id, index);
+      res.json({ ok: true, desires: manager.getDesires(req.params.id) });
+    } catch (err) {
+      console.error("Failed to remove desire:", err);
+      res.status(500).json({ error: "Failed to remove desire" });
+    }
+  },
+);
+
+// POST /api/daemons/:id/upload-character — Upload/replace FBX character model for a placed daemon
+router.post(
+  "/:id/upload-character",
+  ...requireAuth(),
+  requireRole("super_admin"),
+  async (req, res) => {
+    try {
+      const daemonId = req.params.id;
+      const pool = getPool();
+
+      // Verify daemon exists
+      const { rows: daemonRows } = await pool.query(
+        "SELECT id FROM daemons WHERE id = $1",
+        [daemonId],
+      );
+      if (daemonRows.length === 0) {
+        res.status(404).json({ error: "Daemon not found" });
+        return;
+      }
+
+      // Read raw binary
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(chunk as Buffer);
+      }
+      const body = Buffer.concat(chunks);
+
+      if (body.length < 23) {
+        res.status(400).json({ error: "File too small to be a valid FBX" });
+        return;
+      }
+      if (body.length > MAX_FBX_SIZE) {
+        res.status(400).json({ error: `File too large (max ${MAX_FBX_SIZE / 1024 / 1024}MB)` });
+        return;
+      }
+
+      // Validate FBX binary magic bytes
+      if (!body.subarray(0, FBX_BINARY_MAGIC.length).equals(FBX_BINARY_MAGIC)) {
+        res.status(400).json({ error: "Invalid FBX file (bad magic bytes)" });
+        return;
+      }
+
+      const originalFilename = (req.headers["x-original-filename"] as string) || "character.fbx";
+
+      // Create asset upload record
+      const { rows: uploadRows } = await pool.query(
+        `INSERT INTO daemon_asset_uploads (upload_type, fbx_filename, daemon_id, conversion_status)
+         VALUES ('character', $1, $2, 'ready')
+         RETURNING id`,
+        [originalFilename, daemonId],
+      );
+      const uploadId = uploadRows[0].id as string;
+
+      // Write FBX to disk
+      const dir = join(UPLOAD_DIR, uploadId);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "model.fbx"), body);
+
+      console.log(`[Daemon] Character FBX uploaded for ${daemonId}: ${uploadId} (${(body.length / 1024 / 1024).toFixed(2)} MB)`);
+
+      // Notify DaemonManager to broadcast model update to all clients
+      const dm = getActiveDaemonManager();
+      if (dm) {
+        dm.updateCharacterModel(daemonId, uploadId);
+      }
+
+      res.json({ success: true, uploadId, filename: originalFilename, size: body.length });
+    } catch (err) {
+      console.error("POST /api/daemons/:id/upload-character error:", err);
+      res.status(500).json({ error: "Character upload failed" });
+    }
+  },
+);
+
+// GET /api/daemons/assets/:uploadId/model — Serve uploaded FBX file (character or emote)
+router.get(
+  "/assets/:uploadId/model",
+  async (req, res) => {
+    const dir = join(UPLOAD_DIR, req.params.uploadId);
+    // Character uploads use model.fbx, emote uploads use emote.fbx
+    const modelPath = join(dir, "model.fbx");
+    const emotePath = join(dir, "emote.fbx");
+    const filePath = existsSync(modelPath) ? modelPath : existsSync(emotePath) ? emotePath : null;
+    if (!filePath) {
+      res.status(404).json({ error: "Asset not found" });
+      return;
+    }
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    createReadStream(filePath).pipe(res);
   },
 );
 

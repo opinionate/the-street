@@ -1,0 +1,9 @@
+[
+  {"block":"BehaviorState type","lines":"15","what":"State machine: idle -> attention -> in_conversation -> post_interaction","why":"Core daemon behavior FSM","dependencies":"None","status":"ACTIVE"},
+  {"block":"BehaviorCallbacks","lines":"25-44","what":"Callback interface for DaemonManager integration","why":"Decouples behavior tree from manager logic","dependencies":"Vector3, WorldEvent","status":"ACTIVE"},
+  {"block":"DaemonBehaviorTree class","lines":"52-306","what":"Per-daemon event-driven state machine with event queue","why":"Instantiated per daemon by DaemonManager","dependencies":"PriorityEventQueue, WorldEvent, EventPriority","status":"ACTIVE"},
+  {"block":"handleEvent","lines":"80-95","what":"Route incoming world events to state-specific handlers","why":"Entry point for all daemon events","dependencies":"WorldEvent","status":"ACTIVE"},
+  {"block":"tick","lines":"98-119","what":"Time-based state transitions (attention timeout, post-interaction cooldown)","why":"Called periodically by DaemonManager","dependencies":"None","status":"ACTIVE"},
+  {"block":"escalateToConversation","lines":"232-252","what":"Transition from attention to active conversation","why":"Called when speech detected during attention","dependencies":"BehaviorCallbacks.onStartConversation","status":"ACTIVE"},
+  {"block":"classifyPriority","lines":"269-284","what":"Classify event priority based on context","why":"Used for event queue ordering","dependencies":"EventPriority","status":"ACTIVE"}
+]

@@ -1,0 +1,5 @@
+[
+  {"block":"GET /","lines":"16-51","what":"List plots with owner info and placement geometry","why":"Used by client StreetScene for plot rendering","dependencies":"getPool, getPlotPosition, V1_CONFIG","status":"ACTIVE"},
+  {"block":"GET /:uuid","lines":"54-98","what":"Plot detail with world objects","why":"Used by client for plot inspection","dependencies":"getPool, getPlotPosition, V1_CONFIG","status":"ACTIVE"},
+  {"block":"POST /:uuid/publish","lines":"102-219","what":"Atomic publish from staging to live with building code validation","why":"Used by client staging workflow","dependencies":"requireAuth, isAdmin, validateWorldObject, UNIVERSAL_CODE, ORIGIN_NEIGHBORHOOD_CODE, getPool","status":"ACTIVE"}
+]

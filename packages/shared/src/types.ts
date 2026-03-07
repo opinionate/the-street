@@ -65,6 +65,8 @@ export interface LODLevel {
 }
 
 export interface WorldObject {
+  /** DB primary key (set when loaded from server, absent for new objects) */
+  id?: string;
   name: string;
   description: string;
   tags: string[];
@@ -161,6 +163,7 @@ export interface DaemonBehavior {
   greetingMessage?: string;
   farewellMessage?: string;
   interactionRadius: number;
+  overhearRadius?: number;          // How far away the daemon can hear speech (default: interactionRadius * 1.5)
   responses?: Record<string, string>;
   patrolPath?: Vector3[];
   idleMessages?: string[];
@@ -168,6 +171,7 @@ export interface DaemonBehavior {
   roamRadius?: number;        // Max distance from home (default: full ring)
   homePosition?: Vector3;     // Where to return to when recalled
   canConverseWithDaemons?: boolean; // Can talk to other daemons (default true)
+  aiModel?: string; // Override AI model for speech generation (e.g. "claude-sonnet-4-6")
 }
 
 export interface DaemonDefinition {
@@ -193,6 +197,8 @@ export interface DaemonState {
   targetPlayerId?: string;
   targetDaemonId?: string;    // For daemon-daemon interaction
   mood: DaemonMood;
+  characterUploadId?: string;  // UUID of uploaded character FBX
+  idleAnimationLabel?: string; // Label of emote FBX to use as idle animation
 }
 
 // --- Building Codes ---
@@ -281,27 +287,6 @@ export interface ValidationResult {
   errors: ValidationError[];
 }
 
-// --- Platform Primitives ---
-
-export interface ParameterDef {
-  name: string;
-  type: "number" | "string" | "boolean" | "color";
-  default: unknown;
-  min?: number;
-  max?: number;
-  options?: string[];
-}
-
-export interface PlatformPrimitive {
-  id: string; // "std:door", "std:tree_oak", etc.
-  category: string;
-  defaultMesh: string; // content_hash of the default glTF
-  variants: string[];
-  parameters: ParameterDef[];
-  interactions: InteractionType[];
-  defaultRenderCost: number;
-}
-
 // --- User Roles ---
 
 export type UserRole = "user" | "super_admin";
@@ -312,22 +297,6 @@ export interface UserProfile {
   displayName: string;
   role: UserRole;
   avatarDefinition: AvatarDefinition;
-}
-
-// --- Assets ---
-
-export interface AssetRecord {
-  contentHash: string;
-  creatorId: string;
-  creatorPublicKey: string;
-  signature: string;
-  assetType: string;
-  s3Key: string;
-  fileSizeBytes: number;
-  metadata: Record<string, unknown>;
-  dependencies: string[];
-  adoptionCount: number;
-  createdAt: string;
 }
 
 // --- Daemon Intelligence ---
@@ -441,13 +410,6 @@ export interface BudgetStatus {
   rateLimitWindowCallsRemaining: number;
 }
 
-export interface TokenCost {
-  callCount: number;
-  tokensIn: number;
-  tokensOut: number;
-  estimatedCostUSD: number;
-}
-
 export interface InferenceContext {
   systemPrompt: string;
   worldStateContext: WorldStateContext;
@@ -468,14 +430,6 @@ export interface InferenceValidationResult<T> {
 }
 
 // --- Daemon Memory ---
-
-export interface DaemonMemoryStore {
-  daemonId: string;
-  visitorImpressions: Map<UserId, VisitorImpression>;
-  maxVisitorImpressions: number;
-  daemonRelationships: Map<DaemonId, DaemonRelationship>;
-  worldStateContext: WorldStateContext;
-}
 
 export interface VisitorImpression {
   userId: UserId;
@@ -606,32 +560,13 @@ export interface InferenceFailurePayload {
 
 // --- Daemon Creation ---
 
-export interface DaemonCreationDraft {
-  draftId: string;
-  adminId: string;
-  createdAt: timestamp;
-  updatedAt: timestamp;
-
-  characterUploadId?: string;
-  emoteUploadIds: string[];
-
-  adminPrompt?: string;
-  expandedFields?: ExpandedManifestFields;
-  expansionStatus: "none" | "processing" | "ready" | "failed";
-
-  maxConversationTurns: number;
-  maxDailyCalls: number;
-  dailyBudgetResetsAt: string;
-  rememberVisitors: boolean;
-
-  status: "draft" | "finalized" | "abandoned";
-}
-
 export interface ExpandedManifestFields {
   name: string;
   voiceDescription: string;
   backstory: string;
+  traits: string[];
   interests: string[];
+  quirks: string[];
   dislikes: string[];
   behaviorPreferences: {
     crowdAffinity: number;

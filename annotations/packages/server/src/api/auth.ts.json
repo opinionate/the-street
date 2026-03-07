@@ -1,0 +1,3 @@
+[
+  {"block":"POST /register-keypair","lines":"9-45","what":"Register user with Ed25519 keypair on Clerk webhook","why":"Called by Clerk on user creation","dependencies":"crypto, getPool","status":"ACTIVE"}
+]

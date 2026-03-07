@@ -1,0 +1,4 @@
+[
+  {"block":"getDaemonRelationship","lines":"21-41","what":"Load daemon-daemon relationship from DB","why":"Used by DaemonManager for context assembly","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"summarizeAndPersistDaemonRelationship","lines":"46-157","what":"AI-summarize inter-daemon session and upsert bidirectional relationships","why":"Called by SessionManager.onSummarize for daemon-daemon conversations","dependencies":"Anthropic SDK, getPool, appendLogEntry","status":"ACTIVE"}
+]

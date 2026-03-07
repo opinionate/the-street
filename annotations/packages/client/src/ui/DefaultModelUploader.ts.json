@@ -1,0 +1,3 @@
+[
+  {"block":"DefaultModelUploader class","lines":"9-138","what":"Admin tool: upload Mixamo FBX as default avatar model, client-side FBX→GLB conversion via convertFbxCharacterToGlb, upload to /api/avatar/default-model","why":"Appended to AdminPanel via appendSection() in main.ts","dependencies":"convertFbxCharacterToGlb from animation-converter","status":"ACTIVE"}
+]

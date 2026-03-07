@@ -1,5 +1,4 @@
 import * as THREE from "three";
-import { Reflector } from "three/examples/jsm/objects/Reflector.js";
 import { V1_CONFIG, type WorldConfig } from "@the-street/shared";
 
 export class StreetGeometry {
@@ -14,18 +13,18 @@ export class StreetGeometry {
     const outerRadius = config.ringRadius - config.plotDepth / 2;
     const innerRadius = outerRadius - config.streetWidth;
 
-    // Reflective layer underneath — mirrors lamp posts, avatars, neon lines
-    const reflectorGeo = new THREE.RingGeometry(innerRadius, outerRadius, 128);
-    reflectorGeo.rotateX(-Math.PI / 2);
-    const reflector = new Reflector(reflectorGeo, {
-      textureWidth: 1024,
-      textureHeight: 1024,
+    // Faux reflective layer — subtle glossy surface instead of expensive real-time Reflector
+    const fakeReflectorGeo = new THREE.RingGeometry(innerRadius, outerRadius, 128);
+    fakeReflectorGeo.rotateX(-Math.PI / 2);
+    const fakeReflectorMat = new THREE.MeshStandardMaterial({
       color: 0x101018,
-      clipBias: 0.003,
+      roughness: 0.15,
+      metalness: 0.9,
     });
-    reflector.position.y = -0.005;
-    reflector.name = "StreetReflector";
-    this.mesh.add(reflector);
+    const fakeReflector = new THREE.Mesh(fakeReflectorGeo, fakeReflectorMat);
+    fakeReflector.position.y = -0.005;
+    fakeReflector.name = "StreetReflector";
+    this.mesh.add(fakeReflector);
 
     // Street surface — wet asphalt with clearcoat for rain-slick sheen
     const streetGeo = new THREE.RingGeometry(innerRadius, outerRadius, 128);
@@ -156,18 +155,6 @@ export class StreetGeometry {
       bulb.position.x = Math.cos(toCenter) * 2.5;
       bulb.position.z = Math.sin(toCenter) * 2.5;
       lampGroup.add(bulb);
-
-      // SpotLight pointing down — creates a pool of light on the street
-      const spot = new THREE.SpotLight(0xffcc77, 3.0, 18, Math.PI / 4, 0.6, 1.5);
-      spot.position.set(bulb.position.x, bulb.position.y, bulb.position.z);
-      spot.target.position.set(bulb.position.x, 0, bulb.position.z);
-      lampGroup.add(spot);
-      lampGroup.add(spot.target);
-
-      // Softer point light for ambient fill around the lamp
-      const fill = new THREE.PointLight(0xffaa44, 1.2, 20, 2);
-      fill.position.set(bulb.position.x, bulb.position.y - 0.2, bulb.position.z);
-      lampGroup.add(fill);
 
       this.mesh.add(lampGroup);
     }

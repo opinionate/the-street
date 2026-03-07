@@ -1,0 +1,9 @@
+[
+  {"block":"Constants and helpers","lines":"1-43","what":"CORE_SLOTS, EMOTE_FILENAMES, isValidSlot, animPath","why":"Used by animation CRUD endpoints","dependencies":"node:fs, node:path","status":"ACTIVE"},
+  {"block":"GET /shared","lines":"48-76","what":"List shared animation slot files","why":"Used by client AnimationPanel","dependencies":"node:fs","status":"ACTIVE"},
+  {"block":"POST /upload","lines":"79-171","what":"Upload custom animation GLB for entity with ownership validation","why":"Used by client AnimationPanel","dependencies":"requireAuth, getPool, node:fs","status":"ACTIVE"},
+  {"block":"GET /:entityType/:entityId","lines":"174-193","what":"List custom animations for an entity","why":"Used by client AnimationPanel","dependencies":"requireAuth, getPool","status":"ACTIVE"},
+  {"block":"GET /:entityType/:entityId/:slot","lines":"197-216","what":"Serve custom animation GLB","why":"Used by client for animation playback","dependencies":"node:fs","status":"ACTIVE"},
+  {"block":"DELETE /:id","lines":"219-272","what":"Delete custom animation with ownership check","why":"Used by client AnimationPanel","dependencies":"requireAuth, getPool, node:fs","status":"ACTIVE"},
+  {"block":"POST /convert-shared","lines":"275-328","what":"Admin: replace shared animation files","why":"One-time conversion utility (super_admin)","dependencies":"requireAuth, requireRole, node:fs","status":"ACTIVE"}
+]

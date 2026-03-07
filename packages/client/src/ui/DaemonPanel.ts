@@ -61,36 +61,49 @@ export class DaemonPanel {
       width: 720px;
       max-width: 95vw;
       max-height: 90vh;
-      background: rgba(0, 0, 0, 0.95);
+      background: rgba(10, 10, 15, 0.95);
       border: 1px solid rgba(68, 255, 136, 0.3);
-      border-radius: 10px;
-      padding: 20px;
+      border-radius: 12px;
       z-index: 200;
       display: none;
       font-family: system-ui, sans-serif;
       color: white;
-      overflow-y: auto;
+      overflow: hidden;
     `;
 
-    // Title bar
-    const titleBar = document.createElement("div");
-    titleBar.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;";
+    // Header
+    const header = document.createElement("div");
+    header.style.cssText = `
+      padding: 14px 20px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    `;
     const title = document.createElement("div");
-    title.textContent = "Daemon Manager";
-    title.style.cssText = "font-size: 18px; font-weight: bold; color: #44ff88;";
-    titleBar.appendChild(title);
+    title.innerHTML = '<span style="color:#44ff88;font-weight:bold">DAEMON</span> Manager';
+    title.style.cssText = "font-size: 16px; font-weight: bold;";
+    header.appendChild(title);
     const closeBtn = document.createElement("button");
     closeBtn.textContent = "\u00D7";
-    closeBtn.style.cssText = "background: none; border: none; color: rgba(255,255,255,0.6); font-size: 24px; cursor: pointer;";
+    closeBtn.style.cssText = `
+      background: none; border: none;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 22px; cursor: pointer; padding: 0 4px;
+    `;
     closeBtn.addEventListener("click", () => this.hide());
-    titleBar.appendChild(closeBtn);
-    this.container.appendChild(titleBar);
+    header.appendChild(closeBtn);
+    this.container.appendChild(header);
+
+    // Body wrapper
+    const body = document.createElement("div");
+    body.style.cssText = "padding: 16px 20px; overflow-y: auto; max-height: calc(90vh - 60px);";
 
     // Plot info
     this.plotInfoEl = document.createElement("div");
     this.plotInfoEl.style.cssText = "font-size: 12px; margin-bottom: 12px; padding: 6px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.4);";
     this.plotInfoEl.textContent = "Walk to your plot to manage daemons";
-    this.container.appendChild(this.plotInfoEl);
+    body.appendChild(this.plotInfoEl);
 
     // Two-column layout
     const columns = document.createElement("div");
@@ -146,21 +159,23 @@ export class DaemonPanel {
     rightCol.appendChild(this.createBtn);
 
     columns.appendChild(rightCol);
-    this.container.appendChild(columns);
+    body.appendChild(columns);
 
     // Divider
     const divider = document.createElement("hr");
     divider.style.cssText = "border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 0 0 12px;";
-    this.container.appendChild(divider);
+    body.appendChild(divider);
 
     // Daemon list
     const listTitle = document.createElement("div");
     listTitle.textContent = "Your Daemons";
     listTitle.style.cssText = "font-size: 14px; font-weight: bold; margin-bottom: 8px; color: rgba(255,255,255,0.6);";
-    this.container.appendChild(listTitle);
+    body.appendChild(listTitle);
 
     this.daemonList = document.createElement("div");
-    this.container.appendChild(this.daemonList);
+    body.appendChild(this.daemonList);
+
+    this.container.appendChild(body);
 
     document.body.appendChild(this.container);
   }

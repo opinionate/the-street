@@ -1,0 +1,3 @@
+[
+  {"block":"PriorityEventQueue","lines":"1-72","what":"Bounded priority queue for daemon world events with depth cap","why":"Used by DaemonBehaviorTree to queue events during busy states","dependencies":"WorldEvent","status":"ACTIVE"}
+]

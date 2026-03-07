@@ -1,0 +1,7 @@
+[
+  {"block":"MODEL","lines":"3","what":"Default AI model: claude-sonnet-4-6","why":"Used by all AI generation functions","dependencies":"None","status":"ACTIVE"},
+  {"block":"FALLBACK_MODEL","lines":"4","what":"Fallback AI model: claude-haiku-4-5","why":"Used by callWithFallback in daemon-converse","dependencies":"None","status":"ACTIVE"},
+  {"block":"getClient","lines":"8-13","what":"Singleton Anthropic client","why":"Used by all AI functions","dependencies":"@anthropic-ai/sdk","status":"ACTIVE"},
+  {"block":"stripJsonFences","lines":"15-19","what":"Remove markdown JSON fences from AI responses","why":"Used by all AI response parsers","dependencies":"None","status":"ACTIVE"},
+  {"block":"sanitizeUserInput","lines":"22-30","what":"Strip control chars and truncate user input","why":"Used in all AI prompts that include user input","dependencies":"None","status":"ACTIVE"}
+]

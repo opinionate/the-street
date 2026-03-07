@@ -376,7 +376,7 @@ export class DaemonPlacementPanel {
     // Validation hint
     const hint = document.createElement("div");
     hint.style.cssText = "font-size: 11px; color: rgba(255,255,255,0.3);";
-    hint.textContent = "Roam radius must be \u2264 interaction range. Spawn point relative to plot center.";
+    hint.textContent = "Spawn point is relative to plot center (0,0 = center).";
     form.appendChild(hint);
 
     // Submit button
@@ -386,11 +386,6 @@ export class DaemonPlacementPanel {
       const facing = parseFloat((facingInput.querySelector("input") as HTMLInputElement).value) || 0;
       const roam = parseFloat((roamInput.querySelector("input") as HTMLInputElement).value) || 5;
       const interaction = parseFloat((interactionInput.querySelector("input") as HTMLInputElement).value) || 10;
-
-      if (roam > interaction) {
-        this.setStatus("Error: roam radius must be \u2264 interaction range");
-        return;
-      }
 
       if (!this.selectedDaemonId || !this.selectedPlotUUID || !this.onSetPlacement) return;
 

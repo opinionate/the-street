@@ -1,0 +1,5 @@
+[
+  {"block":"GET /:contentHash","lines":"10-47","what":"Asset metadata lookup by content hash","why":"Public API for asset verification","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"GET /:contentHash/glb","lines":"50-57","what":"Redirect to CDN for GLB download","why":"Content-addressed asset serving","dependencies":"CDN_BASE_URL env","status":"ACTIVE"},
+  {"block":"POST /upload","lines":"60-161","what":"Upload GLB to S3 with content-addressed key, Ed25519 signing, dedup","why":"Used by client for asset uploads","dependencies":"requireAuth, rateLimit, asset-pipeline (uploadAsset, computeContentHash, signContentHash), getPool","status":"ACTIVE"}
+]

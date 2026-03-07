@@ -1,0 +1,4 @@
+[
+  {"block":"GalleryPanel class","lines":"9-221","what":"Generated object gallery: 2-column grid with thumbnails, loads from /api/gallery, selectable items, custom fetch function for auth","why":"Used by main.ts, toggled with G key","dependencies":"None (pure DOM)","status":"ACTIVE"},
+  {"block":"GalleryItem interface","lines":"1-7","what":"Gallery item shape (exported)","why":"Used by GalleryPanel and main.ts","dependencies":"None","status":"ACTIVE"}
+]

@@ -16,6 +16,10 @@ const router = Router();
 const ALLOWED_ANIM_TYPES = new Set([
   "idle", "walk", "run", "turnLeft", "turnRight",
   "strafeLeftWalk", "strafeRightWalk", "strafeLeftRun", "strafeRightRun", "jump",
+  "walk-mixamo", "run-mixamo", "jump-mixamo",
+  "strafeLeftWalk-mixamo", "strafeRightWalk-mixamo",
+  "strafeLeftRun-mixamo", "strafeRightRun-mixamo",
+  "turnLeft-mixamo", "turnRight-mixamo",
 ]);
 router.get(
   "/animations/:type",
@@ -80,7 +84,7 @@ router.get(
 
 // POST /api/avatar/upload-character — Upload a pre-rigged character model (FBX converted to GLB client-side)
 const UPLOAD_DIR = join(__dirname, "..", "..", "data", "assets", "upload");
-const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50MB
+const MAX_UPLOAD_SIZE = 200 * 1024 * 1024; // 200MB
 router.post(
   "/upload-character",
   ...requireAuth(),

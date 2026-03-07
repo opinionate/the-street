@@ -1,0 +1,11 @@
+[
+  {"block":"Cooldown tracking","lines":"18-43","what":"In-memory cooldown map with 30-day window per trait","why":"Prevent over-frequent trait amendments","dependencies":"None","status":"ACTIVE"},
+  {"block":"loadCooldowns","lines":"47-70","what":"Load recent amendment cooldowns from DB on startup","why":"Called by server index.ts on startup","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"evaluateTraitTriggers","lines":"86-152","what":"Evaluate mutable traits for amendments after trigger events","why":"Called by SessionManager.onSummarize at session end","dependencies":"classifyTrigger, proposeAmendment, validateProposal, compile (ai-service), persistManifest","status":"ACTIVE"},
+  {"block":"classifyTrigger","lines":"156-209","what":"AI classifier: does event match trait trigger conditions?","why":"First gate in evolution pipeline","dependencies":"Anthropic SDK, appendLogEntry","status":"ACTIVE"},
+  {"block":"proposeAmendment","lines":"218-277","what":"AI proposal: generate new trait value","why":"Second gate in evolution pipeline","dependencies":"Anthropic SDK, appendLogEntry","status":"ACTIVE"},
+  {"block":"validateProposal","lines":"286-306","what":"Validate proposed trait value (non-empty, non-identical, <200 chars)","why":"Third gate in evolution pipeline","dependencies":"None","status":"ACTIVE"},
+  {"block":"persistTraitUpdate","lines":"340-357","what":"Update mutable trait in personality_manifests table","why":"Apply accepted amendment to DB","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"persistManifest","lines":"359-376","what":"Update compiled system prompt in DB","why":"Persist recompiled manifest after amendment","dependencies":"getPool","status":"ACTIVE"},
+  {"block":"checkVisitorMilestone","lines":"384-397","what":"Trigger evolution on 5th visitor interaction","why":"Never called — exported but not imported anywhere","dependencies":"evaluateTraitTriggers","status":"DEAD"}
+]

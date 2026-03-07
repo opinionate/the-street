@@ -19,6 +19,10 @@ pnpm --filter @the-street/client exec tsc --noEmit  # Type-check client
 pnpm --filter @the-street/server exec tsc --noEmit  # Type-check server
 ```
 
+## Visual Design System
+
+**IMPORTANT**: When building or modifying anything with a visual component (UI panels, 3D labels, HUD elements, scene materials, chat styling, canvas rendering), you MUST reference `DESIGN_SYSTEM.md` in the project root and follow its color palette, typography, component patterns, and anti-patterns. Do not introduce colors, fonts, or styling that contradict the design system.
+
 ## Architecture Notes
 
 ### Avatar Pipeline

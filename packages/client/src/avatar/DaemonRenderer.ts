@@ -166,9 +166,11 @@ export class DaemonRenderer {
     const parts = this.createNPCBody(accent);
     group.add(parts.body);
 
-    // Name label
+    // Name label (hidden until targeted)
     const nameSprite = this.createNameLabel(daemon.definition.name, accent);
     nameSprite.position.set(0, 2.1, 0);
+    nameSprite.name = "nameLabel";
+    nameSprite.visible = false;
     group.add(nameSprite);
 
     this.scene.add(group);
@@ -933,6 +935,22 @@ export class DaemonRenderer {
       mood: daemon.mood,
       action: daemon.action,
     };
+  }
+
+  /** Show name label for a specific daemon */
+  showNameLabel(daemonId: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+    const label = daemon.group.getObjectByName("nameLabel");
+    if (label) label.visible = true;
+  }
+
+  /** Hide name label for a specific daemon */
+  hideNameLabel(daemonId: string): void {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon) return;
+    const label = daemon.group.getObjectByName("nameLabel");
+    if (label) label.visible = false;
   }
 
   /** Get daemon IDs near a world position */

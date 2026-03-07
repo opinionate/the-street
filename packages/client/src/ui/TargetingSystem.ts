@@ -2,8 +2,7 @@ import * as THREE from "three";
 import type { AvatarManager } from "../avatar/AvatarManager.js";
 import type { DaemonRenderer } from "../avatar/DaemonRenderer.js";
 
-const CONE_ANGLE = Math.PI / 3; // 60 degrees
-const CONE_RANGE = 30;
+const TARGET_RANGE = 50;
 
 interface TargetEntity {
   id: string;
@@ -105,6 +104,9 @@ export class TargetingSystem {
 
   /** Deselect current target */
   deselect(): void {
+    if (this.currentTarget) {
+      this.hideTargetLabel(this.currentTarget);
+    }
     this.currentTarget = null;
     this.targetIndex = -1;
     if (this.highlightRing) this.highlightRing.visible = false;
@@ -136,48 +138,35 @@ export class TargetingSystem {
 
   private refreshTargets(): void {
     const playerPos = this.avatarManager.getLocalPlayerPosition();
-    const playerRot = this.avatarManager.getLocalPlayerRotation();
     if (!playerPos) return;
-
-    const forward = new THREE.Vector3(
-      -Math.sin(playerRot),
-      0,
-      -Math.cos(playerRot),
-    );
 
     this.sortedTargets = [];
 
-    // Collect daemons
+    // Collect daemons within radius
     for (const id of this.daemonRenderer.getAllDaemonIds()) {
       const pos = this.daemonRenderer.getDaemonPosition(id);
       if (!pos) continue;
       const toTarget = new THREE.Vector3().subVectors(pos, playerPos);
       toTarget.y = 0;
       const dist = toTarget.length();
-      if (dist > CONE_RANGE || dist < 0.5) continue;
-
-      const angle = forward.angleTo(toTarget.normalize());
-      if (angle > CONE_ANGLE / 2) continue;
+      if (dist > TARGET_RANGE || dist < 0.5) continue;
 
       this.sortedTargets.push({ id, type: "daemon", position: pos, distance: dist });
     }
 
-    // Collect other players
+    // Collect other players within radius
     for (const id of this.avatarManager.getOtherPlayerIds()) {
       const pos = this.avatarManager.getPlayerPosition(id);
       if (!pos) continue;
       const toTarget = new THREE.Vector3().subVectors(pos, playerPos);
       toTarget.y = 0;
       const dist = toTarget.length();
-      if (dist > CONE_RANGE || dist < 0.5) continue;
-
-      const angle = forward.angleTo(toTarget.normalize());
-      if (angle > CONE_ANGLE / 2) continue;
+      if (dist > TARGET_RANGE || dist < 0.5) continue;
 
       this.sortedTargets.push({ id, type: "player", position: pos, distance: dist });
     }
 
-    // Sort by distance
+    // Sort by distance (nearest first)
     this.sortedTargets.sort((a, b) => a.distance - b.distance);
 
     // If current target no longer in list, reset index
@@ -194,6 +183,11 @@ export class TargetingSystem {
   }
 
   private selectTarget(target: TargetEntity): void {
+    // Hide previous target's label
+    if (this.currentTarget) {
+      this.hideTargetLabel(this.currentTarget);
+    }
+
     this.currentTarget = target;
 
     // Show highlight ring
@@ -202,8 +196,27 @@ export class TargetingSystem {
       this.highlightRing.position.set(target.position.x, 0.05, target.position.z);
     }
 
+    // Show name label on new target
+    this.showTargetLabel(target);
+
     // Update info card
     this.updateInfoCard(target);
+  }
+
+  private showTargetLabel(target: TargetEntity): void {
+    if (target.type === "daemon") {
+      this.daemonRenderer.showNameLabel(target.id);
+    } else {
+      this.avatarManager.showNameLabel(target.id);
+    }
+  }
+
+  private hideTargetLabel(target: TargetEntity): void {
+    if (target.type === "daemon") {
+      this.daemonRenderer.hideNameLabel(target.id);
+    } else {
+      this.avatarManager.hideNameLabel(target.id);
+    }
   }
 
   private updateInfoCard(target: TargetEntity): void {

@@ -768,11 +768,12 @@ export class AvatarManager {
     group.position.set(state.position.x, state.position.y, state.position.z);
     group.rotation.y = state.rotation;
 
-    // Name label above head (skip for local player)
+    // Name label above head (skip for local player, hidden until targeted)
     if (state.userId !== this.localPlayerId) {
       const nameSprite = this.createNameLabel(state.displayName);
       nameSprite.position.set(0, 2.1, 0);
       nameSprite.name = "nameLabel";
+      nameSprite.visible = false;
       group.add(nameSprite);
     }
 
@@ -919,6 +920,22 @@ export class AvatarManager {
         label.material.dispose();
       }
     }
+  }
+
+  /** Show name label for a specific player */
+  showNameLabel(userId: string): void {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+    const label = avatar.group.getObjectByName("nameLabel");
+    if (label) label.visible = true;
+  }
+
+  /** Hide name label for a specific player */
+  hideNameLabel(userId: string): void {
+    const avatar = this.avatars.get(userId);
+    if (!avatar) return;
+    const label = avatar.group.getObjectByName("nameLabel");
+    if (label) label.visible = false;
   }
 
   /** Load and play an emote animation. Returns false if no custom model. */

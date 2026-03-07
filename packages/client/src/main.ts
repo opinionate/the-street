@@ -26,6 +26,7 @@ import { AnimationPanel } from "./ui/AnimationPanel.js";
 import { AnimationConverterTool } from "./ui/AnimationConverterTool.js";
 import { DefaultModelUploader } from "./ui/DefaultModelUploader.js";
 import { ActivityLogViewer } from "./ui/ActivityLogViewer.js";
+import { EscapeMenu } from "./ui/EscapeMenu.js";
 import type { UserRole } from "@the-street/shared";
 import * as THREE from "three";
 
@@ -114,9 +115,18 @@ async function init() {
   const daemonChatUI = new DaemonChatUI();
   const daemonDirectoryPanel = new DaemonDirectoryPanel();
   const targetingSystem = new TargetingSystem(streetScene.scene, avatarManager, daemonRenderer);
+  const escapeMenu = new EscapeMenu();
+
+  // Register menu items (order = display order)
+  escapeMenu.addItem("Avatar", "V", () => avatarPanel.toggle());
+  escapeMenu.addItem("Build", "B", () => creationPanel.toggle());
+  escapeMenu.addItem("Gallery", "G", () => galleryPanel.toggle());
+  escapeMenu.addItem("Daemon Directory", "F10", () => daemonDirectoryPanel.toggle());
+  escapeMenu.addItem("Admin", "F9", () => adminPanel.toggle(), () => userRole === "super_admin");
 
   // Block mouse input from reaching the game when UI panels are open
   inputManager.isUIBlocking = () =>
+    escapeMenu.isVisible ||
     avatarPanel.isVisible() ||
     creationPanel.isVisible() ||
     galleryPanel.isVisible() ||
@@ -140,7 +150,8 @@ async function init() {
       const myId = avatarManager.localPlayerId || "";
       if (avatarManager.isEmoting(myId)) {
         avatarManager.stopEmote(myId);
-      } else if (daemonPlacementPanel.isVisible()) { daemonPlacementPanel.hide(); }
+      } else if (escapeMenu.isVisible) { escapeMenu.hide(); }
+      else if (daemonPlacementPanel.isVisible()) { daemonPlacementPanel.hide(); }
       else if (daemonCreationPanel.isVisible()) { daemonCreationPanel.hide(); }
       else if (avatarPanel.isVisible()) { avatarPanel.hide(); }
       else if (daemonPanel.isVisible()) { daemonPanel.hide(); }
@@ -148,7 +159,10 @@ async function init() {
       else if (daemonDirectoryPanel.isVisible) { daemonDirectoryPanel.hide(); }
       else if (creationPanel.isVisible()) { creationPanel.hide(); }
       else if (galleryPanel.isVisible()) { galleryPanel.hide(); }
-      else { targetingSystem.deselect(); }
+      else if (daemonChatUI.isVisible()) { daemonChatUI.hide(); }
+      else if (chatUI.isVisible()) { chatUI.hide(); }
+      else if (targetingSystem.hasTarget) { targetingSystem.deselect(); }
+      else { escapeMenu.toggle(); }
     }
   }, true); // capture phase
 
@@ -215,12 +229,16 @@ async function init() {
       for (const plot of plots) {
         for (let i = 0; i < plot.objects.length; i++) {
           const obj = plot.objects[i];
-          const id = `plot_${plot.uuid}_${i}`;
+          // Use DB id if available, otherwise fall back to synthetic id
+          const id = obj.id || `plot_${plot.uuid}_${i}`;
           objectRenderer.renderObject(id, obj, {
             x: plot.placement.position.x,
             y: 0,
             z: plot.placement.position.z,
           });
+          // Store ownership for delete permission checks
+          const group = objectRenderer.getObjectGroups().get(id);
+          if (group) group.userData.ownerId = plot.ownerId;
         }
       }
       // Spawn daemons from snapshot
@@ -248,8 +266,8 @@ async function init() {
       const displayContent = isEmote ? content.slice(4) : content;
       const msgType = isEmote ? "player-emote" as const : "player" as const;
       chatUI.addMessage(senderId, senderName, displayContent, msgType);
-      // Don't double-show bubble for own messages (already shown on send)
-      if (senderId !== avatarManager.localPlayerId) {
+      // Don't show bubble for emotes or own messages
+      if (senderId !== avatarManager.localPlayerId && !isEmote) {
         avatarManager.showChatBubble(senderId, senderName, displayContent);
       }
     },
@@ -324,34 +342,137 @@ async function init() {
     onPlayerEmote(userId, emoteId) {
       avatarManager.playEmote(userId, emoteId);
     },
+    onDaemonModelUpdate(daemonId, characterUploadId) {
+      daemonRenderer.reloadCustomModel(daemonId, characterUploadId);
+    },
   });
 
-  // Click-to-interact with daemons via raycasting
+  // Left-click selection: daemons, players, and world objects
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
+  let selectedObjectId: string | null = null;
+  let selectedObjectOutline: THREE.Mesh | null = null;
 
-  streetScene.renderer.domElement.addEventListener("click", () => {
-    if (!inputManager.isPointerLocked()) return;
-    if (daemonChatUI.isVisible()) return;
+  const clearObjectSelection = () => {
+    if (selectedObjectOutline) {
+      selectedObjectOutline.parent?.remove(selectedObjectOutline);
+      selectedObjectOutline.geometry.dispose();
+      (selectedObjectOutline.material as THREE.Material).dispose();
+      selectedObjectOutline = null;
+    }
+    selectedObjectId = null;
+  };
 
-    // Screen center for pointer-locked clicks
-    pointer.set(0, 0);
+  inputManager.onLeftClick = (screenX: number, screenY: number) => {
+
+    // Convert screen coords to normalized device coords
+    const rect = streetScene.renderer.domElement.getBoundingClientRect();
+    pointer.x = ((screenX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((screenY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, streetScene.camera);
 
-    // Check daemon meshes
-    const nearbyDaemonIds = daemonRenderer.getDaemonsNear(localPosition, 10);
-    for (const daemonId of nearbyDaemonIds) {
+    const allDaemonIds = daemonRenderer.getAllDaemonIds();
+
+    // --- Check daemons ---
+    let closestDaemon: { id: string; distance: number } | null = null;
+    for (const daemonId of allDaemonIds) {
       const daemonGroup = streetScene.scene.getObjectByName(`daemon_${daemonId}`);
       if (!daemonGroup) continue;
-
       const intersects = raycaster.intersectObject(daemonGroup, true);
-      if (intersects.length > 0) {
-        const name = daemonRenderer.getDaemonName(daemonId) || "NPC";
-        daemonChatUI.show(daemonId, name);
-        // Exit pointer lock so player can type
-        document.exitPointerLock();
-        break;
+      if (intersects.length > 0 && (!closestDaemon || intersects[0].distance < closestDaemon.distance)) {
+        closestDaemon = { id: daemonId, distance: intersects[0].distance };
       }
+    }
+
+    // --- Check players ---
+    let closestPlayer: { id: string; distance: number } | null = null;
+    for (const playerId of avatarManager.getOtherPlayerIds()) {
+      const playerGroup = streetScene.scene.getObjectByName(`avatar_${playerId}`);
+      if (!playerGroup) continue;
+      const intersects = raycaster.intersectObject(playerGroup, true);
+      if (intersects.length > 0 && (!closestPlayer || intersects[0].distance < closestPlayer.distance)) {
+        closestPlayer = { id: playerId, distance: intersects[0].distance };
+      }
+    }
+
+    // --- Check world objects ---
+    const objectGroups = objectRenderer.getObjectGroups();
+    let closestObject: { objectId: string; distance: number } | null = null;
+    for (const [objectId, group] of objectGroups) {
+      const intersects = raycaster.intersectObject(group, true);
+      if (intersects.length > 0 && (!closestObject || intersects[0].distance < closestObject.distance)) {
+        closestObject = { objectId, distance: intersects[0].distance };
+      }
+    }
+
+    // Find the overall closest hit
+    type Hit = { type: "daemon"; id: string; dist: number }
+             | { type: "player"; id: string; dist: number }
+             | { type: "object"; id: string; dist: number };
+    const candidates: Hit[] = [];
+    if (closestDaemon) candidates.push({ type: "daemon", id: closestDaemon.id, dist: closestDaemon.distance });
+    if (closestPlayer) candidates.push({ type: "player", id: closestPlayer.id, dist: closestPlayer.distance });
+    if (closestObject) candidates.push({ type: "object", id: closestObject.objectId, dist: closestObject.distance });
+    candidates.sort((a, b) => a.dist - b.dist);
+
+    const hit = candidates[0] ?? null;
+
+    // Clear previous selection
+    clearObjectSelection();
+
+    if (!hit) {
+      // Clicked empty space → deselect and close daemon chat
+      if (daemonChatUI.isVisible()) daemonChatUI.hide();
+      return;
+    }
+
+    if (hit.type === "daemon") {
+      const name = daemonRenderer.getDaemonName(hit.id) || "NPC";
+      daemonChatUI.show(hit.id, name);
+    } else if (hit.type === "player") {
+      const name = avatarManager.getPlayerName(hit.id) || hit.id;
+      chatUI.addMessage("system", "System", `Selected player: ${name}`, "system");
+    } else if (hit.type === "object") {
+      selectedObjectId = hit.id;
+      const group = objectGroups.get(selectedObjectId)!;
+      const box = new THREE.Box3().setFromObject(group);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const outlineGeo = new THREE.BoxGeometry(size.x + 0.1, size.y + 0.1, size.z + 0.1);
+      const outlineMat = new THREE.MeshBasicMaterial({
+        color: 0xff4444,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.6,
+      });
+      selectedObjectOutline = new THREE.Mesh(outlineGeo, outlineMat);
+      selectedObjectOutline.position.copy(center);
+      streetScene.scene.add(selectedObjectOutline);
+
+      const objName = group.userData.objectName || selectedObjectId;
+      chatUI.addMessage("system", "System", `Selected "${objName}" — press Delete to remove`, "system");
+    }
+  };
+
+  // Delete key removes selected object — requires ownership or super_admin
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Delete" && selectedObjectId) {
+      const group = objectRenderer.getObjectGroups().get(selectedObjectId);
+      const ownerId = group?.userData.ownerId;
+      const localId = avatarManager.localPlayerId;
+      const isOwner = ownerId && localId && ownerId === localId;
+      const isSuperAdmin = userRole === "super_admin";
+
+      if (!isOwner && !isSuperAdmin) {
+        chatUI.addMessage("system", "System", "You don't have permission to delete this object", "system");
+        return;
+      }
+
+      const objName = group?.userData.objectName || selectedObjectId;
+      network.sendObjectRemove(selectedObjectId);
+      objectRenderer.removeObject(selectedObjectId);
+      chatUI.addMessage("system", "System", `Removed "${objName}"`, "system");
+      clearObjectSelection();
     }
   });
 
@@ -392,18 +513,14 @@ async function init() {
   chatUI.onEmote = (verb) => {
     const myId = avatarManager.localPlayerId || "local";
     const emoteText = `${verb}.`;
-    // Show locally as an emote
     chatUI.addMessage(myId, "You", emoteText, "player-emote");
-    avatarManager.showChatBubble(myId, "You", emoteText);
     // Broadcast to other players
     network.sendChat(`/me ${emoteText}`);
   };
   chatUI.onAnimatedEmote = (emoteId, verb) => {
     const myId = avatarManager.localPlayerId || "local";
     const emoteText = `${verb}.`;
-    // Show in chat + bubble
     chatUI.addMessage(myId, "You", emoteText, "player-emote");
-    avatarManager.showChatBubble(myId, "You", emoteText);
     // Play animation locally
     avatarManager.playEmote(myId, emoteId);
     // Broadcast emote to other players (animation) + chat text
@@ -660,6 +777,35 @@ async function init() {
     return daemonRenderer.getAllDaemonStates();
   };
 
+  daemonDirectoryPanel.onFetchAllDaemons = async () => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/all`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.daemons || [];
+    } catch {
+      return [];
+    }
+  };
+
+  daemonDirectoryPanel.onActivateDaemon = async (daemonId) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/activate`, { method: "POST" });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  daemonDirectoryPanel.onDeactivateDaemon = async (daemonId) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/deactivate`, { method: "POST" });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
   daemonDirectoryPanel.onTeleport = (position) => {
     localPosition.set(position.x, position.y, position.z);
     networkManager?.sendMove(position, localRotation);
@@ -715,6 +861,85 @@ async function init() {
     }
   };
 
+  daemonDirectoryPanel.onSendDirective = async (daemonId, directive) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/directive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ directive }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  daemonDirectoryPanel.onRemoveDesire = async (daemonId, index) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/directive`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ index }),
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.desires || [];
+    } catch {
+      return [];
+    }
+  };
+
+  daemonDirectoryPanel.onFetchDesires = async (daemonId) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/desires`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.desires || [];
+    } catch {
+      return [];
+    }
+  };
+
+  daemonDirectoryPanel.onUploadCharacterModel = async (daemonId, file) => {
+    try {
+      const buffer = await file.arrayBuffer();
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/upload-character`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "X-Original-Filename": file.name,
+        },
+        body: buffer,
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  daemonDirectoryPanel.onFetchActivityLog = async (daemonId, limit = 50, cursor) => {
+    try {
+      const params = new URLSearchParams();
+      if (limit) params.set("limit", String(limit));
+      if (cursor) params.set("cursor", cursor);
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/activity-log?${params}`);
+      if (!res.ok) return { entries: [], total: 0 };
+      return res.json();
+    } catch {
+      return { entries: [], total: 0 };
+    }
+  };
+
+  daemonDirectoryPanel.onFetchTokenSummary = async (daemonId) => {
+    try {
+      const res = await authFetch(`${apiUrl}/api/daemons/${daemonId}/token-summary`);
+      if (!res.ok) return { totalTokensIn: 0, totalTokensOut: 0, totalCalls: 0, byModel: {}, byType: {} };
+      return res.json();
+    } catch {
+      return { totalTokensIn: 0, totalTokensOut: 0, totalCalls: 0, byModel: {}, byType: {} };
+    }
+  };
+
   // Animation panel factory for daemon directory detail view
   daemonDirectoryPanel.createAnimationPanel = (daemonId: string) => {
     const panel = new AnimationPanel({
@@ -729,6 +954,43 @@ async function init() {
     };
     return panel;
   };
+
+  // Daemon creation & placement buttons in F10 directory panel
+  const daemonActionBar = document.createElement("div");
+  daemonActionBar.style.cssText = `
+    padding: 8px 20px 4px 20px;
+    display: flex; gap: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  `;
+  const daemonCreateBtn = document.createElement("button");
+  daemonCreateBtn.textContent = "Create Daemon";
+  daemonCreateBtn.style.cssText = `
+    background: rgba(255, 140, 0, 0.15);
+    border: 1px solid rgba(255, 140, 0, 0.4);
+    border-radius: 6px;
+    color: #ff8c00;
+    font-size: 12px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font-family: system-ui, sans-serif;
+  `;
+  daemonCreateBtn.addEventListener("click", () => daemonCreationPanel.toggle());
+  const daemonPlaceBtn = document.createElement("button");
+  daemonPlaceBtn.textContent = "Place Daemon";
+  daemonPlaceBtn.style.cssText = `
+    background: rgba(0, 200, 120, 0.15);
+    border: 1px solid rgba(0, 200, 120, 0.4);
+    border-radius: 6px;
+    color: #00c878;
+    font-size: 12px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font-family: system-ui, sans-serif;
+  `;
+  daemonPlaceBtn.addEventListener("click", () => daemonPlacementPanel.toggle());
+  daemonActionBar.appendChild(daemonCreateBtn);
+  daemonActionBar.appendChild(daemonPlaceBtn);
+  daemonDirectoryPanel.appendSection(daemonActionBar);
 
   async function loadPlotDaemons(plotUuid: string) {
     try {
@@ -1012,6 +1274,10 @@ async function init() {
     }
   };
 
+  daemonCreationPanel.onOpenPlacement = (_daemonId: string) => {
+    daemonPlacementPanel.show();
+  };
+
   // --- Daemon Placement Panel ---
   daemonPlacementPanel.onListPlaceable = async () => {
     const res = await authFetch(`${apiUrl}/api/daemons/placeable`);
@@ -1145,54 +1411,6 @@ async function init() {
       adminPanel.appendSection(activityLogViewer.element);
     })();
 
-    // Daemon creation button in admin panel
-    const daemonCreateSection = document.createElement("div");
-    daemonCreateSection.style.cssText = `
-      padding: 12px 20px;
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
-    `;
-    const daemonCreateBtn = document.createElement("button");
-    daemonCreateBtn.textContent = "Create Daemon (Full Flow)";
-    daemonCreateBtn.style.cssText = `
-      background: rgba(255, 140, 0, 0.15);
-      border: 1px solid rgba(255, 140, 0, 0.4);
-      border-radius: 6px;
-      color: #ff8c00;
-      font-size: 13px;
-      padding: 8px 16px;
-      cursor: pointer;
-      width: 100%;
-      font-family: system-ui, sans-serif;
-    `;
-    daemonCreateBtn.addEventListener("click", () => {
-      daemonCreationPanel.toggle();
-    });
-    daemonCreateSection.appendChild(daemonCreateBtn);
-    adminPanel.appendSection(daemonCreateSection);
-
-    // Daemon placement button in admin panel
-    const daemonPlaceSection = document.createElement("div");
-    daemonPlaceSection.style.cssText = `
-      padding: 4px 20px 12px 20px;
-    `;
-    const daemonPlaceBtn = document.createElement("button");
-    daemonPlaceBtn.textContent = "Place Daemon in World";
-    daemonPlaceBtn.style.cssText = `
-      background: rgba(0, 200, 120, 0.15);
-      border: 1px solid rgba(0, 200, 120, 0.4);
-      border-radius: 6px;
-      color: #00c878;
-      font-size: 13px;
-      padding: 8px 16px;
-      cursor: pointer;
-      width: 100%;
-      font-family: system-ui, sans-serif;
-    `;
-    daemonPlaceBtn.addEventListener("click", () => {
-      daemonPlacementPanel.toggle();
-    });
-    daemonPlaceSection.appendChild(daemonPlaceBtn);
-    adminPanel.appendSection(daemonPlaceSection);
   }
 
   // In dev mode (no auth), always show admin badge + tools
@@ -1232,54 +1450,6 @@ async function init() {
     activityLogViewer.loadDaemons();
     adminPanel.appendSection(activityLogViewer.element);
 
-    // Daemon creation button in admin panel (dev mode)
-    const daemonCreateSectionDev = document.createElement("div");
-    daemonCreateSectionDev.style.cssText = `
-      padding: 12px 20px;
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
-    `;
-    const daemonCreateBtnDev = document.createElement("button");
-    daemonCreateBtnDev.textContent = "Create Daemon (Full Flow)";
-    daemonCreateBtnDev.style.cssText = `
-      background: rgba(255, 140, 0, 0.15);
-      border: 1px solid rgba(255, 140, 0, 0.4);
-      border-radius: 6px;
-      color: #ff8c00;
-      font-size: 13px;
-      padding: 8px 16px;
-      cursor: pointer;
-      width: 100%;
-      font-family: system-ui, sans-serif;
-    `;
-    daemonCreateBtnDev.addEventListener("click", () => {
-      daemonCreationPanel.toggle();
-    });
-    daemonCreateSectionDev.appendChild(daemonCreateBtnDev);
-    adminPanel.appendSection(daemonCreateSectionDev);
-
-    // Daemon placement button in admin panel (dev mode)
-    const daemonPlaceSectionDev = document.createElement("div");
-    daemonPlaceSectionDev.style.cssText = `
-      padding: 4px 20px 12px 20px;
-    `;
-    const daemonPlaceBtnDev = document.createElement("button");
-    daemonPlaceBtnDev.textContent = "Place Daemon in World";
-    daemonPlaceBtnDev.style.cssText = `
-      background: rgba(0, 200, 120, 0.15);
-      border: 1px solid rgba(0, 200, 120, 0.4);
-      border-radius: 6px;
-      color: #00c878;
-      font-size: 13px;
-      padding: 8px 16px;
-      cursor: pointer;
-      width: 100%;
-      font-family: system-ui, sans-serif;
-    `;
-    daemonPlaceBtnDev.addEventListener("click", () => {
-      daemonPlacementPanel.toggle();
-    });
-    daemonPlaceSectionDev.appendChild(daemonPlaceBtnDev);
-    adminPanel.appendSection(daemonPlaceSectionDev);
   }
 
   if (authManager) {
@@ -1510,7 +1680,13 @@ async function init() {
       // else: camera stays at current yaw (free orbit position)
     }
     if (!cameraFreeOrbit) {
-      cameraController.setYaw(localRotation + Math.PI);
+      if (inputManager.isRightMouseDragging()) {
+        // Right-click drag: camera follows character rotation instantly
+        cameraController.snapYaw(localRotation + Math.PI);
+      } else {
+        // Keyboard turning / movement: camera follows smoothly
+        cameraController.setYaw(localRotation + Math.PI);
+      }
     }
     const playerPos = avatarManager.getLocalPlayerPosition();
     if (playerPos) {

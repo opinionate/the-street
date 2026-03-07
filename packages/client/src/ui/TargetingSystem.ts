@@ -98,6 +98,11 @@ export class TargetingSystem {
     this.selectTarget(this.sortedTargets[this.targetIndex]);
   }
 
+  /** Whether a target is currently selected */
+  get hasTarget(): boolean {
+    return this.currentTarget !== null;
+  }
+
   /** Deselect current target */
   deselect(): void {
     this.currentTarget = null;

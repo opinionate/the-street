@@ -123,6 +123,9 @@ export async function generateDaemon(
   if (!beh.interactionRadius || beh.interactionRadius < 3 || beh.interactionRadius > 10) {
     beh.interactionRadius = 5;
   }
+  if (beh.overhearRadius !== undefined && (beh.overhearRadius < 3 || beh.overhearRadius > 30)) {
+    beh.overhearRadius = undefined; // fall back to default (interactionRadius * 1.5)
+  }
   if (beh.greetingMessage && beh.greetingMessage.length > 120) {
     beh.greetingMessage = beh.greetingMessage.slice(0, 120);
   }

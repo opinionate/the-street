@@ -65,6 +65,8 @@ export interface LODLevel {
 }
 
 export interface WorldObject {
+  /** DB primary key (set when loaded from server, absent for new objects) */
+  id?: string;
   name: string;
   description: string;
   tags: string[];
@@ -161,6 +163,7 @@ export interface DaemonBehavior {
   greetingMessage?: string;
   farewellMessage?: string;
   interactionRadius: number;
+  overhearRadius?: number;          // How far away the daemon can hear speech (default: interactionRadius * 1.5)
   responses?: Record<string, string>;
   patrolPath?: Vector3[];
   idleMessages?: string[];
@@ -168,6 +171,7 @@ export interface DaemonBehavior {
   roamRadius?: number;        // Max distance from home (default: full ring)
   homePosition?: Vector3;     // Where to return to when recalled
   canConverseWithDaemons?: boolean; // Can talk to other daemons (default true)
+  aiModel?: string; // Override AI model for speech generation (e.g. "claude-sonnet-4-6")
 }
 
 export interface DaemonDefinition {
@@ -560,7 +564,9 @@ export interface ExpandedManifestFields {
   name: string;
   voiceDescription: string;
   backstory: string;
+  traits: string[];
   interests: string[];
+  quirks: string[];
   dislikes: string[];
   behaviorPreferences: {
     crowdAffinity: number;

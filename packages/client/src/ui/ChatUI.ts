@@ -1,4 +1,4 @@
-export type ChatMessageType = "player" | "player-emote" | "daemon-chat" | "daemon-emote" | "daemon-thought" | "daemon-speech";
+export type ChatMessageType = "player" | "player-emote" | "daemon-emote" | "daemon-thought" | "daemon-speech" | "system";
 
 interface ChatMessage {
   senderId: string;
@@ -14,10 +14,10 @@ const MAX_MESSAGES = 50;
 const TYPE_STYLES: Record<ChatMessageType, { nameColor: string; textColor: string; fontStyle: string }> = {
   "player":        { nameColor: "#ffffff", textColor: "#ffffff",  fontStyle: "normal" },
   "player-emote":  { nameColor: "#dddddd", textColor: "#cccccc",  fontStyle: "italic" },
-  "daemon-chat":   { nameColor: "#66ff99", textColor: "#ccffcc",  fontStyle: "normal" },
   "daemon-emote":  { nameColor: "#999999", textColor: "#aaaaaa",  fontStyle: "italic" },
   "daemon-thought":{ nameColor: "#6699ff", textColor: "#99bbff",  fontStyle: "italic" },
   "daemon-speech": { nameColor: "#44ff88", textColor: "#eeffee",  fontStyle: "normal" },
+  "system":        { nameColor: "#ffaa44", textColor: "#ffcc88",  fontStyle: "italic" },
 };
 
 /** Slash-emote definitions: /command → verb for "[Name] verbs." */
@@ -91,7 +91,7 @@ export class ChatUI {
     // Message list — always visible, scrollable, resizable
     this.messageList = document.createElement("div");
     this.messageList.style.cssText = `
-      height: 220px;
+      height: 440px;
       min-height: 80px;
       max-height: 600px;
       overflow-y: auto;
@@ -103,7 +103,14 @@ export class ChatUI {
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.2) transparent;
       position: relative;
+      display: flex;
+      flex-direction: column;
     `;
+    // Spacer pushes messages to the bottom when few, but shrinks when overflow kicks in
+    const spacer = document.createElement("div");
+    spacer.style.cssText = "flex: 1 1 auto; min-height: 0;";
+    this.messageList.appendChild(spacer);
+
     // Track whether the user has scrolled away from the bottom
     this.messageList.addEventListener("scroll", () => {
       const el = this.messageList;

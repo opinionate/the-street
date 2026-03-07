@@ -300,7 +300,7 @@ async function init() {
     },
     onDaemonChat(daemonId, daemonName, content, _targetUserId, targetDaemonId) {
       daemonRenderer.showDaemonChat(daemonId, daemonName, content, targetDaemonId);
-      chatUI.addMessage(daemonId, daemonName, content, "daemon-chat");
+      chatUI.addMessage(daemonId, daemonName, content, "daemon-speech");
     },
     onDaemonEmote(daemonId, emote, mood) {
       daemonRenderer.showDaemonEmote(daemonId, emote, mood);

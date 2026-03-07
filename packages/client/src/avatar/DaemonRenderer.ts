@@ -418,7 +418,7 @@ export class DaemonRenderer {
   }
 
   /** Load shared Mixamo animation clips for daemon models (cached after first load).
-   *  Loads idle (shared), walk-mixamo, run-mixamo. Strips position tracks. */
+   *  Loads idle (shared), walk-mixamo, run. Strips position tracks. */
   private async ensureAnimClips(): Promise<void> {
     if (this.cachedAnimClips.idle) return;
     if (this.animClipsLoading) { await this.animClipsLoading; return; }
@@ -427,7 +427,7 @@ export class DaemonRenderer {
       const toLoad: Array<{ key: "idle" | "walk" | "run"; urls: string[] }> = [
         { key: "idle", urls: [`${this.apiUrl}/api/avatar/animations/idle`] },
         { key: "walk", urls: [`${this.apiUrl}/api/avatar/animations/walk-mixamo`, `${this.apiUrl}/api/avatar/animations/walk`] },
-        { key: "run",  urls: [`${this.apiUrl}/api/avatar/animations/run-mixamo`, `${this.apiUrl}/api/avatar/animations/run`] },
+        { key: "run",  urls: [`${this.apiUrl}/api/avatar/animations/run`] },
       ];
       for (const { key, urls } of toLoad) {
         for (const url of urls) {
